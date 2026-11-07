@@ -50,12 +50,27 @@ class Trainer:
             min_trusted=int(t.get("min_trusted", 30)), seed=int(req.seed if "seed" in fields else t.get("seed", 7)),
             policy=self.svc.policy_config())
 
+    def feedback_weight(self, req: TrainRequest) -> float:
+        """The up-weight of feedback rows: the request's when it sets one, else rlcd.yaml `train.feedback_weight`
+        (default 5), as for the other training fields."""
+        if "feedback_weight" in req.model_fields_set:
+            return float(req.feedback_weight)
+        raw = self.svc.project.section("train").get("feedback_weight", req.feedback_weight)
+        try:
+            w = float(raw)
+        except (TypeError, ValueError):
+            raise TrainError(f"train.feedback_weight in rlcd.yaml must be a number, got {raw!r}") from None
+        if not 0 < w <= 1000:
+            raise TrainError(f"train.feedback_weight in rlcd.yaml must be in (0, 1000], got {w:g}")
+        return w
+
     def plan(self, req: TrainRequest) -> list[str]:
         specs = self.svc.pack.heads(self.svc.project)
         names = req.heads or list(specs)
         unknown = [h for h in names if h not in specs]
         if unknown:
             raise TrainError(f"unknown heads {unknown}; the '{self.svc.pack.name}' pack defines {list(specs)}")
+        self.feedback_weight(req)
         return names
 
     def start(self, req: TrainRequest | None = None, wait: bool = False) -> dict:
@@ -93,11 +108,17 @@ class Trainer:
             provider = pack.provider(project, None)
             specs = pack.heads(project)
             feedback = svc.logs.feedback()
-            datasets = pack.datasets(project, provider, names, feedback, float(req.feedback_weight))
+            datasets = pack.datasets(project, provider, names, feedback, self.feedback_weight(req))
             for name in names:
                 say(f"training {name}")
                 ds = datasets.get(name)
                 try:
+                    # a head's stakes must be a level the policy defines: a typo in rlcd.yaml fails this head at
+                    # train time instead of every request it would serve
+                    if specs[name].stakes not in cfg.policy.stakes:
+                        raise TrainError(f"{name}: stakes {specs[name].stakes!r} is not a level the policy defines; "
+                                         f"configured: {list(cfg.policy.stakes)} (fix `heads.{name}.stakes` or "
+                                         f"`policy.stakes` in rlcd.yaml)")
                     if ds is None or len(ds) == 0:
                         raise TrainError(f"{name}: no labelled rows (label some first: `rlcd label bootstrap` / "
                                          f"`rlcd label audit`)")

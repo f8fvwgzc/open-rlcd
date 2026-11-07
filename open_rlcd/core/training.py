@@ -9,7 +9,10 @@
     (feedback up-weighted). No class weights, no resampling.
   * each calibrator is fitted on the trusted rows of its fold's calibration block only;
   * the served model is the ensemble of calibrated members: exactly the model the holdout scored;
-  * the holdout is never used for fitting, calibrating, choosing thresholds or the conformal cut.
+  * the holdout is never used for fitting, calibrating, choosing thresholds or the conformal cut;
+  * the conformal threshold / set quantile are chosen on cross-fitted scores: each trusted calibration row is
+    scored by its fold's base model (which never trained on it) and a calibrator fitted on the other half of
+    its block (which never saw it), so the scores are honest out-of-sample scores.
 
 The report carries: holdout calibration metrics against the base-rate forecaster, the block-bootstrap skill
 test, per-stakes policy results, the verdict (strongest tier the evidence allows), the conformal threshold and
@@ -87,6 +90,33 @@ def _conformal_summary(c: dict | None) -> dict | None:
             "set_quantile": (c.get("sets") or {}).get("q"), "reason": sel.get("reason")}
 
 
+def cross_fit_scores(method: str, k: int, raw: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Calibrated probabilities for the rows of one calibration block, each from a calibrator that did not see it.
+
+    The block is split into two halves (alternate rows in block order, so both halves span the block); a
+    calibrator fitted on one half scores the other, and the other way round. These are the scores the conformal
+    threshold and the prediction-set quantile are chosen on: scores from the block's own calibrator would have
+    been fitted to the very rows they score, come out optimistic, and the published coverage / error promise would
+    not hold on new rows. (The served member keeps the calibrator fitted on the whole block.) The split ignores
+    the labels on purpose: stratifying by class makes a row's own label decide the class mix of the half that
+    scores it, which is again optimistic (measured: 4-class sets covered 0.884 instead of 0.9 when stratified).
+    A half that lacks a class gets a calibrator that never saw that class, which only makes the scores more
+    pessimistic, i.e. the promise more conservative."""
+    y = np.asarray(y, int)
+    half = np.arange(len(y)) % 2 == 1
+    out = np.empty((len(y), k))
+    raw = np.asarray(raw, float)
+    for fit_on in (~half, half):
+        score = ~fit_on
+        if not score.any():
+            continue
+        if not fit_on.any():   # a block of one row: nothing to fit on, the uninformed prior is the honest score
+            out[score] = 1.0 / k
+            continue
+        out[score] = C.Calibrator(method, k).fit(raw[fit_on], y[fit_on]).predict(raw[score])
+    return out
+
+
 def _prior(y: np.ndarray, k: int) -> np.ndarray:
     """Base-rate forecast with add-half smoothing (a class never seen in training is not given probability 0)."""
     counts = np.bincount(np.asarray(y, int), minlength=k).astype(float)
@@ -155,13 +185,16 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
     for fi, (tr, ca) in enumerate(folds):
         base = make_base(model_kind, k, params, cfg.seed + fi)
         base.fit(ds.X[tr], ds.y[tr], ds.weight[tr])
-        cal = C.Calibrator(method, k).fit(base.raw(ds.X[ca]), ds.y[ca])
+        raw = base.raw(ds.X[ca])
+        cal = C.Calibrator(method, k).fit(raw, ds.y[ca])   # the served member: calibrated on the whole block
         members.append((base, cal))
         oof_idx.append(ca)
-        oof_P.append(cal.predict(base.raw(ds.X[ca])))
+        # conformal scores must come from rows neither the base model nor the calibrator saw: cross-fit
+        oof_P.append(cross_fit_scores(method, k, raw, ds.y[ca]))
         fold_info.append({"n_train": int(len(tr)), "n_train_trusted": int(ds.trusted[tr].sum()),
                           "n_calibration": int(len(ca))})
-    nan_rate = np.isnan(ds.X[split.dev]).mean(axis=0).round(4).tolist() if split.dev.any() else None
+    # share of development rows missing each feature (NaN or non-finite: the input guard counts both as missing)
+    nan_rate = (~np.isfinite(ds.X[split.dev])).mean(axis=0).round(4).tolist() if split.dev.any() else None
     ensemble = CalibratedEnsemble(spec, members, ds.feature_names, ds.feature_version, nan_rate)
     oof_i = np.concatenate(oof_idx)
     oof = np.vstack(oof_P)

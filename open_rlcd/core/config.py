@@ -1,7 +1,7 @@
 """Project configuration: `rlcd.yaml` (written by `rlcd init`) plus the environment.
 
     name: my-business
-    pack: documents                  # documents | tabular | trading | a dotted path "my_pkg.my_pack:Pack"
+    pack: documents                  # documents | tabular | a dotted path "my_pkg.my_pack:Pack"
     home: ./var                      # RLCD_HOME for this project (models, logs, labels, caches)
     pack_config: {...}               # pack-specific: encoder, data paths, connectors, label sources
     heads:                           # per-head overrides of the pack's defaults

@@ -111,7 +111,7 @@ class Ledger:
     def empty(classes: Sequence[str] = (), model_version: str | None = None) -> dict:
         return {"model_version": model_version, "classes": list(classes),
                 "bins": {c: [[0, 0] for _ in range(BINS)] for c in classes},
-                "holdout_trials": 0, "online_trials": 0, "applied": []}
+                "holdout_trials": 0, "online_trials": 0, "applied": [], "outcomes": {}}
 
     def table(self, head: str) -> dict | None:
         with self._lock:
@@ -125,23 +125,41 @@ class Ledger:
             self._write(data)
 
     def update(self, head: str, decision_id: str, chosen: str, p: float, label: str) -> dict | None:
-        """Score one decision against its realised outcome. Each decision_id counts once per head."""
+        """Score one decision against its realised outcome. Each decision_id counts once per head.
+
+        A later outcome for the same decision_id with a different label is a correction: its count moves from the
+        old cell (win / loss) to the new one, so the ledger keeps the latest outcome, as training does (the latest
+        feedback row per decision_id). The same outcome posted again changes nothing."""
         with self._lock:
             data = self._read()
             t = data.get(head)
             if t is None or chosen not in t["bins"]:
                 return None
-            if decision_id in t["applied"]:
-                return {"updated": False, "reason": "this decision_id was already scored"}
+            outcomes = t.setdefault("outcomes", {})
             k = bin_of(p)
             cell = t["bins"][chosen][k]
-            cell[0 if label == chosen else 1] += 1
+            correct = label == chosen
+            if decision_id in t["applied"]:
+                prev = outcomes.get(decision_id)
+                if prev is None or bool(prev.get("correct")) == correct:
+                    return {"updated": False, "reason": "this decision_id was already scored"}
+                old = t["bins"].get(prev["class"], [[0, 0]] * BINS)[int(prev["bin"])]
+                j = 0 if prev["correct"] else 1
+                old[j] = max(0, int(old[j]) - 1)
+                cell[0 if correct else 1] += 1
+                outcomes[decision_id] = {"class": chosen, "bin": k, "correct": correct}
+                data[head] = t
+                self._write(data)
+                return {"updated": True, "corrected": True, "class": chosen, "bin": k, "wins": cell[0],
+                        "losses": cell[1], "correct": correct}
+            cell[0 if correct else 1] += 1
             t["applied"].append(decision_id)
+            outcomes[decision_id] = {"class": chosen, "bin": k, "correct": correct}
             t["online_trials"] = int(t.get("online_trials", 0)) + 1
             data[head] = t
             self._write(data)
             return {"updated": True, "class": chosen, "bin": k, "wins": cell[0], "losses": cell[1],
-                    "correct": label == chosen}
+                    "correct": correct}
 
 
 def holdout_table(P: np.ndarray, y: np.ndarray, classes: Sequence[str], chosen: np.ndarray,

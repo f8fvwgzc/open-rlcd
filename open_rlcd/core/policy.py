@@ -29,9 +29,15 @@ from typing import Any
 import numpy as np
 
 from . import bernoulli as B
+from .contract import ContractError
 from .metrics import _f, wilson
 
 TIERS = ("escalate", "confirm", "act")  # index = strength; TIERS[0] is renamed to the configured abstain action
+
+
+class UnknownStakes(ContractError, ValueError):
+    """A stakes level the policy does not define: a 422 `validation` error listing the configured levels (still a
+    ValueError for library callers)."""
 
 
 @dataclass(frozen=True)
@@ -55,15 +61,18 @@ def default_stakes() -> dict[str, StakesLevel]:
 @dataclass
 class PolicyConfig:
     stakes: dict[str, StakesLevel] = field(default_factory=default_stakes)
-    abstain: str = "escalate"           # the name of the abstaining action ("hold" in tabular / trading packs)
+    abstain: str = "escalate"           # the name of the abstaining action ("hold" in the tabular pack)
     min_verify_rows: int = 30           # holdout rows (and act-tier rows) needed before act is verified
     gate_min_p_above: float = 0.9       # Bernoulli gate on act
     miscalibration_p: float = 0.05      # act-tier accuracy below its mean prediction at this level -> confirm
 
     def level(self, stakes: str | None, default: str = "medium") -> StakesLevel:
+        """The thresholds of a stakes level. An unknown level (a request's `stakes`, or a head's `stakes` override
+        in rlcd.yaml) is a 422 validation error that lists the configured levels, never a 500."""
         name = stakes or default
         if name not in self.stakes:
-            raise ValueError(f"unknown stakes level {name!r}; configured: {list(self.stakes)}")
+            raise UnknownStakes(f"unknown stakes level {name!r}; configured: {list(self.stakes)}",
+                                stakes=list(self.stakes))
         return self.stakes[name]
 
     def bernoulli(self) -> B.BernoulliConfig:
@@ -179,8 +188,12 @@ def verify(has_skill: bool, n_holdout: int, holdout_eval: dict, cfg: PolicyConfi
 
 def decide(spec: Any, probs: np.ndarray, cfg: PolicyConfig, *, stakes: str | None = None,
            verdict: dict | None = None, conformal_threshold: float | None = None, ledger: dict | None = None,
-           explore: bool = False, rng: np.random.Generator | None = None, calibrated: bool = True) -> dict:
-    """One decision for one head on one row. `probs` in spec.labels order."""
+           explore: bool = False, rng: np.random.Generator | None = None, calibrated: bool = True,
+           missing_inputs: list[str] | None = None) -> dict:
+    """One decision for one head on one row. `probs` in spec.labels order.
+
+    `missing_inputs`: features almost every training row had that this request lacks (the service's input guard).
+    The probabilities were calibrated on inputs that had them, so such a decision is capped at confirm."""
     stakes_name = stakes or spec.stakes
     level = cfg.level(stakes_name)
     P = np.asarray(probs, float).reshape(1, -1)
@@ -195,6 +208,11 @@ def decide(spec: Any, probs: np.ndarray, cfg: PolicyConfig, *, stakes: str | Non
         v = verdict.get(stakes_name) or {}
         if "tier" in v and v["tier"] < cap:
             cap, cap_reason = int(v["tier"]), v["reason"]
+    if calibrated and missing_inputs and cap > 1:
+        shown = ", ".join(list(missing_inputs)[:4])
+        cap, cap_reason = 1, (f"the request lacks {len(missing_inputs)} input feature(s) that almost every training "
+                              f"row had ({shown}): the probabilities were calibrated on inputs that had them, so the "
+                              f"decision is capped at confirm")
     tier = min(raw, cap)
     if cap_reason and raw > cap:
         warnings.append(f"head '{spec.name}': {cap_reason}")

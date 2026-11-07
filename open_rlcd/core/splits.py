@@ -19,6 +19,20 @@ are training-side only, and so are feedback rows that fall in the holdout window
 later than every calibration block, a deliberate exception to "train on the past") and the holdout rows whose
 label window overlaps theirs are removed. A calibration block holding a single class is dropped: a calibrator
 fitted on it would only learn "the other class never happens".
+
+Feedback never makes the holdout easier. A feedback row trains the model, so the item it is about must not be
+scored: in group / row mode a group holding a feedback row stays in development (the holdout walk passes over it
+and takes the next group), and in every mode a labelled row whose feature vector is exactly a training feedback
+row's is treated as the same item (its group stays in development; in time mode the row is removed from the
+holdout). That backstop catches feedback rows whose group was not linked to their item. It applies only when the
+vector identifies one item, i.e. it occurs in the labelled rows of a single group (a single row when there are
+no groups): a vector shared by several groups is a common feature value (low-cardinality tabular data), not a
+fingerprint, and is left alone (the split notes count such rows).
+
+Group mode with timestamps orders groups by their first timestamp: the holdout is the latest groups, but there is
+no time cut inside development (earlier groups keep their rows dated in the holdout period) and no label-window
+purge between groups. The split notes say so; use `ordering: time` when rows of different groups share time
+context.
 """
 from __future__ import annotations
 
@@ -81,6 +95,41 @@ def group_order(keys: np.ndarray, t: np.ndarray | None, seed: int) -> dict[str, 
     return {g: (first.get(g, -1) if t is not None else 0, _hash(seed, g)) for g in set(keys.tolist())}
 
 
+def feedback_twins(ds: Dataset, keys: np.ndarray, train_feedback: np.ndarray) -> tuple[np.ndarray, int]:
+    """(mask of non-feedback rows whose feature vector is exactly that of a training feedback row and identifies
+    one item, number of non-feedback rows whose vector matches a feedback row's but is shared by several groups).
+
+    `keys` is one group key per row (row ids when there are no groups); `train_feedback` marks the feedback rows
+    that train the model. A matching vector identifies an item only when every labelled row carrying it belongs
+    to one group: then that row is taken to be the item the feedback is about."""
+    n = len(ds)
+    twins = np.zeros(n, bool)
+    fb = ds.source == "feedback"
+    if not train_feedback.any() or fb.all():
+        return twins, 0
+    X = np.ascontiguousarray(ds.X, dtype=np.float32)
+    fb_vectors = {X[i].tobytes() for i in np.flatnonzero(train_feedback)}
+    owners: dict[bytes, set] = {}
+    match: list[tuple[int, bytes]] = []
+    for i in np.flatnonzero(~fb):
+        b = X[i].tobytes()
+        if b in fb_vectors:
+            owners.setdefault(b, set()).add(keys[i])
+            match.append((i, b))
+    common = 0
+    for i, b in match:
+        if len(owners[b]) == 1:
+            twins[i] = True
+        else:
+            common += 1
+    return twins, common
+
+
+def _common_note(n: int) -> str:
+    return (f"{n} labelled rows share their exact features with a feedback row, but that feature vector occurs in "
+            f"several groups (a common feature value, not one item): they stay eligible for the holdout")
+
+
 def holdout_split(ds: Dataset, fraction: float = 0.2, mode: str = "auto", seed: int = 7) -> Split:
     mode = resolve_mode(ds, mode)
     # rows a holdout may score: trusted, and sampled representatively (rows an active-learning queue picked for
@@ -114,6 +163,16 @@ def holdout_split(ds: Dataset, fraction: float = 0.2, mode: str = "auto", seed: 
                 holdout &= ~overlap
             notes.append(f"{int(fb_late.sum())} feedback rows fall in the holdout window: they train the model "
                          f"and the holdout rows they overlap were removed")
+        # backstop: a holdout row with exactly the features of a feedback row that trains is the same item
+        keys = ds.group if ds.group is not None else np.asarray([f"row:{i}" for i in ds.ids], dtype=object)
+        twins, common = feedback_twins(ds, keys, dev & (ds.source == "feedback"))
+        tw_hold = holdout & twins
+        if tw_hold.any():
+            holdout &= ~twins
+            notes.append(f"{int(tw_hold.sum())} holdout rows have exactly the features of a feedback row that "
+                         f"trains the model (the same item): they were removed from the holdout")
+        if common:
+            notes.append(_common_note(common))
         purged = int(((~dev) & (~later)).sum())
         dropped = int((later & ~trusted & ~fb_late).sum())
         if dropped:
@@ -133,6 +192,14 @@ def holdout_split(ds: Dataset, fraction: float = 0.2, mode: str = "auto", seed: 
     if total < 2:
         raise NotEnoughData(f"{total} trusted rows: cannot place a holdout")
     want, got, hold_groups = fraction * total, 0, set()
+    # Production outcomes train the model, so the items they are about are never scored: a group holding a feedback
+    # row, or a labelled row with exactly a feedback row's features (the same item, see `feedback_twins`), stays in
+    # development, and the walk takes the next group instead (the holdout keeps its intended size).
+    fb = ds.source == "feedback"
+    touched = set(keys[fb].tolist())
+    twins, common = feedback_twins(ds, keys, fb)
+    touched |= set(keys[twins].tolist())
+    moved = 0   # groups with trusted rows the walk would have held out, kept in development because of feedback
     # Without a time order, a group with no trusted row has nothing to score and no "future" to leak, so it stays
     # in development rather than being swallowed (and dropped) by the walk. With a time order it is dropped:
     # training on it would mean training on the holdout period. Either way the holdout's trusted rows are the same.
@@ -140,18 +207,26 @@ def holdout_split(ds: Dataset, fraction: float = 0.2, mode: str = "auto", seed: 
     for g in reversed(ordered):
         if got >= want:
             break
-        if g in dev_only or (not trusted_per[g] and not time_ordered):
+        if g in dev_only:
+            continue
+        if g in touched:
+            moved += int(trusted_per[g] > 0)
+            continue
+        if not trusted_per[g] and not time_ordered:
             continue
         hold_groups.add(g)
         got += trusted_per[g]
     in_hold = np.isin(keys, list(hold_groups))
-    fb = ds.source == "feedback"
-    fb_hold = in_hold & fb
-    if fb_hold.any() and mode == "group":
-        # a production outcome about a holdout group: keep it for training, take that group out of the holdout
-        touched = set(keys[fb_hold].tolist())
-        in_hold &= ~np.isin(keys, list(touched))
-        notes.append(f"{len(touched)} holdout groups have feedback rows: they were moved to development")
+    if moved:
+        notes.append(f"{moved} holdout groups have feedback rows (or a row with exactly a feedback row's features): "
+                     f"they were moved to development and the holdout took the next groups instead")
+    if common:
+        notes.append(_common_note(common))
+    if time_ordered:
+        notes.append("groups are ordered by their first timestamp and the holdout is the latest groups; development "
+                     "keeps every row of the earlier groups (also rows dated inside the holdout period) and no "
+                     "label-window purge applies between groups. If rows of different groups share time context "
+                     "(a market, a season, a policy change), set `train.ordering: time`")
     holdout = in_hold & trusted
     dev = ~in_hold
     dropped = int((in_hold & ~trusted).sum())

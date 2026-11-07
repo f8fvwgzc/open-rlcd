@@ -1,9 +1,12 @@
 """Domain packs: what a business plugs in.
 
 A pack = YAML (the questions: heads, classes, views, defaults) + a little Python (a FeatureProvider that turns
-request `state` into feature rows, and a way to get labelled rows). Built-in packs: `documents`, `tabular`,
-`trading`. A custom pack is referenced from rlcd.yaml by a dotted path, `pack: my_pkg.my_pack:Pack`
+request `state` into feature rows, and a way to get labelled rows). Built-in packs: `documents`, `tabular`.
+A custom pack is referenced from rlcd.yaml by a dotted path, `pack: my_pkg.my_pack:Pack`
 (that imports your code: only point it at code you trust). See docs/writing-a-pack.md.
+
+Only rlcd.yaml (the project's own configuration) may name code to import. A bundle's `pack.name` is data: the
+service maps it to the project's configured pack (by the pack's `.name`) or to a built-in pack, never to an import.
 
 Every head also accepts a precomputed state `{x, feature_names, feature_version}`; the service checks it
 against the bundle and refuses a mismatch with a 422.
@@ -11,7 +14,8 @@ against the bundle and refuses a mismatch with a 422.
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterable
+import json
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -27,8 +31,9 @@ from ..core.head import HeadSpec
 BUILTIN = {
     "documents": "open_rlcd.packs.documents:DocumentsPack",
     "tabular": "open_rlcd.packs.tabular:TabularPack",
-    "trading": "open_rlcd.packs.trading:TradingPack",
 }
+# what to install when a built-in pack's optional dependencies are missing
+EXTRAS = {"documents": "documents"}
 
 
 @runtime_checkable
@@ -134,8 +139,10 @@ def load_pack(name: str) -> BasePack:
     try:
         return getattr(importlib.import_module(mod), cls)()
     except ImportError as e:
-        raise ImportError(f"pack {name!r} needs a module that is not installed ({e}). For the documents pack: "
-                          f"`uv sync --extra documents` (or `pip install 'open-rlcd[documents]'`).") from e
+        extra = EXTRAS.get(name)
+        hint = (f" Install the pack's extra: `uv sync --extra {extra}` (or `pip install 'open-rlcd[{extra}]'`)."
+                if extra else "" if name in BUILTIN else " Check that the module is importable (PYTHONPATH).")
+        raise ImportError(f"pack {name!r} needs a module that is not installed ({e}).{hint}") from e
 
 
 # ----------------------------------------------------------------------------- shared dataset building
@@ -175,18 +182,36 @@ def _feedback_vector(state: dict, names: list[str], feature_version: str) -> np.
         return None
 
 
+def _state_key(state: Any) -> str | None:
+    """A stable text key of a JSON state (sorted keys), or None when it cannot be serialised."""
+    try:
+        return json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return None
+
+
 def dataset_from_labels(spec: HeadSpec, provider: FeatureProvider, labelled: list[dict],
                         feedback: list[dict] | None = None, feedback_weight: float = 5.0,
-                        notes: list[str] | None = None) -> Dataset:
+                        notes: list[str] | None = None,
+                        group_of: Callable[[Any], str | None] | None = None) -> Dataset:
     """Rows for one head from the label store (`LabelStore.labelled`) plus feedback rows for that head.
 
     Trusted labels (human / ground_truth / synthetic) calibrate and are scored; judge labels only train;
     feedback rows (production outcomes posted to /v1/feedback with a raw state, or with precomputed features of
     the provider's current feature version) train with weight x `feedback_weight`. Only the latest feedback row
     per decision_id counts. Precomputed features of another feature version cannot be re-featurised and are
-    skipped (with a note)."""
+    skipped (with a note).
+
+    Groups. A feedback row carries the group of the item it is about, so the split keeps that item out of the
+    holdout (otherwise its exact twin would train the served model while being scored): `group_of(state)` when
+    the pack gives one (it is also used for labelled items without a group), else the group of the labelled item
+    with an identical state (stable JSON) or, failing that, an identical feature row, when exactly one group has
+    it; otherwise the row is its own group `feedback:<decision_id>`. When no labelled item has a real group, the
+    dataset has no group key at all (`group=None`), so timestamped items get time ordering instead of one
+    singleton group per row."""
     states, y, src, judge_y, groups, ts, ids, w = [], [], [], [], [], [], [], []
     ok: list[bool] = []   # may this row be scored in the holdout (False: picked by an active-learning queue)
+    real_group = False    # does any labelled item carry a group of its own
     skipped = 0
     for r in labelled:
         it = r["item"]
@@ -201,18 +226,22 @@ def dataset_from_labels(spec: HeadSpec, provider: FeatureProvider, labelled: lis
                 jy = spec.label_index(r["judge_label"])
             except ValueError:
                 jy = -1
+        g = it.group or (group_of(it.state) if group_of is not None else None)
+        real_group = real_group or bool(g)
         states.append(it.state)
         y.append(yi)
         src.append(r["source"])
         ok.append(not str(r.get("note") or "").startswith("sample=queue"))
         judge_y.append(jy if r["source"] != "judge" else -1)
-        groups.append(it.group or it.id)
+        groups.append(g or it.id)
         ts.append(-1 if it.t is None else int(it.t))
         ids.append(it.id)
         w.append(1.0)
+    n_items = len(states)
     n_fb = replaced = foreign = 0
     names = provider.names(spec.view)
     vectors: dict[int, np.ndarray] = {}   # row position -> precomputed feature row ({x, feature_version} feedback)
+    fallback: dict[int, str] = {}         # row position -> the feedback row's own group when it links to no item
     fb_rows = [r for r in feedback or [] if r.get("head") == spec.name and r.get("state") is not None]
     # a decision's outcome counts once, as in the Bernoulli ledger: a retried or corrected POST /v1/feedback for
     # the same decision_id replaces the earlier row instead of adding weight
@@ -237,7 +266,8 @@ def dataset_from_labels(spec: HeadSpec, provider: FeatureProvider, labelled: lis
         src.append("feedback")
         ok.append(True)
         judge_y.append(-1)
-        groups.append(f"feedback:{r.get('decision_id') or r.get('id')}")
+        groups.append(None)   # resolved below, once the feature rows exist
+        fallback[len(states) - 1] = f"feedback:{r.get('decision_id') or r.get('id')}"
         t = epoch(r.get("time") or r.get("received_at"))
         ts.append(-1 if t is None else t)
         ids.append(f"feedback:{r.get('id')}")
@@ -263,10 +293,42 @@ def dataset_from_labels(spec: HeadSpec, provider: FeatureProvider, labelled: lis
         X[raw] = provider.transform(spec.view, [states[i] for i in raw])
     for i, v in vectors.items():
         X[i] = v
+    linked = _link_feedback_groups(states, X, groups, n_items, fallback, group_of)
+    if linked and real_group:
+        notes.append(f"{linked} feedback rows are about a labelled item: they share its group, so that item is never "
+                     f"scored in the holdout while its outcome trains the model")
     has_t = any(t >= 0 for t in ts)
     return Dataset(X=X, y=np.asarray(y), feature_names=provider.names(spec.view),
                    feature_version=provider.feature_version, ids=np.asarray(ids, dtype=object),
-                   t=np.asarray(ts) if has_t else None, group=np.asarray(groups, dtype=object),
+                   t=np.asarray(ts) if has_t else None,
+                   group=np.asarray(groups, dtype=object) if real_group else None,
                    weight=np.asarray(w), source=np.asarray(src, dtype=object),
                    judge_y=np.asarray(judge_y) if any(j >= 0 for j in judge_y) else None,
                    feature_groups=provider.groups(spec.view), holdout_ok=np.asarray(ok, bool), notes=notes)
+
+
+def _link_feedback_groups(states: list[Any], X: np.ndarray, groups: list, n_items: int, fallback: dict[int, str],
+                          group_of: Callable[[Any], str | None] | None) -> int:
+    """Fill in the group of each feedback row (positions >= n_items, group None) in place; returns how many were
+    linked to a labelled item's group (by `group_of`, an identical state or an identical feature row)."""
+    by_state: dict[str, set] = {}
+    by_row: dict[bytes, set] = {}
+    for i in range(n_items):
+        k = _state_key(states[i])
+        if k is not None:
+            by_state.setdefault(k, set()).add(groups[i])
+        by_row.setdefault(np.ascontiguousarray(X[i]).tobytes(), set()).add(groups[i])
+    known = set(groups[:n_items])
+    linked = 0
+    for i in range(n_items, len(states)):
+        g = group_of(states[i]) if group_of is not None else None
+        if not g:
+            k = _state_key(states[i])
+            cand = by_state.get(k) if k is not None else None
+            if not cand or len(cand) != 1:
+                cand = by_row.get(np.ascontiguousarray(X[i]).tobytes())
+            g = next(iter(cand)) if cand and len(cand) == 1 else None
+        if g and g in known:
+            linked += 1
+        groups[i] = g or fallback[i]
+    return linked

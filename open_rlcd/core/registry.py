@@ -126,7 +126,8 @@ class Registry:
                         continue
                     if same:
                         h = prev.head(name)
-                        carried[name] = (h.dir, h.entry)
+                        # `trained_in`: the version whose training produced this head (kept as it is carried on)
+                        carried[name] = (h.dir, {**h.entry, "trained_in": h.entry.get("trained_in") or reg["latest"]})
                     else:
                         dropped.append(name)
             if dropped:
@@ -138,15 +139,20 @@ class Registry:
             self._register(reg, vid, meta)
             self._write(reg)
             for name, th in trained.items():   # the Bernoulli ledger restarts from the new holdout
-                self.ledger.reset(name, {**th.ledger, "model_version": vid})
+                self.ledger.reset(name, {**th.ledger, "model_version": vid, "valid_for": [vid]})
             # A carried-over head is the very same model, so its evidence (holdout counts plus the outcomes scored
-            # since) carries over too. Without re-tagging, its table would still name the old version: the
-            # Bernoulli gate would see no evidence (act -> confirm) and feedback would stop updating it.
-            for name, (old_dir, _) in carried.items():
+            # since) carries over too, and the table stays valid for every version that served this head: the
+            # Bernoulli gate keeps its evidence for the new version, and an outcome posted now for a decision made
+            # before the retrain still updates it (`valid_for`, which feedback and the gate check).
+            for name, (old_dir, entry) in carried.items():
                 table = self.ledger.table(name)
-                if not (table and table.get("model_version") == prev_vid):
+                if table and table.get("model_version") == prev_vid:
+                    valid = list(table.get("valid_for") or [prev_vid])
+                else:
                     table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
-                self.ledger.reset(name, {**table, "model_version": vid})
+                    valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
+                valid = list(dict.fromkeys([*valid, vid]))
+                self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
             return vid
 
     # ------------------------------------------------------------------ export / import
@@ -162,20 +168,28 @@ class Registry:
         return dest
 
     def import_(self, src: Path, *, make_latest: bool = True) -> str:
-        """Validate a bundle directory and register it as a new version of this home."""
+        """Validate a bundle directory and register it as a new version of this home.
+
+        The source is validated, then copied without following symlinks (a symlink planted after the first check
+        lands as a symlink, not as the bytes it points at), and the copy is validated again, LightGBM members
+        included (each is parsed in a short-lived subprocess, so a malformed model aborts that subprocess and fails
+        the import instead of crashing the server later). Whatever fails, the copy is removed."""
         src = Path(src).expanduser()
-        meta = BD.validate(src)
+        BD.validate(src)
         with self._lock:
             reg = self.registry()
             vid = f"{MODEL_PREFIX}{int(reg['next'])}"
             dest = self.home / "models" / vid
-            shutil.copytree(src, dest, symlinks=False)
+            if dest.exists():
+                raise BD.BundleError(f"{dest} already exists: refusing to overwrite it")
             try:   # the source could have changed between validate and copy: check what actually landed
-                BD.validate(dest)
-            except BD.BundleError:
+                shutil.copytree(src, dest, symlinks=True)
+                meta = BD.validate(dest, check_models=True)
+            except BaseException:
                 shutil.rmtree(dest, ignore_errors=True)
                 raise
-            meta = {**meta, "version": vid, "imported_from": meta.get("version")}
+            heads = {n: {**e, "trained_in": vid} for n, e in (meta.get("heads") or {}).items()}
+            meta = {**meta, "version": vid, "imported_from": meta.get("version"), "heads": heads}
             (dest / "model.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
             latest_before = reg["latest"]
             self._register(reg, vid, meta, {"imported_from": meta["imported_from"], "imported_at": now_iso()})
@@ -186,7 +200,7 @@ class Registry:
             for name in bundle.names():
                 table = bundle.head(name).holdout_ledger()
                 if make_latest:
-                    self.ledger.reset(name, {**table, "model_version": vid})
+                    self.ledger.reset(name, {**table, "model_version": vid, "valid_for": [vid]})
             return vid
 
 

@@ -5,6 +5,7 @@ records decisions, and takes feedback (immediate Bernoulli update + a training r
 """
 from __future__ import annotations
 
+import contextlib
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,20 @@ def _merge(a: dict, b: dict) -> dict:
     return out
 
 
+def is_precomputed(state: Any) -> bool:
+    """A state is a precomputed feature vector only when it has both `x` and `feature_version` (the rule the packs
+    use at training time): a raw state may well have a feature column called `x`."""
+    return isinstance(state, dict) and "x" in state and "feature_version" in state
+
+
+def table_is_live(table: dict | None, version: str | None) -> bool:
+    """Does a head's Bernoulli table hold the evidence of `version`'s head? A table belongs to the version that
+    trained the head and to every later version that carried that head over unchanged (`valid_for`)."""
+    if not table or not version:
+        return False
+    return table.get("model_version") == version or version in (table.get("valid_for") or [])
+
+
 class Service:
     def __init__(self, project: Project | None = None, home: Any = None, pack: Any = None):
         self.project = project or load_project()
@@ -70,10 +85,15 @@ class Service:
         return self.registry.home
 
     def load_pack(self, name: str):
+        """A pack by the name rlcd.yaml gives it (a built-in name or a `module:Class` path). The instance is cached
+        under that key and under its own `.name`, the name bundles record, so a custom pack is found again when a
+        trained version is served."""
         if name not in self._packs:
             from ..packs.base import load_pack
 
-            self._packs[name] = load_pack(name)
+            pack = load_pack(name)
+            self._packs[name] = pack
+            self._packs.setdefault(str(getattr(pack, "name", name)), pack)
         return self._packs[name]
 
     @property
@@ -92,9 +112,32 @@ class Service:
         return self.registry.bundle(version)
 
     def pack_for(self, version: str):
+        """The pack a version was trained with. A bundle's `pack.name` is data, never an import path: it may only
+        select this project's own configured pack (matched by the pack's `.name`) or a built-in pack; anything else
+        is refused (a bundle shared by someone else must not make this process import and run code)."""
+        from ..packs.base import BUILTIN
+
         b = self.bundle(version)
-        name = ((b.meta.get("pack") or {}).get("name") if b is not None else None) or self._default_pack
-        return self.load_pack(name)
+        name = (b.meta.get("pack") or {}).get("name") if b is not None else None
+        if not name:
+            return self.pack
+        if not isinstance(name, str):
+            raise ContractError(f"model {version}: the bundle's pack name is not a string", kind="bad_bundle",
+                                version=version)
+        try:
+            own = self.pack
+        except Exception:
+            if name in BUILTIN:     # the project's pack cannot load here, but the bundle names a built-in one
+                return self.load_pack(name)
+            raise
+        if name == getattr(own, "name", None):
+            return own
+        if name in BUILTIN:
+            return self.load_pack(name)
+        raise ContractError(f"model {version} was trained with pack {name!r}, which is neither this project's pack "
+                            f"({getattr(own, 'name', self._default_pack)!r}) nor a built-in pack {sorted(BUILTIN)}. A "
+                            f"bundle never names code to import: set `pack:` in rlcd.yaml to the pack it was trained "
+                            f"with", kind="bad_bundle", status=422, version=version)
 
     def specs(self, version: str) -> dict[str, HeadSpec]:
         """The pack's current heads, overlaid by the heads this version was trained with."""
@@ -117,6 +160,11 @@ class Service:
     def loaded(self, version: str, head: str) -> LoadedHead | None:
         b = self.bundle(version)
         return None if b is None else b.head(head)
+
+    def has_skill(self, version: str, head: str) -> bool:
+        """Did the head's trusted holdout show reliable skill over the base rate? False when untrained."""
+        h = self.loaded(version, head)
+        return bool(h is not None and (h.summary.get("metrics") or {}).get("has_skill"))
 
     def provider(self, version: str):
         """The feature provider a version was trained with (rebuilt from the bundle's pack config)."""
@@ -144,7 +192,7 @@ class Service:
         rows: list[np.ndarray | None] = [None] * len(states)
         todo: list[int] = []
         for i, s in enumerate(states):
-            if isinstance(s, dict) and "x" in s:
+            if is_precomputed(s):
                 rows[i] = self._check_vector(spec, s, names, fv)
             else:
                 todo.append(i)
@@ -154,7 +202,14 @@ class Service:
                 raise ContractError(f"head '{spec.name}' ({version}) was trained on feature version '{fv}' but the "
                                     f"configured provider builds '{provider.feature_version}'",
                                     kind="feature_version_mismatch", expected=fv, got=provider.feature_version)
-            X = provider.transform(spec.view, [states[i] for i in todo])
+            try:
+                X = provider.transform(spec.view, [states[i] for i in todo])
+            except ContractError as e:
+                # a state with a vector `x` but no feature_version was most likely meant as precomputed features
+                if any(isinstance(states[i], dict) and isinstance(states[i].get("x"), list) for i in todo):
+                    raise ContractError(f"state.feature_version is required with state.x (a precomputed feature "
+                                        f"vector); read as a raw state instead: {e.message}", head=spec.name) from None
+                raise
             for j, i in enumerate(todo):
                 rows[i] = X[j]
         return np.vstack([np.asarray(r, np.float32).reshape(1, -1) for r in rows])
@@ -182,17 +237,22 @@ class Service:
             raise ContractError("x must contain only numbers or null", kind="bad_feature_vector") from None
 
     def probabilities(self, version: str, spec: HeadSpec, states: list[Any],
-                      warnings: list[str] | None = None) -> tuple[np.ndarray, bool]:
+                      warnings: list[str] | None = None,
+                      missing_out: list[str] | None = None) -> tuple[np.ndarray, bool]:
         """(P (n, K) in spec.labels order, calibrated). An untrained head answers with the uninformed prior.
-        With `warnings`, the input guard adds a warning when the request lacks features that training had."""
+        With `warnings`, the input guard adds a warning when the request lacks features (missing or non-finite) that
+        almost every training row had; `missing_out`, when given, receives those feature names (the policy caps
+        such a decision at confirm)."""
         head = self.loaded(version, spec.name)
         k = len(spec.labels)
         if head is None:
             return np.full((len(states), k), 1.0 / k), False
         X = self.features(version, spec, states, head)
-        if warnings is not None:
+        if warnings is not None or missing_out is not None:
             missing = head.ensemble.missing_inputs(X)
-            if missing:
+            if missing_out is not None:
+                missing_out.extend(m for m in missing if m not in missing_out)
+            if missing and warnings is not None:
                 groups = self.provider(version).groups(spec.view) if missing else {}
                 shown = sorted({groups.get(f, f) for f in missing})
                 msg = (f"head '{spec.name}': the request lacks {len(missing)} input feature(s) that almost every "
@@ -209,7 +269,11 @@ class Service:
             msg = (f"head '{spec.name}' is not trained in {version}: the answer is the uninformed prior "
                    f"(calibrated=false). Train it with `rlcd train` or POST /v1/train.")
         else:
-            v = (self.loaded(version, spec.name).verdict or {}).get(stakes or spec.stakes) or {}
+            verdict = self.loaded(version, spec.name).verdict or {}
+            v = verdict.get(stakes or spec.stakes)
+            if v is None and verdict:   # a stakes level the verdict does not know: warn as for the weakest level
+                v = min(verdict.values(), key=lambda x: x.get("tier", 2))
+            v = v or {}
             if v.get("tier", 2) > 0:
                 return
             msg = f"head '{spec.name}': {v.get('reason')}"
@@ -222,7 +286,7 @@ class Service:
         q.bind(spec)
         P, calibrated = self.probabilities(version, spec, [state], warnings)
         self._warn_head(version, spec, calibrated, warnings)
-        return build_answer(q, spec, P[0], calibrated)
+        return build_answer(q, spec, P[0], calibrated, self.has_skill(version, spec.name))
 
     def systemone(self, req: SystemOneRequest) -> dict:
         t0 = time.perf_counter()
@@ -267,8 +331,9 @@ class Service:
         P, calibrated = self.probabilities(version, spec, states, warnings)   # one batch: the encoder runs once
         self._warn_head(version, spec, calibrated, warnings)
         ranked = []
+        skill = self.has_skill(version, spec.name)
         for c, p in zip(req.candidates, P, strict=True):
-            ans = build_answer(q, spec, p, calibrated)
+            ans = build_answer(q, spec, p, calibrated, skill)
             ranked.append({"id": c.id, "probability": positive_probability(ans, option), "answer": ans})
         # stable: ties keep the request order; a candidate the head does not apply to goes last
         ranked.sort(key=lambda r: -1.0 if r["probability"] is None else r["probability"], reverse=True)
@@ -285,26 +350,35 @@ class Service:
     # ------------------------------------------------------------------ decisions
     def head_decision(self, version: str, spec: HeadSpec, state: Any, *, stakes: str | None = None,
                       explore: bool = False, warnings: list[str] | None = None, probs: np.ndarray | None = None,
-                      calibrated: bool | None = None, explain: bool = True) -> dict:
-        """Answer one head on one state and run it through the policy. Returns {answer, decision, reasons}."""
+                      calibrated: bool | None = None, explain: bool = True,
+                      missing_inputs: list[str] | None = None) -> dict:
+        """Answer one head on one state and run it through the policy. Returns {answer, decision, reasons}.
+
+        A request that lacks inputs almost every training row had (the input guard) is capped at confirm: its
+        probabilities were calibrated on inputs that had them. The answer still says calibrated=true (the head is
+        trained; the wire contract keeps that meaning) and the warning says why. When `probs` are passed in, pass
+        `missing_inputs` too (from `probabilities(..., missing_out=...)`), or the guard cannot cap."""
         if probs is None:
-            P, calibrated = self.probabilities(version, spec, [state], warnings)
+            missing: list[str] = []
+            P, calibrated = self.probabilities(version, spec, [state], warnings, missing_out=missing)
             probs = P[0]
+            if missing_inputs is None:
+                missing_inputs = missing
         head = self.loaded(version, spec.name)
         cfg = self.policy(version)
         table = self.ledger.table(spec.name) if head is not None else None
-        live = table if (table and table.get("model_version") == version) else None
+        live = table if table_is_live(table, version) else None
         d = PL.decide(spec, probs, cfg, stakes=stakes, verdict=head.verdict if head else None,
                       conformal_threshold=head.conformal_threshold if head else None, ledger=live,
-                      explore=explore, rng=self.rng, calibrated=bool(calibrated))
-        ans = build_answer(None, spec, probs, bool(calibrated))
+                      explore=explore, rng=self.rng, calibrated=bool(calibrated), missing_inputs=missing_inputs)
+        ans = build_answer(None, spec, probs, bool(calibrated), self.has_skill(version, spec.name))
         out = {"answer": ans, "decision": d}
         if head is not None and head.set_quantile is not None and spec.type != "noul":
             from .calibration import prediction_set
 
             ks = prediction_set(probs, head.set_quantile) or []
             out["prediction_set"] = [spec.labels[k] for k in ks]
-        if explain and head is not None and isinstance(state, dict) and "x" not in state:
+        if explain and head is not None and isinstance(state, dict) and not is_precomputed(state):
             try:
                 x = self.features(version, spec, [state], head)
                 ci = spec.labels.index(d["class"])
@@ -333,7 +407,10 @@ class Service:
         return self.logs.add_decision({"kind": kind, "model": version, "heads": rec_heads, **(extra or {})})
 
     def decide(self, req: DecideRequest) -> dict:
-        pack = self.pack_for(self.resolve(req.model))
+        version = self.resolve(req.model)
+        if req.stakes is not None:   # an unknown level is a 422 listing the configured ones, before anything runs
+            self.policy(version).level(req.stakes)
+        pack = self.pack_for(version)
         if pack.supports("decide"):
             return pack.decide(self, req.model_dump())
         return self.generic_decide(req)
@@ -363,7 +440,10 @@ class Service:
                           "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}}
 
     def evaluate(self, req: EvaluateRequest) -> dict:
-        pack = self.pack_for(self.resolve(req.model))
+        version = self.resolve(req.model)
+        if req.stakes is not None:
+            self.policy(version).level(req.stakes)
+        pack = self.pack_for(version)
         if not pack.supports("evaluate"):
             raise ContractError(f"pack '{pack.name}' has no evaluator mode", kind="unsupported")
         return pack.evaluate(self, req.model_dump())
@@ -394,7 +474,20 @@ class Service:
                      "source": req.source}
         dh = ((decision or {}).get("heads") or {}).get(head) if decision else None
         if req.x is not None:
-            row.update(state={"x": req.x, "feature_names": req.feature_names, "feature_version": req.feature_version})
+            # a vector is only usable at the next train if it has the current model's feature schema: check it now
+            # instead of promising a training row that every pack would skip
+            if not req.feature_version:
+                raise ContractError("feature_version is required with x (the feature version the vector was built "
+                                    "with; GET /v1/heads lists it)", head=head)
+            loaded = self.loaded(version, head)
+            if loaded is not None:
+                names, fv = loaded.ensemble.feature_names, loaded.ensemble.feature_version
+            else:
+                prov = self.provider(version)
+                names, fv = prov.names(spec.view), prov.feature_version
+            state = {"x": req.x, "feature_names": req.feature_names, "feature_version": req.feature_version}
+            self._check_vector(spec, state, names, fv)
+            row.update(state=state)
         elif req.state is not None:
             row["state"] = req.state
         elif dh is not None and dh.get("state") is not None:
@@ -407,7 +500,9 @@ class Service:
         update = None
         if dh is not None:
             table = self.ledger.table(head)
-            if decision.get("model") and table and decision["model"] == table.get("model_version"):
+            if table is None:
+                update = {"updated": False, "reason": f"head '{head}' is not trained: it has no posterior table yet"}
+            elif table_is_live(table, decision.get("model")):
                 update = self.ledger.update(head, req.decision_id, dh["class"], float(dh["p"]), label)
             else:
                 update = {"updated": False, "reason": "the decision was made by a model version other than the one "
@@ -424,13 +519,14 @@ class Service:
                "decision": spec.decision, "stakes": spec.stakes, "conformal": spec.conformal,
                "description": spec.description, "input": spec.input or self._describe(version, spec.view),
                "model": spec.model, "trained": head is not None, "trained_at": None, "model_version": None,
-               "metrics": None, "verdict": None, "feedback_rows": pending.get(spec.name, 0)}
+               "metrics": None, "verdict": None, "n_train": None, "positive": spec.positive,
+               "feedback_rows": pending.get(spec.name, 0)}
         if spec.type == "score":
             out["legend"] = {str(i): d for i, d in enumerate(spec.legend)}
         if head is not None:
             e = head.entry
             out.update(trained_at=e.get("trained_at"), model_version=version, metrics=e.get("metrics"),
-                       verdict=e.get("verdict"), n_train=(e.get("data") or {}).get("development_rows"),
+                       verdict=head.verdict, n_train=(e.get("data") or {}).get("development_rows"),
                        model=e.get("model"), conformal_threshold=head.conformal_threshold)
         return out
 
@@ -456,8 +552,36 @@ class Service:
             v = reg["versions"][vid]
             data.append({"id": vid, "trained_at": v.get("created_at"), "pack": v.get("pack"),
                          "retrained": v.get("retrained", []), "imported_from": v.get("imported_from"),
-                         "heads": v.get("heads", {})})
+                         "heads": self._version_heads(vid, v.get("heads", {}))})
         return {"data": data}
+
+    def _version_heads(self, vid: str, trained: dict) -> dict:
+        """Every head of a version, as the reference lists them: `trained`, `n_train`, `trained_at`,
+        `model_version` and `metrics` (plus `verdict` and `model`); heads the pack defines but this version never
+        trained are listed with trained=false."""
+        out: dict[str, dict] = {}
+        b = None
+        try:
+            b = self.bundle(vid)
+        except Exception:   # a broken or missing bundle must not take the listing down
+            b = None
+        for name, h in trained.items():
+            entry = ((b.meta.get("heads") or {}).get(name) or {}) if b is not None else {}
+            row = {**h, "trained": True, "model_version": vid,
+                   "n_train": (entry.get("data") or {}).get("development_rows")}
+            loaded = b.head(name) if b is not None else None
+            if loaded is not None:   # the verdict the head enforces (hash-checked head.json), not registry.json's
+                with contextlib.suppress(Exception):
+                    row["verdict"] = loaded.verdict
+            out[name] = row
+        try:
+            names = list(self.specs(vid))
+        except Exception:
+            names = []
+        for name in names:
+            out.setdefault(name, {"trained": False, "n_train": None, "trained_at": None, "model_version": None,
+                                  "metrics": None, "verdict": None, "model": None})
+        return out
 
     def trained(self, head: str, model: str | None) -> tuple[str, HeadSpec, LoadedHead]:
         version = self.resolve(model)
@@ -489,7 +613,7 @@ class Service:
         cfg = self.policy(version)
         level = cfg.level(stakes or spec.stakes)
         table = self.ledger.table(head)
-        live = bool(table and table.get("model_version") == version)
+        live = table_is_live(table, version)
         view = B.table_view(table if live else h.holdout_ledger(), level.min_accuracy, cfg.bernoulli())
         return {"head": head, "model": version, "stakes": stakes or spec.stakes,
                 "required_accuracy": level.min_accuracy, "config": cfg.bernoulli().to_dict(),

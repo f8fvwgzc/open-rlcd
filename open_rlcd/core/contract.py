@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .confidence import choice_confidence, noul_confidence, score_confidence
 
@@ -23,6 +23,9 @@ MIN_SCORE_LEVELS, MAX_SCORE_LEVELS = 2, 10
 MAX_QUESTIONS = 64
 MAX_CANDIDATES = 200
 STAKES = ("low", "medium", "high")
+STAKES_NAME = r"^[A-Za-z0-9_\-]{1,64}$"   # the shape of a stakes level name; the policy says which levels exist
+MAX_FEEDBACK_STATE_BYTES = 2 << 20    # a feedback row is appended to feedback.jsonl: its state is capped
+MAX_FEATURES = 100_000                 # longest precomputed vector `x` a feedback row may carry
 
 
 class ContractError(Exception):
@@ -68,7 +71,9 @@ class DecideRequest(BaseModel):
     model: str | None = None
     state: Any = None
     heads: list[str] | None = None
-    stakes: str | None = Field(None, pattern="^(low|medium|high)$")
+    # any level the policy defines (low / medium / high by default, plus custom ones); an unknown one is a 422 that
+    # lists the configured levels
+    stakes: str | None = Field(None, pattern=STAKES_NAME)
     # Thompson sampling: let a draw from the accuracy posterior decide the Bernoulli gate. Off by default;
     # a decision made this way is labelled as exploration.
     explore: bool = False
@@ -79,20 +84,39 @@ class EvaluateRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     model: str | None = None
     state: Any = None
-    stakes: str | None = Field(None, pattern="^(low|medium|high)$")
+    stakes: str | None = Field(None, pattern=STAKES_NAME)
     explore: bool = False
 
 
 class FeedbackRequest(_Body):
-    decision_id: str | None = None
-    head: str | None = None
+    """An outcome for /v1/feedback. Every row is appended to feedback.jsonl, so its size is capped: the state
+    serialises to at most MAX_FEEDBACK_STATE_BYTES, x has at most MAX_FEATURES values."""
+    decision_id: str | None = Field(None, max_length=200)
+    head: str | None = Field(None, max_length=200)
     state: Any = None
-    x: list[float | None] | None = None
-    feature_names: list[str] | None = None
-    feature_version: str | None = None
+    x: list[float | None] | None = Field(None, max_length=MAX_FEATURES)
+    feature_names: list[str] | None = Field(None, max_length=MAX_FEATURES)
+    feature_version: str | None = Field(None, max_length=200)
     label: Any = None
     weight: float = Field(1.0, gt=0, le=100)
     source: str = Field(..., min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def _bounded(self) -> FeedbackRequest:
+        import json
+
+        for name in ("state", "label"):
+            v = getattr(self, name)
+            if v is None:
+                continue
+            try:
+                size = len(json.dumps(v, separators=(",", ":"), ensure_ascii=False, default=str).encode())
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be JSON") from None
+            if size > MAX_FEEDBACK_STATE_BYTES:
+                raise ValueError(f"{name} is {size} bytes as JSON; at most {MAX_FEEDBACK_STATE_BYTES} are stored "
+                                 f"per feedback row (send the decision_id of a logged decision instead)")
+        return self
 
 
 class TrainRequest(_Body):
@@ -212,14 +236,23 @@ def score_answer(levels: Sequence[str], probabilities: Sequence[float], *, head:
             "confidence": _r(score_confidence(ps)), "head": head, "calibrated": calibrated}
 
 
-def build_answer(question: Question | None, spec: Any, probabilities: Sequence[float], calibrated: bool) -> dict:
-    """`probabilities` are in the order of `spec.labels` (for a noul head: [P(false), P(true)])."""
+def build_answer(question: Question | None, spec: Any, probabilities: Sequence[float], calibrated: bool,
+                 skill: bool | None = None) -> dict:
+    """`probabilities` are in the order of `spec.labels` (for a noul head: [P(false), P(true)]).
+
+    `skill` (open-rlcd extension, additive like `head` and `calibrated`): whether the head's trusted holdout showed
+    reliable skill over the base rate. With `skill: false` the probabilities are still calibrated, but they are
+    base-rate knowledge: do not gate actions on `confidence` alone."""
     if spec.type == "noul":
-        return noul_answer(probabilities[-1], head=spec.name, calibrated=calibrated)
-    if spec.type == "choice":
-        return choice_answer(list(spec.classes), probabilities, head=spec.name, calibrated=calibrated)
-    levels = question.criteria if question is not None and question.criteria is not None else list(spec.legend)
-    return score_answer(levels, probabilities, head=spec.name, calibrated=calibrated)
+        ans = noul_answer(probabilities[-1], head=spec.name, calibrated=calibrated)
+    elif spec.type == "choice":
+        ans = choice_answer(list(spec.classes), probabilities, head=spec.name, calibrated=calibrated)
+    else:
+        levels = question.criteria if question is not None and question.criteria is not None else list(spec.legend)
+        ans = score_answer(levels, probabilities, head=spec.name, calibrated=calibrated)
+    if skill is not None:
+        ans["skill"] = bool(skill)
+    return ans
 
 
 def positive_probability(answer: dict, option: str | None) -> float | None:

@@ -333,13 +333,14 @@ class CalibratedEnsemble:
         self.nan_rate = None if nan_rate is None else [float(v) for v in nan_rate]
 
     def missing_inputs(self, X: np.ndarray, threshold: float = 0.05) -> list[str]:
-        """Features that were present in at least 95% of training rows but are missing (NaN) in any row of X:
-        the probabilities were calibrated on inputs that had them, so they may not hold for this request."""
+        """Features that were present in at least 95% of training rows but are missing in any row of X: NaN, or a
+        non-finite value (JSON `Infinity` / 1e999), which the base models cannot use either and treat as missing.
+        The probabilities were calibrated on inputs that had them, so they may not hold for this request."""
         if self.nan_rate is None:
             return []
         X = np.atleast_2d(np.asarray(X, np.float32))
         rate = np.asarray(self.nan_rate)
-        miss = np.isnan(X).any(axis=0) & (rate < threshold)
+        miss = (~np.isfinite(X)).any(axis=0) & (rate < threshold)
         return [self.feature_names[i] for i in np.flatnonzero(miss)]
 
     @property

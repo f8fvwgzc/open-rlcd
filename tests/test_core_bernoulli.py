@@ -81,8 +81,14 @@ def test_ledger_counts_each_decision_id_once(tmp_path):
     led.reset("h", B.Ledger.empty(["false", "true"], "rlcd-0.1.1"))
     first = led.update("h", "a", "true", 0.87, "true")
     assert first == {"updated": True, "class": "true", "bin": 8, "wins": 1, "losses": 0, "correct": True}
-    again = led.update("h", "a", "true", 0.87, "false")
+    again = led.update("h", "a", "true", 0.87, "true")                       # the same outcome again: no change
     assert again == {"updated": False, "reason": "this decision_id was already scored"}
+    # a corrected outcome replaces the first one (training keeps the latest row per decision_id too)
+    fixed = led.update("h", "a", "true", 0.87, "false")
+    assert fixed == {"updated": True, "corrected": True, "class": "true", "bin": 8, "wins": 0, "losses": 1,
+                     "correct": False}
+    back = led.update("h", "a", "true", 0.87, "true")
+    assert back["corrected"] and back["wins"] == 1 and back["losses"] == 0
     wrong = led.update("h", "b", "true", 0.83, "false")
     assert wrong["updated"] and wrong["wins"] == 1 and wrong["losses"] == 1 and wrong["correct"] is False
     other = led.update("h", "c", "false", 0.62, "false")

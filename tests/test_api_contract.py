@@ -12,9 +12,11 @@ from open_rlcd.core.service import Service
 from open_rlcd.serve.api import create_app
 from tests.toypack import ToyPack
 
-NOUL_KEYS = {"type", "noul", "confidence", "head", "calibrated"}
-CHOICE_KEYS = {"type", "choice", "probabilities", "confidence", "head", "calibrated"}
-SCORE_KEYS = {"type", "score", "legend", "probabilities", "confidence", "head", "calibrated"}
+# The View Engine RLCD answer keys, plus open-rlcd's additive `skill` flag (clients parsing JSON loosely, as the
+# View Engine client does, are unaffected; see docs/contract.md).
+NOUL_KEYS = {"type", "noul", "confidence", "head", "calibrated", "skill"}
+CHOICE_KEYS = {"type", "choice", "probabilities", "confidence", "head", "calibrated", "skill"}
+SCORE_KEYS = {"type", "score", "legend", "probabilities", "confidence", "head", "calibrated", "skill"}
 ALL = {"good": {"type": "noul"}, "color": {"type": "choice"}, "level": {"type": "score"}}
 STATE = {"f": [0.5, -1.0, 0.2, 0.0, 1.0, -0.3]}
 
@@ -47,7 +49,8 @@ def test_untrained_heads_answer_with_the_prior_and_a_warning(client):
     assert body["usage"]["input_tokens"] == 0 and body["usage"]["output_tokens"] == 0
     assert body["usage"]["questions"] == 3
     a = body["answers"]
-    assert a["good"] == {"type": "noul", "noul": 0.5, "confidence": 0.0, "head": "good", "calibrated": False}
+    assert a["good"] == {"type": "noul", "noul": 0.5, "confidence": 0.0, "head": "good", "calibrated": False,
+                         "skill": False}
     assert set(a["color"]) == CHOICE_KEYS and a["color"]["calibrated"] is False and a["color"]["confidence"] == 0
     assert a["color"]["probabilities"] == {c: pytest.approx(1 / 3, abs=1e-6) for c in ("red", "green", "blue")}
     assert set(a["level"]) == SCORE_KEYS and a["level"]["legend"] == {"0": "none", "1": "low", "2": "mid", "3": "high"}
@@ -206,3 +209,39 @@ def test_trained_model_ids_and_alias(trained):
 def test_trained_bad_state_is_a_validation_error(trained):
     r = trained.post("/v1/systemone", json={"state": {"f": [1, 2]}, "questions": ALL})
     assert r.status_code == 422 and r.json()["kind"] == "validation" and "6 numbers" in r.json()["error"]
+
+
+def test_no_skill_heads_say_so_on_every_answer(tmp_path):
+    """A head whose holdout shows no skill still answers with calibrated probabilities, but each answer carries
+    `skill: false`, so a client gating on `confidence` can see that it is base-rate knowledge."""
+    from fastapi.testclient import TestClient
+
+    from open_rlcd.core.config import Project
+    from open_rlcd.core.service import Service
+    from open_rlcd.serve.api import create_app
+    from tests.toypack import ToyPack
+
+    noise = TestClient(create_app(Service(Project(root=tmp_path), home=tmp_path / "var", pack=ToyPack(signal=0.0))))
+    job = noise.post("/v1/train", json={"heads": ["good"]}).json()
+    import time
+    for _ in range(600):
+        if noise.get(f"/v1/train/{job['job_id']}").json()["status"] not in ("queued", "running"):
+            break
+        time.sleep(0.05)
+    r = noise.post("/v1/systemone", json={"state": {"f": [1, 0, 0, 0, 0, 0]},
+                                          "questions": {"g": {"type": "noul", "head": "good"}}}).json()
+    assert r["answers"]["g"]["calibrated"] is True and r["answers"]["g"]["skill"] is False
+    assert any("no skill" in w for w in r["warnings"])
+
+
+def test_unknown_routes_use_the_error_body(client=None):
+    from fastapi.testclient import TestClient
+
+    from open_rlcd.serve.api import create_app
+    from tests.toypack import ToyPack
+
+    c = TestClient(create_app(pack=ToyPack()))
+    r = c.get("/v1/nope")
+    assert r.status_code == 404 and r.json()["kind"] == "not_found" and r.json()["error"]
+    r = c.get("/v1/systemone")
+    assert r.status_code == 405 and r.json()["kind"] == "method_not_allowed"

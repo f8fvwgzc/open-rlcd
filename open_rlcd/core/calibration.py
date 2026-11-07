@@ -15,13 +15,15 @@ top-label ECE 0.07-0.08 vs about 0.03 on a known multinomial generator). Tempera
 Method choice ("auto"): isotonic only when every class has at least `isotonic_min_per_class` rows in every
 calibration block (isotonic overfits small samples), otherwise sigmoid.
 
-Conformal (split-conformal, on rows not used to fit the base model):
+Conformal (split-conformal, on rows used to fit neither the base model nor the calibrator: training passes
+cross-fitted scores, see core.training.cross_fit_scores):
   * selective_threshold   for gate heads: the lowest threshold t on P(true) such that, with probability
                           >= 1 - delta, the error rate among rows with P(true) >= t is <= target_error.
                           Fixed-sequence testing (Learn-then-Test) over thresholds of decreasing strictness,
                           each tested with an exact one-sided binomial test; stops at the first failure.
-  * set_quantile          for choice / score heads: the split-conformal quantile q of 1 - P(true class);
-                          the prediction set {k : 1 - P_k <= q} covers the truth with probability >= 1 - alpha.
+  * set_quantile          for choice / score heads: the split-conformal quantile q of 1 - P(true class), the
+                          ceil((n + 1)(1 - alpha))-th smallest score; the prediction set {k : 1 - P_k <= q}
+                          covers the truth with probability >= 1 - alpha.
 """
 from __future__ import annotations
 
@@ -257,9 +259,12 @@ def set_quantile(p_true: np.ndarray, alpha: float) -> dict:
     n = len(s)
     if n == 0:
         return {"alpha": alpha, "q": None, "n_calibration": 0}
-    level = math.ceil((n + 1) * (1 - alpha)) / n
-    q = 1.0 if level > 1 else float(np.quantile(s, level, method="higher"))
-    return {"alpha": alpha, "q": round(q, 6), "n_calibration": int(n),
+    # the m-th smallest score, m = ceil((n + 1)(1 - alpha)): the standard split-conformal order statistic. With
+    # m > n no finite quantile qualifies and every class is kept (q = 1). q is stored unrounded: rounding it down
+    # could leave out a score that sits exactly at the quantile.
+    m = math.ceil((n + 1) * (1 - alpha) - 1e-9)
+    q = 1.0 if m > n else float(np.sort(s)[max(m, 1) - 1])
+    return {"alpha": alpha, "q": q, "n_calibration": int(n),
             "method": "split-conformal: prediction set {k : 1 - P_k <= q}"}
 
 

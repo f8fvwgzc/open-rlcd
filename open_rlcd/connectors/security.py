@@ -14,7 +14,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
 HINT = "set RLCD_ALLOW_REMOTE=1 or security.allow_remote: true in rlcd.yaml to allow it"
@@ -38,14 +38,23 @@ def is_loopback(host: str) -> bool:
 
 
 def _host_of(target: str) -> str:
-    """The host a URL / DSN / `host:port` / socket path points at; "unix" for unix sockets."""
+    """The host a URL / DSN / `host:port` / socket path points at; "unix" for unix sockets.
+
+    Only an explicit filesystem path (`/run/x.sock`, `./x.sock`, `~/x.sock`), a `unix:` scheme without a network
+    host (`unix:///run/x.sock`, `http+unix://%2Frun%2Fx.sock/`) or a libpq `?host=/dir` counts as a unix socket.
+    A name ending in `.sock` is a host name like any other: `http://evil.example/x.sock` points at evil.example,
+    and a bare `x.sock` or `run/x.sock` is read as a host (write `./run/x.sock` for a relative socket path)."""
     s = target.strip()
-    if s.startswith(("/", "./", "../", "~")) or s.endswith(".sock"):
+    if s.startswith(("/", "./", "../", "~")):
         return "unix"
     if "://" in s:
         u = urlparse(s)
-        if "unix" in u.scheme.lower():
-            return "unix"
+        if "unix" in u.scheme.lower().split("+"):
+            # a unix-socket scheme: the "host" part, when there is one, is the percent-encoded socket path
+            netloc = unquote(u.netloc)
+            if not netloc or netloc.startswith(("/", "./", "../", "~")):
+                return "unix"
+            return u.hostname or ""
         if u.hostname:
             return u.hostname
         q = parse_qs(u.query).get("host")        # libpq style: postgresql:///db?host=/var/run/postgresql
