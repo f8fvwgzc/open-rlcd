@@ -174,10 +174,13 @@ class Dataset:
    base model trains on every development row of its train side (weak + trusted + feedback, weighted); its
    calibrator is fitted on the **trusted** rows of its calibration block only.
 3. **Method**: `sigmoid` unless every class has >= `isotonic_min_per_class` (3000) trusted rows in every
-   calibration block, then `isotonic`; `temperature` on request. Served model = the fold ensemble (average of
-   calibrated members).
+   calibration block, then `isotonic`; `temperature` on request. Served model = the fold ensemble, pooled
+   geometrically (the plain average of calibrated members is underconfident when they disagree; measured on
+   known generators the log-linear pool lowers ECE with equal or better log loss).
 4. **Holdout report**: `metrics.calibration_report` against the base-rate forecaster (trusted development class
-   frequencies, per segment when segments exist), block-bootstrap skill test, policy evaluation per stakes
+   frequencies, per segment when segments exist), block-bootstrap skill test (the gain must be reliably positive
+   both over the training base rate and over the holdout's own class frequencies, which no constant forecast can
+   beat), policy evaluation per stakes
    level, `verify` -> `verdict {max_tier, reason}`, conformal threshold (dev OOF) + holdout check, judge
    agreement, Bernoulli holdout table, data card.
 

@@ -183,6 +183,15 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
                          "rows (pooled when the segment has fewer than 50); add-half smoothing")
     blocks = S.skill_blocks(ds, h_idx, mode)
     report = M.calibration_report(Ph, yh, labels, prior, baseline_note, blocks, cfg.seed)
+    # a holdout whose class mix differs strongly from training measures a different problem: say so
+    train_rates = np.bincount(ds.y[dev_trusted], minlength=k) / max(1, int(dev_trusted.sum()))
+    hold_rates = np.bincount(yh, minlength=k) / n_hold
+    shifted = [f"{labels[c]}: training {train_rates[c]:.3f}, holdout {hold_rates[c]:.3f}" for c in range(k)
+               if max(train_rates[c], hold_rates[c]) >= 0.05
+               and min(train_rates[c], hold_rates[c]) < max(train_rates[c], hold_rates[c]) / 3]
+    if shifted:
+        notes.append("the holdout's class mix differs strongly from training (" + "; ".join(shifted) + "): its "
+                     "metrics describe that mix. Check the group / time split, or add trusted rows of the rare class")
 
     # ------------------------------------------------------------------ conformal
     conformal = None

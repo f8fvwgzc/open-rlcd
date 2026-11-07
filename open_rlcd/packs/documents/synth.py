@@ -532,6 +532,7 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
     gen = Generator(world, seed)
     rng = random.Random(f"labels:{seed}")
     t_rng = random.Random(f"time:{seed}")
+    births: dict[str, float] = {}
     items: list[LabelItem] = []
     labels: list[tuple[str, str, Any]] = []
     langs: dict[str, int] = {}
@@ -539,7 +540,13 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
     for i in range(int(n_queries)):
         q = gen.query()
         qid = f"syn{seed}-{i:05d}"
-        t = T0 + int(t_rng.uniform(0, SPAN_DAYS) * DAY)
+        # Each template is "born" at a random moment and its rows follow within two weeks, like real groups
+        # (a ticket, a session, a document) live in a short window. Random row times with template groups would
+        # bias a time-ordered group holdout towards rare templates (the latest first-seen groups) and skew its
+        # class mix away from training.
+        if q.template not in births:
+            births[q.template] = random.Random(f"birth:{seed}:{q.template}").uniform(0, SPAN_DAYS - 14)
+        t = T0 + int((births[q.template] + t_rng.uniform(0, 14)) * DAY)
         now = _iso(t)
         langs[q.lang] = langs.get(q.lang, 0) + 1
         raw = candidates(corpus, q.text, DEFAULT_RETRIEVE_K)
