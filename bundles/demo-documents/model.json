@@ -1,0 +1,1306 @@
+{
+ "format": "open-rlcd-bundle/1",
+ "version": "rlcd-0.1.1",
+ "created_at": "2026-11-07T13:39:11Z",
+ "pack": {
+  "name": "documents",
+  "version": "0.1.0",
+  "config": {
+   "encoder": {
+    "kind": "hashing",
+    "id": "hashing-256-s0",
+    "dim": 256,
+    "sha256": "0b1d19ee81e5e56effe31745a2d2f154094555ec2e892b8b77e8c3de64ec7369",
+    "seed": 0
+   },
+   "views": {
+    "query": 307,
+    "query_chunk": 282,
+    "query_evidence": 288,
+    "query_evidence_answer": 279
+   },
+   "version": 1
+  }
+ },
+ "feature_version": "documents-v1:hashing-256-s0:0b1d19ee81e5",
+ "encoder": {
+  "kind": "hashing",
+  "id": "hashing-256-s0",
+  "dim": 256,
+  "sha256": "0b1d19ee81e5e56effe31745a2d2f154094555ec2e892b8b77e8c3de64ec7369",
+  "seed": 0
+ },
+ "policy": {
+  "stakes": {
+   "low": {
+    "act": 0.7,
+    "confirm": 0.5,
+    "min_accuracy": 0.6
+   },
+   "medium": {
+    "act": 0.85,
+    "confirm": 0.65,
+    "min_accuracy": 0.75
+   },
+   "high": {
+    "act": 0.95,
+    "confirm": 0.8,
+    "min_accuracy": 0.9
+   }
+  },
+  "abstain": "escalate",
+  "min_verify_rows": 30,
+  "gate_min_p_above": 0.9,
+  "miscalibration_p": 0.05
+ },
+ "retrained": [
+  "answerable",
+  "chunk_relevant",
+  "complete",
+  "grounded",
+  "needs_graph",
+  "response_type",
+  "risk_tier",
+  "route"
+ ],
+ "heads": {
+  "response_type": {
+   "head": "response_type",
+   "type": "choice",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 180,
+    "brier": 0.237133,
+    "log_loss": 0.536379,
+    "accuracy": 0.855556,
+    "ece": 0.075524,
+    "brier_skill_score": 0.711158,
+    "baseline_brier": 0.820981,
+    "baseline_log_loss": 1.904903,
+    "baseline_accuracy": 0.366667,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.459868,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "act",
+     "medium": "act",
+     "high": "confirm"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 138 act-tier rows at low stakes, accuracy 0.927536 (95% Wilson 0.871749-0.960166) against a mean prediction of 0.880986"
+    },
+    "medium": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 97 act-tier rows at medium stakes, accuracy 0.958763 (95% Wilson 0.898725-0.983849) against a mean prediction of 0.914816"
+    },
+    "high": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "only 11 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 0 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 564,
+      "n_train_trusted": 564,
+      "n_calibration": 156
+     },
+     {
+      "n_train": 568,
+      "n_train_trusted": 568,
+      "n_calibration": 152
+     },
+     {
+      "n_train": 571,
+      "n_train_trusted": 571,
+      "n_calibration": 149
+     },
+     {
+      "n_train": 593,
+      "n_train_trusted": 593,
+      "n_calibration": 127
+     },
+     {
+      "n_train": 584,
+      "n_train_trusted": 584,
+      "n_calibration": 136
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "notes": [
+    "the holdout's class mix differs strongly from training (clarify_question: training 0.065, holdout 0.011): its metrics describe that mix. Check the group / time split, or add trusted rows of the rare class"
+   ],
+   "spec": {
+    "name": "response_type",
+    "type": "choice",
+    "classes": [
+     "direct_answer",
+     "extract_fields",
+     "summarize",
+     "compare",
+     "list",
+     "clarify_question",
+     "escalate_human",
+     "out_of_scope"
+    ],
+    "view": "query",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "What kind of response does this request need? Judge the request itself, not whether the documents contain the answer: a question about a product that does not exist is still a direct_answer (the gatekeeper `answerable` catches it). Pick clarify_question only when the request does not name what it is about.",
+    "input": {},
+    "params": {},
+    "levels": [
+     "a short factual answer to one question (a price, a date, a name, a number)",
+     "several named fields pulled out of the documents (e.g. SKU, price and warranty of one product)",
+     "a summary or overview of a document, policy, product or team",
+     "a comparison of two or more things (differences, which is cheaper / heavier / longer)",
+     "an enumeration of all items that match (all products of a team, all teams of a department)",
+     "the request is too ambiguous to answer (it does not say what it is about): ask a clarifying question",
+     "a person must handle it: complaints, legal threats or questions, requests for personal data",
+     "unrelated to the organisation's documents (weather, sports, recipes, general chit-chat)"
+    ],
+    "positive": null
+   },
+   "dir": "heads/response_type",
+   "files": {
+    "member_0.safetensors": "ed2b04958999821ac653f3d358625e4753878387ffa49822b6a11824d1570e4e",
+    "member_1.safetensors": "95dc268fded83abc23c0d3f2517f06969c6f2b1c67b9a9130ec8ea1ca9e33708",
+    "member_2.safetensors": "728503f46632ab0ec89276668623ba748b42cd32f2586228f10fe0730b07ebf3",
+    "member_3.safetensors": "a086126582684a3cc6c904fedb37c86455550506ea71d7961a82fff4d5240a18",
+    "member_4.safetensors": "a63648e099ceb4a55099ef82c67ca26216c13acc7172a6eb2a8a35ca52933bdd",
+    "ensemble.json": "374262d046b110066dc7f5ff30781ed2927e547520e8ef407e856ff8e2405c11",
+    "head.json": "fefdc66e8e2445c692e16fa38fbf3192a7138d47a2967a75c3d8f3167e25c96f",
+    "report.json": "4120dca28bf1cf1f4d747c98793a47bfe3167aae435cda755d33d69f33d5f5bc",
+    "bernoulli.json": "4cd6bd9f596e7ba483e7b3b8ebaeaa5c0b4e06be1b386c98047b364b30c8176c"
+   }
+  },
+  "route": {
+   "head": "route",
+   "type": "choice",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 180,
+    "brier": 0.256883,
+    "log_loss": 0.451449,
+    "accuracy": 0.822222,
+    "ece": 0.066957,
+    "brier_skill_score": 0.603333,
+    "baseline_brier": 0.647603,
+    "baseline_log_loss": 1.210835,
+    "baseline_accuracy": 0.527778,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.287507,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "act",
+     "medium": "act",
+     "high": "act"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 143 act-tier rows at low stakes, accuracy 0.881119 (95% Wilson 0.81786-0.924437) against a mean prediction of 0.882098"
+    },
+    "medium": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 97 act-tier rows at medium stakes, accuracy 0.989691 (95% Wilson 0.943895-0.998178) against a mean prediction of 0.933355"
+    },
+    "high": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 36 act-tier rows at high stakes, accuracy 1.0 (95% Wilson 0.903581-1.0) against a mean prediction of 0.97641"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 13 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 564,
+      "n_train_trusted": 564,
+      "n_calibration": 156
+     },
+     {
+      "n_train": 568,
+      "n_train_trusted": 568,
+      "n_calibration": 152
+     },
+     {
+      "n_train": 571,
+      "n_train_trusted": 571,
+      "n_calibration": 149
+     },
+     {
+      "n_train": 593,
+      "n_train_trusted": 593,
+      "n_calibration": 127
+     },
+     {
+      "n_train": 584,
+      "n_train_trusted": 584,
+      "n_calibration": 136
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "route",
+    "type": "choice",
+    "classes": [
+     "vector",
+     "graph",
+     "hybrid",
+     "none"
+    ],
+    "view": "query",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "Which retrieval route should answer this request? vector for a single-document lookup, graph for multi-hop relations between entities, hybrid for comparisons and lists that gather several documents, none when no retrieval should run at all.",
+    "input": {},
+    "params": {},
+    "levels": [
+     "one passage of one document answers it (semantic / keyword lookup)",
+     "the answer needs a chain of links across documents or entities (product -> owning team -> team lead)",
+     "several documents must be gathered side by side (comparisons, lists across documents)",
+     "no retrieval should run (clarify, escalate to a human, or out of scope)"
+    ],
+    "positive": null
+   },
+   "dir": "heads/route",
+   "files": {
+    "member_0.safetensors": "5e5eabcdf6ac9303c85082edffaaf7115feb139cd9f57185d4fc855305b34271",
+    "member_1.safetensors": "0a3ae89b99e9b3dd1a68bd144eb733840890f9d9b770feec53f48db2a78aa78c",
+    "member_2.safetensors": "e154959d8b29ba68f887c0bc7e90a30f67cad586b2273dc1199f20c03d1b7e01",
+    "member_3.safetensors": "254a54708151ec24999117de1f2fb01de45a5fe5a5a2522475c584c27740fd9f",
+    "member_4.safetensors": "2dbf640c27322a8191478bd6582b9a3b618c8b8bb7ae3c3a636aaafc77f26eac",
+    "ensemble.json": "6824f088cd32f59a258a1ada7059fd403c2fbb8b798d1a75cb55abd37038f081",
+    "head.json": "a1f85999ca2f74ccfbdafb9b5e8d2d10e7884e53626944a226dbdd9289dd00b8",
+    "report.json": "d5740f1a88e57b3d6073d7730ee17ff33fa64dc094ce0f715be1fafaa03f8f77",
+    "bernoulli.json": "b24ce4be7cfde50cf639a0089f03606c9c31251fe2d479f77f29a4966979362f"
+   }
+  },
+  "needs_graph": {
+   "head": "needs_graph",
+   "type": "noul",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 180,
+    "brier": 0.127543,
+    "log_loss": 0.202561,
+    "accuracy": 0.922222,
+    "ece": 0.031343,
+    "brier_skill_score": 0.515601,
+    "baseline_brier": 0.263302,
+    "baseline_log_loss": 0.43328,
+    "baseline_accuracy": 0.844444,
+    "has_skill": false,
+    "brier_gain_lower_95": 0.011416,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "escalate",
+     "medium": "escalate",
+     "high": "escalate"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "escalate",
+     "tier": 0,
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    },
+    "medium": {
+     "max_tier": "escalate",
+     "tier": 0,
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    },
+    "high": {
+     "max_tier": "escalate",
+     "tier": 0,
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 18 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 564,
+      "n_train_trusted": 564,
+      "n_calibration": 156
+     },
+     {
+      "n_train": 568,
+      "n_train_trusted": 568,
+      "n_calibration": 152
+     },
+     {
+      "n_train": 571,
+      "n_train_trusted": 571,
+      "n_calibration": 149
+     },
+     {
+      "n_train": 593,
+      "n_train_trusted": 593,
+      "n_calibration": 127
+     },
+     {
+      "n_train": 584,
+      "n_train_trusted": 584,
+      "n_calibration": 136
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "needs_graph",
+    "type": "noul",
+    "classes": [],
+    "view": "query",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "Does answering this request need multi-hop traversal across linked documents or entities?",
+    "input": {},
+    "params": {},
+    "levels": [],
+    "positive": "answering needs multi-hop traversal across linked documents or entities (the answer is not in any single document; e.g. \"who leads the team that owns product X?\")"
+   },
+   "dir": "heads/needs_graph",
+   "files": {
+    "member_0.safetensors": "ca4b705b832d4721465a5a6833c1de6c2aca0ea24c17d971121c65640b682f5a",
+    "member_1.safetensors": "705662288afadfd6a3a6720f143e10ebf0ba18654cd3c5d12afd6e57eb84ed7b",
+    "member_2.safetensors": "0ddfd86a3e4e60ed434073567998a4e9338a5921b31a8d43109b0c3f2a3d9d40",
+    "member_3.safetensors": "31065f82739d44c3313dea950ac32af5ae81e5eb9fdee93736f6685f25cadc39",
+    "member_4.safetensors": "ae57102a34f715330332f5f427811408b497b08481ef54d443d14463ed6e465a",
+    "ensemble.json": "c03efd398a08d1ad2e504e9e9c76d09509e9d810e7a7a034671bbb8851237797",
+    "head.json": "f516d96a1195197b65d1281936bb8544c86d4cf5d21bc1ffab9dff8ccb34b139",
+    "report.json": "27b06519dd1bf905325e3ea716fb0d3d162ec51b5c23396af2d950bad78c95c0",
+    "bernoulli.json": "af3e048f14e8df9ca8233a34752277ff1b9b851d6a37feaf4f4dfce07c297af4"
+   }
+  },
+  "chunk_relevant": {
+   "head": "chunk_relevant",
+   "type": "noul",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 737,
+    "brier": 0.243959,
+    "log_loss": 0.377123,
+    "accuracy": 0.8019,
+    "ece": 0.046662,
+    "brier_skill_score": 0.428431,
+    "baseline_brier": 0.426824,
+    "baseline_log_loss": 0.618559,
+    "baseline_accuracy": 0.694708,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.15996,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "act",
+     "medium": "act",
+     "high": "act"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 562 act-tier rows at low stakes, accuracy 0.898577 (95% Wilson 0.87085-0.920891) against a mean prediction of 0.902064"
+    },
+    "medium": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 412 act-tier rows at medium stakes, accuracy 0.946602 (95% Wilson 0.920477-0.964475) against a mean prediction of 0.94654"
+    },
+    "high": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 226 act-tier rows at high stakes, accuracy 0.986726 (95% Wilson 0.961706-0.995475) against a mean prediction of 0.978351"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 130 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 2224,
+      "n_train_trusted": 2224,
+      "n_calibration": 670
+     },
+     {
+      "n_train": 2276,
+      "n_train_trusted": 2276,
+      "n_calibration": 618
+     },
+     {
+      "n_train": 2321,
+      "n_train_trusted": 2321,
+      "n_calibration": 573
+     },
+     {
+      "n_train": 2352,
+      "n_train_trusted": 2352,
+      "n_calibration": 542
+     },
+     {
+      "n_train": 2403,
+      "n_train_trusted": 2403,
+      "n_calibration": 491
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 3631,
+    "trusted": 3631,
+    "by_source": {
+     "synthetic": 3631
+    },
+    "groups": 263,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 2894,
+    "development_trusted": 2894,
+    "holdout_rows": 737,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 51,
+     "groups": 263
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "chunk_relevant",
+    "type": "noul",
+    "classes": [],
+    "view": "query_chunk",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "Does this retrieved chunk contain information needed to answer the request?",
+    "input": {},
+    "params": {},
+    "levels": [],
+    "positive": "this chunk contains information needed to answer the request (a chunk about a similar but different entity, or one that only shares words with the request, is false)"
+   },
+   "dir": "heads/chunk_relevant",
+   "files": {
+    "member_0.safetensors": "bd408f5e4a761b3eacab312871a835e318c993dd28bcea11ce0bf94bc21c3b97",
+    "member_1.safetensors": "abcb1c453a7f4b9c1d963f455bcfe2ff2e247920412eb0cadef55a5f0b2009cb",
+    "member_2.safetensors": "6bdeaba1f001f15d6d646e325e150d7aad728129bfb3a34ebf4c9398e79352bf",
+    "member_3.safetensors": "ef768e96cd03bb30f8c818aea03813d238fc4660091a56828510fb4f9a9eefdf",
+    "member_4.safetensors": "b2a8da32807ae98d0288c72e390df9ad3ff2f6f1dca88195ab44664f274a18ed",
+    "ensemble.json": "85ed5ce4e2210acc97667a8155aad263a556a50aff8d670d57e0d08e1a4af4ea",
+    "head.json": "cdb4580786657800ac2249b766cfcb3782fe5435a8e023fa5a1bac3309715593",
+    "report.json": "426e8aab2f312101c322b9d5769ebf71258a4958a0a00f34e019a39c08e65193",
+    "bernoulli.json": "6592b6d11b3b475b3f2a01ab49a9f7f52e1181943ccf5e55c18a1d7d66dc6758"
+   }
+  },
+  "answerable": {
+   "head": "answerable",
+   "type": "noul",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 249,
+    "brier": 0.428274,
+    "log_loss": 0.615956,
+    "accuracy": 0.638554,
+    "ece": 0.072596,
+    "brier_skill_score": 0.139373,
+    "baseline_brier": 0.49763,
+    "baseline_log_loss": 0.690776,
+    "baseline_accuracy": 0.554217,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.030595,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "confirm",
+     "medium": "confirm",
+     "high": "confirm"
+    },
+    "conformal_threshold": null
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "act-tier rows at low stakes came true 0.722222 of the time against a mean prediction of 0.824277 (one-sided p = 0.021227): the probabilities overstate; decisions are capped at confirm"
+    },
+    "medium": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "only 25 act-tier rows at medium stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+    },
+    "high": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "only 7 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 85 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 754,
+      "n_train_trusted": 754,
+      "n_calibration": 218
+     },
+     {
+      "n_train": 762,
+      "n_train_trusted": 762,
+      "n_calibration": 210
+     },
+     {
+      "n_train": 774,
+      "n_train_trusted": 774,
+      "n_calibration": 198
+     },
+     {
+      "n_train": 796,
+      "n_train_trusted": 796,
+      "n_calibration": 176
+     },
+     {
+      "n_train": 802,
+      "n_train_trusted": 802,
+      "n_calibration": 170
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": {
+    "target_error": 0.05,
+    "threshold": null,
+    "coverage_dev": null,
+    "holdout": {
+     "n": 249,
+     "n_selected": 0,
+     "coverage": null,
+     "error_rate": null
+    },
+    "set_quantile": null,
+    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 972 calibration rows"
+   },
+   "data": {
+    "rows": 1221,
+    "trusted": 1221,
+    "by_source": {
+     "synthetic": 1221
+    },
+    "groups": 262,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 972,
+    "development_trusted": 972,
+    "holdout_rows": 249,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 53,
+     "groups": 262
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "answerable",
+    "type": "noul",
+    "classes": [],
+    "view": "query_evidence",
+    "model": "logreg",
+    "decision": "gate",
+    "stakes": "medium",
+    "conformal": 0.05,
+    "description": "Is the evidence sufficient to answer the request fully and correctly?",
+    "input": {},
+    "params": {},
+    "levels": [],
+    "positive": "the evidence is sufficient to answer the request fully and correctly (every requested fact is stated in the evidence; false when the entity asked about is not in it, a requested fact is missing, or one link of a multi-hop chain is missing)"
+   },
+   "dir": "heads/answerable",
+   "files": {
+    "member_0.safetensors": "91a6e8128420abc271655d140067bbb2fd298371b318c1501c9f6f1f45a9ab41",
+    "member_1.safetensors": "e7f4b15516ba622bbf76955bfdd73f825bc390614765019de61f021ca4c7d787",
+    "member_2.safetensors": "ca9c1a097c7698ec53ec14eb178708315197ba635bada1229924945929721420",
+    "member_3.safetensors": "ab2609f4753c0ea43b4f4bb2c8cd1559097125367525deec042df6806cff153f",
+    "member_4.safetensors": "051475becb63441545d2e7bd33b42c0fe6d6a3d0aba1c406b5e4e24295b1de9a",
+    "ensemble.json": "88ec4a46b93b781d51ffab2d64ae99e1a1d9992efc9eb2117cbad770038caf70",
+    "head.json": "12663444699060580f86b61d813e69f6d2e2dcaeb633428048119b129b727015",
+    "report.json": "b7f9d0668a0b952e7bb798453026a7531d54e2b6ac11d5bd5224df3e8fb86903",
+    "bernoulli.json": "6155e0f2f9425b109230612514664c3083e71083ff4c84762f7af5a9087adbeb"
+   }
+  },
+  "grounded": {
+   "head": "grounded",
+   "type": "noul",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 318,
+    "brier": 0.109572,
+    "log_loss": 0.196407,
+    "accuracy": 0.927673,
+    "ece": 0.053001,
+    "brier_skill_score": 0.780653,
+    "baseline_brier": 0.499538,
+    "baseline_log_loss": 0.69269,
+    "baseline_accuracy": 0.525157,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.354464,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "confirm",
+     "medium": "confirm",
+     "high": "confirm"
+    },
+    "conformal_threshold": null
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+    },
+    "medium": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+    },
+    "high": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 100 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 987,
+      "n_train_trusted": 987,
+      "n_calibration": 284
+     },
+     {
+      "n_train": 999,
+      "n_train_trusted": 999,
+      "n_calibration": 272
+     },
+     {
+      "n_train": 1005,
+      "n_train_trusted": 1005,
+      "n_calibration": 266
+     },
+     {
+      "n_train": 1037,
+      "n_train_trusted": 1037,
+      "n_calibration": 234
+     },
+     {
+      "n_train": 1056,
+      "n_train_trusted": 1056,
+      "n_calibration": 215
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": {
+    "target_error": 0.05,
+    "threshold": null,
+    "coverage_dev": null,
+    "holdout": {
+     "n": 318,
+     "n_selected": 0,
+     "coverage": null,
+     "error_rate": null
+    },
+    "set_quantile": null,
+    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows"
+   },
+   "data": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "grounded",
+    "type": "noul",
+    "classes": [],
+    "view": "query_evidence_answer",
+    "model": "logreg",
+    "decision": "gate",
+    "stakes": "high",
+    "conformal": 0.05,
+    "description": "Is every factual claim in the drafted answer supported by the evidence?",
+    "input": {},
+    "params": {},
+    "levels": [],
+    "positive": "every factual claim in the answer is supported by the evidence (a changed number, a wrong name, or a claim about something the evidence does not mention makes it false; an answer may be incomplete and still grounded)"
+   },
+   "dir": "heads/grounded",
+   "files": {
+    "member_0.safetensors": "10c734e5d107097f67b20de2f66490f88e7fcda78777187e617d842cacf81898",
+    "member_1.safetensors": "7f53ea54dc56216afbc898ac6a9516f6f1ae70084dab5c68746136904d85e1af",
+    "member_2.safetensors": "992fa859babb2f5387c03f0935e8416f67ef74309afd8595838252ab49f99955",
+    "member_3.safetensors": "f5d38efb3a0cc7b412323b94918c8b8c148971c0c4fdedd5cae56e4e3b868e42",
+    "member_4.safetensors": "92100fe4c8d58414d4c0b5f2e6b3f28a3c4b75c1c139716ebe971ee93cfd105a",
+    "ensemble.json": "58ed66a2f9ca9d205e899c1fec5ea9bd4e76515fbd5b26560f6ff6c35cebdf92",
+    "head.json": "6359c52b60efaa6052a450bf53be125819423fc3ec75ae281e4e442ad9cf38bb",
+    "report.json": "f2cca78af0c46ea8087a95c5ec16bbe0d4c57ae68fa672b2d678aec2a22bbfc1",
+    "bernoulli.json": "da8703db94f7ccad43253d26a91af6756c13de7bcc24ffb95b98e34fe0ec7703"
+   }
+  },
+  "complete": {
+   "head": "complete",
+   "type": "score",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:10Z",
+   "metrics": {
+    "n_holdout": 318,
+    "brier": 0.195936,
+    "log_loss": 0.381588,
+    "accuracy": 0.880503,
+    "ece": 0.035744,
+    "brier_skill_score": 0.567036,
+    "baseline_brier": 0.452547,
+    "baseline_log_loss": 0.884163,
+    "baseline_accuracy": 0.720126,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.223613,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "act",
+     "medium": "act",
+     "high": "act"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 279 act-tier rows at low stakes, accuracy 0.913978 (95% Wilson 0.875198-0.941514) against a mean prediction of 0.907306"
+    },
+    "medium": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 224 act-tier rows at medium stakes, accuracy 0.928571 (95% Wilson 0.887133-0.955558) against a mean prediction of 0.935388"
+    },
+    "high": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 92 act-tier rows at high stakes, accuracy 0.956522 (95% Wilson 0.893483-0.982964) against a mean prediction of 0.96597"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 5 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 987,
+      "n_train_trusted": 987,
+      "n_calibration": 284
+     },
+     {
+      "n_train": 999,
+      "n_train_trusted": 999,
+      "n_calibration": 272
+     },
+     {
+      "n_train": 1005,
+      "n_train_trusted": 1005,
+      "n_calibration": 266
+     },
+     {
+      "n_train": 1037,
+      "n_train_trusted": 1037,
+      "n_calibration": 234
+     },
+     {
+      "n_train": 1056,
+      "n_train_trusted": 1056,
+      "n_calibration": 215
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "complete",
+    "type": "score",
+    "classes": [
+     "0",
+     "1",
+     "2",
+     "3"
+    ],
+    "view": "query_evidence_answer",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "How much of the request does the drafted answer address? Judge coverage of what was asked, not correctness (a wrong number that answers the question still counts as answering it; `grounded` judges correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3.",
+    "input": {},
+    "params": {},
+    "levels": [
+     "0: misses the question",
+     "1: answers a small part",
+     "2: answers most of it",
+     "3: complete"
+    ],
+    "positive": null
+   },
+   "dir": "heads/complete",
+   "files": {
+    "member_0.safetensors": "09428ee8c135eef42ed2f9dc875fea879454a686883b3565ff5a03ea9d7d7620",
+    "member_1.safetensors": "35966c981134e9214204349ae0c2834a2b62d652493e22d74235123ac7b73816",
+    "member_2.safetensors": "ef01f77b45f9919278376f81a34148dcd22436d40d91f786cf3a48ce7bbd7f02",
+    "member_3.safetensors": "2353baac839d19cc2ec973162641d6866ac42746a571199aa06ae2c28a767c5b",
+    "member_4.safetensors": "290ab76cb6f2423a892ee5fe4244d7aaea40c4c688d3522750c93f016f54bfdc",
+    "ensemble.json": "a51cd2f73c8dc7739dacf4cbcb8ad30511173246df940cec0183a59b6186a7be",
+    "head.json": "10fa2dd65727214a77bb034c1ba8e519f341032594054442623ebe38af1de022",
+    "report.json": "5b3edbf37a5bec4fd85583e89acd6d8ed52f3be360f2c91d289e111be0c50990",
+    "bernoulli.json": "ed145220561ec7c3dcedf562a2c44da246f6728256ab6be5f8ee4cee3fdb26c9"
+   }
+  },
+  "risk_tier": {
+   "head": "risk_tier",
+   "type": "score",
+   "model": "logreg",
+   "trained_at": "2026-11-07T13:39:11Z",
+   "metrics": {
+    "n_holdout": 318,
+    "brier": 0.239996,
+    "log_loss": 0.483563,
+    "accuracy": 0.842767,
+    "ece": 0.064419,
+    "brier_skill_score": 0.640759,
+    "baseline_brier": 0.668065,
+    "baseline_log_loss": 1.220483,
+    "baseline_accuracy": 0.5,
+    "has_skill": true,
+    "brier_gain_lower_95": 0.334226,
+    "calibration_method": "sigmoid",
+    "verdict": {
+     "low": "act",
+     "medium": "confirm",
+     "high": "confirm"
+    }
+   },
+   "verdict": {
+    "low": {
+     "max_tier": "act",
+     "tier": 2,
+     "reason": "holdout: 243 act-tier rows at low stakes, accuracy 0.91358 (95% Wilson 0.871505-0.942782) against a mean prediction of 0.928469"
+    },
+    "medium": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "act-tier rows at medium stakes came true 0.926471 of the time against a mean prediction of 0.957074 (one-sided p = 0.030941): the probabilities overstate; decisions are capped at confirm"
+    },
+    "high": {
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "act-tier rows at high stakes came true 0.939394 of the time against a mean prediction of 0.986668 (one-sided p = 0.000425): the probabilities overstate; decisions are capped at confirm"
+    }
+   },
+   "calibration": {
+    "method": "sigmoid",
+    "why": "sigmoid: the smallest class has 7 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "folds": [
+     {
+      "n_train": 987,
+      "n_train_trusted": 987,
+      "n_calibration": 284
+     },
+     {
+      "n_train": 999,
+      "n_train_trusted": 999,
+      "n_calibration": 272
+     },
+     {
+      "n_train": 1005,
+      "n_train_trusted": 1005,
+      "n_calibration": 266
+     },
+     {
+      "n_train": 1037,
+      "n_train_trusted": 1037,
+      "n_calibration": 234
+     },
+     {
+      "n_train": 1056,
+      "n_train_trusted": 1056,
+      "n_calibration": 215
+     }
+    ],
+    "ensemble_members": 5,
+    "fitted_on": "trusted rows of each fold's calibration block"
+   },
+   "conformal": null,
+   "data": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   },
+   "notes": [],
+   "spec": {
+    "name": "risk_tier",
+    "type": "score",
+    "classes": [
+     "0",
+     "1",
+     "2",
+     "3"
+    ],
+    "view": "query_evidence_answer",
+    "model": "logreg",
+    "decision": "argmax",
+    "stakes": "medium",
+    "conformal": null,
+    "description": "How much harm could a wrong answer to this request cause? Judge the topic of the request and answer: product specifications are harmless, internal organisation facts low, prices / refunds / warranties / personal data elevated, legal, medical and safety matters high.",
+    "input": {},
+    "params": {},
+    "levels": [
+     "0: harmless",
+     "1: low risk (internal, reversible)",
+     "2: elevated (customer-facing, money, personal data)",
+     "3: high (legal, medical, safety, irreversible)"
+    ],
+    "positive": null
+   },
+   "dir": "heads/risk_tier",
+   "files": {
+    "member_0.safetensors": "6c6efe172aa8db88a34c762a959b9d019fd33ca04a654adb6fdd835d6837d4dd",
+    "member_1.safetensors": "190bc3aac052e1f8a4edf9d772fb1348e0971ab196e71f78e4a567a388b7c6c7",
+    "member_2.safetensors": "f99e8ade866d0611b57f4493a4a2071b451183e1b54e9210b2e679178752cda0",
+    "member_3.safetensors": "e0533d2d4f9e6ea111558b4598e0f2843121b4b4a1bc652d8cf7512d3aa6e6d6",
+    "member_4.safetensors": "553fa6afee8366114f2303c1e8447e1674c86ab58587554332cf5b6c72e9d956",
+    "ensemble.json": "cd8a5100364ee0a64312bb24d3f099492e1b6b769167adffa4e0aec854a4676d",
+    "head.json": "17e2a8ea879191b0634fc79daa5b0b7984c2e47ff99f1b242363138e220f9082",
+    "report.json": "370ca234b303154516389517fa668513d11378501e626955ef21efc8e8da6701",
+    "bernoulli.json": "d6ec7477cc68c2387afc1cd720a19c5119d5820c826592d42b00f1b368b7fcae"
+   }
+  }
+ },
+ "data_card": {
+  "pack": "documents",
+  "label_sources": {
+   "synthetic": 12319
+  },
+  "synthetic_only": true,
+  "heads": {
+   "response_type": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "route": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "needs_graph": {
+    "rows": 900,
+    "trusted": 900,
+    "by_source": {
+     "synthetic": 900
+    },
+    "groups": 285,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 720,
+    "development_trusted": 720,
+    "holdout_rows": 180,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 58,
+     "groups": 285
+    }
+   },
+   "chunk_relevant": {
+    "rows": 3631,
+    "trusted": 3631,
+    "by_source": {
+     "synthetic": 3631
+    },
+    "groups": 263,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 2894,
+    "development_trusted": 2894,
+    "holdout_rows": 737,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 51,
+     "groups": 263
+    }
+   },
+   "answerable": {
+    "rows": 1221,
+    "trusted": 1221,
+    "by_source": {
+     "synthetic": 1221
+    },
+    "groups": 262,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 972,
+    "development_trusted": 972,
+    "holdout_rows": 249,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 53,
+     "groups": 262
+    }
+   },
+   "grounded": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   },
+   "complete": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   },
+   "risk_tier": {
+    "rows": 1589,
+    "trusted": 1589,
+    "by_source": {
+     "synthetic": 1589
+    },
+    "groups": 208,
+    "time_from": "2025-01-10T00:25:41Z",
+    "time_to": "2025-09-30T22:57:45Z",
+    "development_rows": 1271,
+    "development_trusted": 1271,
+    "holdout_rows": 318,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 40,
+     "groups": 208
+    }
+   }
+  },
+  "encoder": {
+   "kind": "hashing",
+   "id": "hashing-256-s0",
+   "dim": 256,
+   "sha256": "0b1d19ee81e5e56effe31745a2d2f154094555ec2e892b8b77e8c3de64ec7369",
+   "seed": 0
+  },
+  "features": {
+   "query": 307,
+   "query_chunk": 282,
+   "query_evidence": 288,
+   "query_evidence_answer": 279
+  },
+  "feature_version": "documents-v1:hashing-256-s0:0b1d19ee81e5"
+ },
+ "notes": [
+  "job 4143faeda148"
+ ]
+}

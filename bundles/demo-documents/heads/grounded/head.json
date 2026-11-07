@@ -1,0 +1,109 @@
+{
+ "head": "grounded",
+ "type": "noul",
+ "model": "logreg",
+ "trained_at": "2026-11-07T13:39:10Z",
+ "metrics": {
+  "n_holdout": 318,
+  "brier": 0.109572,
+  "log_loss": 0.196407,
+  "accuracy": 0.927673,
+  "ece": 0.053001,
+  "brier_skill_score": 0.780653,
+  "baseline_brier": 0.499538,
+  "baseline_log_loss": 0.69269,
+  "baseline_accuracy": 0.525157,
+  "has_skill": true,
+  "brier_gain_lower_95": 0.354464,
+  "calibration_method": "sigmoid",
+  "verdict": {
+   "low": "confirm",
+   "medium": "confirm",
+   "high": "confirm"
+  },
+  "conformal_threshold": null
+ },
+ "verdict": {
+  "low": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+  },
+  "medium": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+  },
+  "high": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+  }
+ },
+ "calibration": {
+  "method": "sigmoid",
+  "why": "sigmoid: the smallest class has 100 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "folds": [
+   {
+    "n_train": 987,
+    "n_train_trusted": 987,
+    "n_calibration": 284
+   },
+   {
+    "n_train": 999,
+    "n_train_trusted": 999,
+    "n_calibration": 272
+   },
+   {
+    "n_train": 1005,
+    "n_train_trusted": 1005,
+    "n_calibration": 266
+   },
+   {
+    "n_train": 1037,
+    "n_train_trusted": 1037,
+    "n_calibration": 234
+   },
+   {
+    "n_train": 1056,
+    "n_train_trusted": 1056,
+    "n_calibration": 215
+   }
+  ],
+  "ensemble_members": 5,
+  "fitted_on": "trusted rows of each fold's calibration block"
+ },
+ "conformal": {
+  "target_error": 0.05,
+  "threshold": null,
+  "coverage_dev": null,
+  "holdout": {
+   "n": 318,
+   "n_selected": 0,
+   "coverage": null,
+   "error_rate": null
+  },
+  "set_quantile": null,
+  "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows"
+ },
+ "data": {
+  "rows": 1589,
+  "trusted": 1589,
+  "by_source": {
+   "synthetic": 1589
+  },
+  "groups": 208,
+  "time_from": "2025-01-10T00:25:41Z",
+  "time_to": "2025-09-30T22:57:45Z",
+  "development_rows": 1271,
+  "development_trusted": 1271,
+  "holdout_rows": 318,
+  "purged_rows": 0,
+  "ordering": "group",
+  "split": {
+   "holdout_groups": 40,
+   "groups": 208
+  }
+ },
+ "notes": []
+}

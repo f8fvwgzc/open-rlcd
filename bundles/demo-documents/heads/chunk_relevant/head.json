@@ -1,0 +1,96 @@
+{
+ "head": "chunk_relevant",
+ "type": "noul",
+ "model": "logreg",
+ "trained_at": "2026-11-07T13:39:10Z",
+ "metrics": {
+  "n_holdout": 737,
+  "brier": 0.243959,
+  "log_loss": 0.377123,
+  "accuracy": 0.8019,
+  "ece": 0.046662,
+  "brier_skill_score": 0.428431,
+  "baseline_brier": 0.426824,
+  "baseline_log_loss": 0.618559,
+  "baseline_accuracy": 0.694708,
+  "has_skill": true,
+  "brier_gain_lower_95": 0.15996,
+  "calibration_method": "sigmoid",
+  "verdict": {
+   "low": "act",
+   "medium": "act",
+   "high": "act"
+  }
+ },
+ "verdict": {
+  "low": {
+   "max_tier": "act",
+   "tier": 2,
+   "reason": "holdout: 562 act-tier rows at low stakes, accuracy 0.898577 (95% Wilson 0.87085-0.920891) against a mean prediction of 0.902064"
+  },
+  "medium": {
+   "max_tier": "act",
+   "tier": 2,
+   "reason": "holdout: 412 act-tier rows at medium stakes, accuracy 0.946602 (95% Wilson 0.920477-0.964475) against a mean prediction of 0.94654"
+  },
+  "high": {
+   "max_tier": "act",
+   "tier": 2,
+   "reason": "holdout: 226 act-tier rows at high stakes, accuracy 0.986726 (95% Wilson 0.961706-0.995475) against a mean prediction of 0.978351"
+  }
+ },
+ "calibration": {
+  "method": "sigmoid",
+  "why": "sigmoid: the smallest class has 130 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "folds": [
+   {
+    "n_train": 2224,
+    "n_train_trusted": 2224,
+    "n_calibration": 670
+   },
+   {
+    "n_train": 2276,
+    "n_train_trusted": 2276,
+    "n_calibration": 618
+   },
+   {
+    "n_train": 2321,
+    "n_train_trusted": 2321,
+    "n_calibration": 573
+   },
+   {
+    "n_train": 2352,
+    "n_train_trusted": 2352,
+    "n_calibration": 542
+   },
+   {
+    "n_train": 2403,
+    "n_train_trusted": 2403,
+    "n_calibration": 491
+   }
+  ],
+  "ensemble_members": 5,
+  "fitted_on": "trusted rows of each fold's calibration block"
+ },
+ "conformal": null,
+ "data": {
+  "rows": 3631,
+  "trusted": 3631,
+  "by_source": {
+   "synthetic": 3631
+  },
+  "groups": 263,
+  "time_from": "2025-01-10T00:25:41Z",
+  "time_to": "2025-09-30T22:57:45Z",
+  "development_rows": 2894,
+  "development_trusted": 2894,
+  "holdout_rows": 737,
+  "purged_rows": 0,
+  "ordering": "group",
+  "split": {
+   "holdout_groups": 51,
+   "groups": 263
+  }
+ },
+ "notes": []
+}

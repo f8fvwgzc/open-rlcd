@@ -1,0 +1,109 @@
+{
+ "head": "answerable",
+ "type": "noul",
+ "model": "logreg",
+ "trained_at": "2026-11-07T13:39:10Z",
+ "metrics": {
+  "n_holdout": 249,
+  "brier": 0.428274,
+  "log_loss": 0.615956,
+  "accuracy": 0.638554,
+  "ece": 0.072596,
+  "brier_skill_score": 0.139373,
+  "baseline_brier": 0.49763,
+  "baseline_log_loss": 0.690776,
+  "baseline_accuracy": 0.554217,
+  "has_skill": true,
+  "brier_gain_lower_95": 0.030595,
+  "calibration_method": "sigmoid",
+  "verdict": {
+   "low": "confirm",
+   "medium": "confirm",
+   "high": "confirm"
+  },
+  "conformal_threshold": null
+ },
+ "verdict": {
+  "low": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "act-tier rows at low stakes came true 0.722222 of the time against a mean prediction of 0.824277 (one-sided p = 0.021227): the probabilities overstate; decisions are capped at confirm"
+  },
+  "medium": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "only 25 act-tier rows at medium stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+  },
+  "high": {
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "only 7 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+  }
+ },
+ "calibration": {
+  "method": "sigmoid",
+  "why": "sigmoid: the smallest class has 85 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "folds": [
+   {
+    "n_train": 754,
+    "n_train_trusted": 754,
+    "n_calibration": 218
+   },
+   {
+    "n_train": 762,
+    "n_train_trusted": 762,
+    "n_calibration": 210
+   },
+   {
+    "n_train": 774,
+    "n_train_trusted": 774,
+    "n_calibration": 198
+   },
+   {
+    "n_train": 796,
+    "n_train_trusted": 796,
+    "n_calibration": 176
+   },
+   {
+    "n_train": 802,
+    "n_train_trusted": 802,
+    "n_calibration": 170
+   }
+  ],
+  "ensemble_members": 5,
+  "fitted_on": "trusted rows of each fold's calibration block"
+ },
+ "conformal": {
+  "target_error": 0.05,
+  "threshold": null,
+  "coverage_dev": null,
+  "holdout": {
+   "n": 249,
+   "n_selected": 0,
+   "coverage": null,
+   "error_rate": null
+  },
+  "set_quantile": null,
+  "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 972 calibration rows"
+ },
+ "data": {
+  "rows": 1221,
+  "trusted": 1221,
+  "by_source": {
+   "synthetic": 1221
+  },
+  "groups": 262,
+  "time_from": "2025-01-10T00:25:41Z",
+  "time_to": "2025-09-30T22:57:45Z",
+  "development_rows": 972,
+  "development_trusted": 972,
+  "holdout_rows": 249,
+  "purged_rows": 0,
+  "ordering": "group",
+  "split": {
+   "holdout_groups": 53,
+   "groups": 262
+  }
+ },
+ "notes": []
+}

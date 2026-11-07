@@ -1,0 +1,532 @@
+{
+ "n_holdout": 318,
+ "classes": [
+  "false",
+  "true"
+ ],
+ "class_rates_holdout": {
+  "false": 0.474843,
+  "true": 0.525157
+ },
+ "base_rates_train": {
+  "false": 0.454796,
+  "true": 0.545204
+ },
+ "brier": 0.109572,
+ "log_loss": 0.196407,
+ "accuracy": 0.927673,
+ "ece": 0.053001,
+ "ece_classwise": 0.082602,
+ "baseline": {
+  "brier": 0.499538,
+  "log_loss": 0.69269,
+  "accuracy": 0.525157,
+  "ece": 0.020047,
+  "ece_classwise": 0.020047
+ },
+ "brier_skill_score": 0.780653,
+ "skill": {
+  "has_skill": true,
+  "mean_brier_gain": 0.389966,
+  "lower_95": 0.354464,
+  "upper_95": 0.424674,
+  "blocks": 40,
+  "n": 318,
+  "n_boot": 2000,
+  "method": "block bootstrap (40 groups, 2000 resamples): one-sided 95% lower bound of the mean Brier gain over the base rate; and the same for the gain over the holdout's own class frequencies (recomputed in every resample), which no constant forecast can beat",
+  "vs_holdout_base_rate": {
+   "mean_brier_gain": 0.389162,
+   "lower_95": 0.354433,
+   "upper_95": 0.423762,
+   "blocks": 40,
+   "resampled": "40 groups"
+  }
+ },
+ "reliability": {
+  "top_label": [
+   {
+    "bin": 0,
+    "lo": 0.0,
+    "hi": 0.1,
+    "count": 0,
+    "mean_predicted": null,
+    "observed_rate": null
+   },
+   {
+    "bin": 1,
+    "lo": 0.1,
+    "hi": 0.2,
+    "count": 0,
+    "mean_predicted": null,
+    "observed_rate": null
+   },
+   {
+    "bin": 2,
+    "lo": 0.2,
+    "hi": 0.3,
+    "count": 0,
+    "mean_predicted": null,
+    "observed_rate": null
+   },
+   {
+    "bin": 3,
+    "lo": 0.3,
+    "hi": 0.4,
+    "count": 0,
+    "mean_predicted": null,
+    "observed_rate": null
+   },
+   {
+    "bin": 4,
+    "lo": 0.4,
+    "hi": 0.5,
+    "count": 0,
+    "mean_predicted": null,
+    "observed_rate": null
+   },
+   {
+    "bin": 5,
+    "lo": 0.5,
+    "hi": 0.6,
+    "count": 20,
+    "mean_predicted": 0.548853,
+    "observed_rate": 0.6
+   },
+   {
+    "bin": 6,
+    "lo": 0.6,
+    "hi": 0.7,
+    "count": 27,
+    "mean_predicted": 0.648141,
+    "observed_rate": 0.62963
+   },
+   {
+    "bin": 7,
+    "lo": 0.7,
+    "hi": 0.8,
+    "count": 25,
+    "mean_predicted": 0.759352,
+    "observed_rate": 0.88
+   },
+   {
+    "bin": 8,
+    "lo": 0.8,
+    "hi": 0.9,
+    "count": 62,
+    "mean_predicted": 0.854519,
+    "observed_rate": 0.983871
+   },
+   {
+    "bin": 9,
+    "lo": 0.9,
+    "hi": 1.0,
+    "count": 184,
+    "mean_predicted": 0.97122,
+    "observed_rate": 0.994565
+   }
+  ],
+  "per_class": {
+   "false": [
+    {
+     "bin": 0,
+     "lo": 0.0,
+     "hi": 0.1,
+     "count": 99,
+     "mean_predicted": 0.040551,
+     "observed_rate": 0.010101
+    },
+    {
+     "bin": 1,
+     "lo": 0.1,
+     "hi": 0.2,
+     "count": 41,
+     "mean_predicted": 0.147491,
+     "observed_rate": 0.02439
+    },
+    {
+     "bin": 2,
+     "lo": 0.2,
+     "hi": 0.3,
+     "count": 17,
+     "mean_predicted": 0.238233,
+     "observed_rate": 0.117647
+    },
+    {
+     "bin": 3,
+     "lo": 0.3,
+     "hi": 0.4,
+     "count": 16,
+     "mean_predicted": 0.353602,
+     "observed_rate": 0.5
+    },
+    {
+     "bin": 4,
+     "lo": 0.4,
+     "hi": 0.5,
+     "count": 5,
+     "mean_predicted": 0.427189,
+     "observed_rate": 1.0
+    },
+    {
+     "bin": 5,
+     "lo": 0.5,
+     "hi": 0.6,
+     "count": 15,
+     "mean_predicted": 0.540867,
+     "observed_rate": 0.8
+    },
+    {
+     "bin": 6,
+     "lo": 0.6,
+     "hi": 0.7,
+     "count": 11,
+     "mean_predicted": 0.650676,
+     "observed_rate": 0.818182
+    },
+    {
+     "bin": 7,
+     "lo": 0.7,
+     "hi": 0.8,
+     "count": 8,
+     "mean_predicted": 0.754221,
+     "observed_rate": 0.875
+    },
+    {
+     "bin": 8,
+     "lo": 0.8,
+     "hi": 0.9,
+     "count": 21,
+     "mean_predicted": 0.858443,
+     "observed_rate": 1.0
+    },
+    {
+     "bin": 9,
+     "lo": 0.9,
+     "hi": 1.0,
+     "count": 85,
+     "mean_predicted": 0.984928,
+     "observed_rate": 1.0
+    }
+   ],
+   "true": [
+    {
+     "bin": 0,
+     "lo": 0.0,
+     "hi": 0.1,
+     "count": 85,
+     "mean_predicted": 0.015072,
+     "observed_rate": 0.0
+    },
+    {
+     "bin": 1,
+     "lo": 0.1,
+     "hi": 0.2,
+     "count": 21,
+     "mean_predicted": 0.141557,
+     "observed_rate": 0.0
+    },
+    {
+     "bin": 2,
+     "lo": 0.2,
+     "hi": 0.3,
+     "count": 8,
+     "mean_predicted": 0.245779,
+     "observed_rate": 0.125
+    },
+    {
+     "bin": 3,
+     "lo": 0.3,
+     "hi": 0.4,
+     "count": 11,
+     "mean_predicted": 0.349324,
+     "observed_rate": 0.181818
+    },
+    {
+     "bin": 4,
+     "lo": 0.4,
+     "hi": 0.5,
+     "count": 15,
+     "mean_predicted": 0.459133,
+     "observed_rate": 0.2
+    },
+    {
+     "bin": 5,
+     "lo": 0.5,
+     "hi": 0.6,
+     "count": 5,
+     "mean_predicted": 0.572811,
+     "observed_rate": 0.0
+    },
+    {
+     "bin": 6,
+     "lo": 0.6,
+     "hi": 0.7,
+     "count": 16,
+     "mean_predicted": 0.646398,
+     "observed_rate": 0.5
+    },
+    {
+     "bin": 7,
+     "lo": 0.7,
+     "hi": 0.8,
+     "count": 17,
+     "mean_predicted": 0.761767,
+     "observed_rate": 0.882353
+    },
+    {
+     "bin": 8,
+     "lo": 0.8,
+     "hi": 0.9,
+     "count": 41,
+     "mean_predicted": 0.852509,
+     "observed_rate": 0.97561
+    },
+    {
+     "bin": 9,
+     "lo": 0.9,
+     "hi": 1.0,
+     "count": 99,
+     "mean_predicted": 0.959449,
+     "observed_rate": 0.989899
+    }
+   ]
+  }
+ },
+ "per_class": {
+  "false": {
+   "n": 318,
+   "observed_rate": 0.474843,
+   "base_rate_train": 0.454796,
+   "brier": 0.054786,
+   "log_loss": 0.196407,
+   "ece": 0.082602,
+   "baseline": {
+    "brier": 0.249769,
+    "log_loss": 0.69269,
+    "ece": 0.020047
+   },
+   "brier_skill_score": 0.780653
+  },
+  "true": {
+   "n": 318,
+   "observed_rate": 0.525157,
+   "base_rate_train": 0.545204,
+   "brier": 0.054786,
+   "log_loss": 0.196407,
+   "ece": 0.082602,
+   "baseline": {
+    "brier": 0.249769,
+    "log_loss": 0.69269,
+    "ece": 0.020047
+   },
+   "brier_skill_score": 0.780653
+  }
+ },
+ "definitions": {
+  "brier": "mean over rows of sum_k (p_k - y_k)^2",
+  "ece": "top-label expected calibration error over 10 equal-width bins",
+  "baseline": "predicts the class frequencies of the trusted development rows (add-half smoothing)",
+  "brier_skill_score": "1 - brier / baseline brier; > 0 means better than the base rate"
+ },
+ "conformal": {
+  "selective": {
+   "target_error": 0.05,
+   "delta": 0.1,
+   "n_calibration": 1271,
+   "min_rows": 45,
+   "method": "split-conformal selective threshold: Learn-then-Test fixed-sequence search, exact one-sided binomial test per threshold",
+   "threshold": null,
+   "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows"
+  },
+  "holdout": {
+   "n": 318,
+   "n_selected": 0,
+   "coverage": null,
+   "error_rate": null
+  }
+ },
+ "policy": {
+  "config": {
+   "stakes": {
+    "low": {
+     "act": 0.7,
+     "confirm": 0.5,
+     "min_accuracy": 0.6
+    },
+    "medium": {
+     "act": 0.85,
+     "confirm": 0.65,
+     "min_accuracy": 0.75
+    },
+    "high": {
+     "act": 0.95,
+     "confirm": 0.8,
+     "min_accuracy": 0.9
+    }
+   },
+   "abstain": "escalate",
+   "min_verify_rows": 30,
+   "gate_min_p_above": 0.9,
+   "miscalibration_p": 0.05
+  },
+  "holdout": {
+   "low": {
+    "thresholds": {
+     "act": 0.7,
+     "confirm": 0.5,
+     "min_accuracy": 0.6
+    },
+    "act": {
+     "n": 157,
+     "correct": 153,
+     "accuracy": 0.974522,
+     "wilson_95": [
+      0.936329,
+      0.990049
+     ],
+     "mean_predicted": 0.910117,
+     "p_value_below_predicted": 0.999718
+    },
+    "act_or_confirm": {
+     "n": 178,
+     "correct": 161,
+     "accuracy": 0.904494,
+     "wilson_95": [
+      0.852384,
+      0.939514
+     ],
+     "mean_predicted": 0.876937,
+     "p_value_below_predicted": 0.894653
+    },
+    "tiers": {
+     "escalate": 140,
+     "confirm": 21,
+     "act": 157
+    }
+   },
+   "medium": {
+    "thresholds": {
+     "act": 0.85,
+     "confirm": 0.65,
+     "min_accuracy": 0.75
+    },
+    "act": {
+     "n": 122,
+     "correct": 121,
+     "accuracy": 0.991803,
+     "wilson_95": [
+      0.955029,
+      0.998552
+     ],
+     "mean_predicted": 0.943682,
+     "p_value_below_predicted": 0.999151
+    },
+    "act_or_confirm": {
+     "n": 164,
+     "correct": 157,
+     "accuracy": 0.957317,
+     "wilson_95": [
+      0.914528,
+      0.979173
+     ],
+     "mean_predicted": 0.899788,
+     "p_value_below_predicted": 0.997933
+    },
+    "tiers": {
+     "escalate": 154,
+     "confirm": 42,
+     "act": 122
+    }
+   },
+   "high": {
+    "thresholds": {
+     "act": 0.95,
+     "confirm": 0.8,
+     "min_accuracy": 0.9
+    },
+    "act": {
+     "n": 62,
+     "correct": 61,
+     "accuracy": 0.983871,
+     "wilson_95": [
+      0.914133,
+      0.997147
+     ],
+     "mean_predicted": 0.98028,
+     "p_value_below_predicted": 0.709128
+    },
+    "act_or_confirm": {
+     "n": 140,
+     "correct": 138,
+     "accuracy": 0.985714,
+     "wilson_95": [
+      0.949412,
+      0.996074
+     ],
+     "mean_predicted": 0.928131,
+     "p_value_below_predicted": 0.999654
+    },
+    "tiers": {
+     "escalate": 178,
+     "confirm": 78,
+     "act": 62
+    }
+   },
+   "rows": 318,
+   "note": "accuracy = the committed class came true (gate heads commit to `true`); p_value_below_predicted: exact one-sided binomial test of the accuracy against the mean predicted probability (small = the probabilities overstated)"
+  },
+  "verdict": {
+   "low": {
+    "max_tier": "confirm",
+    "tier": 1,
+    "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+   },
+   "medium": {
+    "max_tier": "confirm",
+    "tier": 1,
+    "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+   },
+   "high": {
+    "max_tier": "confirm",
+    "tier": 1,
+    "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+   }
+  }
+ },
+ "split": {
+  "ordering": "group",
+  "holdout_fraction": 0.2,
+  "holdout_groups": 40,
+  "groups": 208,
+  "holdout_rows": 318,
+  "development_rows": 1271,
+  "purged_rows": 0,
+  "folds": [
+   {
+    "n_train": 987,
+    "n_train_trusted": 987,
+    "n_calibration": 284
+   },
+   {
+    "n_train": 999,
+    "n_train_trusted": 999,
+    "n_calibration": 272
+   },
+   {
+    "n_train": 1005,
+    "n_train_trusted": 1005,
+    "n_calibration": 266
+   },
+   {
+    "n_train": 1037,
+    "n_train_trusted": 1037,
+    "n_calibration": 234
+   },
+   {
+    "n_train": 1056,
+    "n_train_trusted": 1056,
+    "n_calibration": 215
+   }
+  ]
+ }
+}
