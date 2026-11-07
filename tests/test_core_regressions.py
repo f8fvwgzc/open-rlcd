@@ -89,3 +89,16 @@ def test_actively_sampled_rows_train_and_calibrate_but_are_never_in_the_holdout(
     cal = np.concatenate([c for _, c in folds])
     assert (~ok[cal]).any()                                # ... and calibrate there
     assert any("active learning" in n for n in sp.notes)
+
+
+def test_input_guard_warns_when_a_request_lacks_features_training_always_had(tmp_path):
+    from open_rlcd.core.contract import SystemOneRequest, TrainRequest
+
+    svc = Service(Project(root=tmp_path), home=tmp_path / "var", pack=ToyPack(n=1500))
+    assert svc.trainer.start(TrainRequest(heads=["good"]), wait=True)["status"] == "succeeded"
+    q = {"g": {"type": "noul", "head": "good"}}
+    full = svc.systemone(SystemOneRequest(state={"f": [0.1] * 6}, questions=q))
+    assert not any("lacks" in w for w in full.get("warnings", []))
+    x = [0.1, None, 0.1, 0.1, 0.1, 0.1]
+    gap = svc.systemone(SystemOneRequest(state={"x": x, "feature_version": "toy-v1"}, questions=q))
+    assert any("lacks 1 input feature" in w and "f1" in w for w in gap["warnings"])

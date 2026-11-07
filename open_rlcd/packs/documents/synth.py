@@ -495,6 +495,26 @@ def complete_level(k: int, n: int) -> int:
 
 # ----------------------------------------------------------------------------- candidates and evidence
 
+
+def _minimal_state(state: dict, keep_score: bool, keep_candidates: bool) -> dict:
+    """The same state as a caller with its own retriever would send it: chunks as {id, text[, score]}."""
+    def m(c: dict) -> dict:
+        d = {"id": c["id"], "text": c.get("text", "")}
+        if keep_score and c.get("score") is not None:
+            d["score"] = c["score"]
+        return d
+
+    out: dict = {"query": state["query"]}
+    if "chunk" in state:
+        out["chunk"] = m(state["chunk"])
+    if "evidence" in state:
+        out["evidence"] = [m(c) for c in state["evidence"]]
+    if "answer" in state:
+        out["answer"] = state["answer"]
+    if keep_candidates and state.get("candidates"):
+        out["candidates"] = [m(c) for c in state["candidates"]]
+    return out
+
 def _inject(corpus: Corpus, query: str, cands: list[dict], gold: list[str]) -> tuple[list[dict], int]:
     """Append gold chunks the retriever missed (scored by cosine like every candidate); returns (list, n added)."""
     have = {c["id"] for c in cands}
@@ -533,6 +553,7 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
     rng = random.Random(f"labels:{seed}")
     t_rng = random.Random(f"time:{seed}")
     births: dict[str, float] = {}
+    m_rng = random.Random(f"minimal:{seed}")
     items: list[LabelItem] = []
     labels: list[tuple[str, str, Any]] = []
     langs: dict[str, int] = {}
@@ -551,8 +572,17 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
         langs[q.lang] = langs.get(q.lang, 0) + 1
         raw = candidates(corpus, q.text, DEFAULT_RETRIEVE_K)
 
+        # metadata dropout: about a third of the queries keep only what a caller with another retriever would
+        # send ({id, text} and sometimes a score, no candidate list), so heads do not learn to need our own
+        # retriever's metadata (authority, graph distance, rank context) to be right
+        minimal = m_rng.random() < 0.35
+        keep_score = m_rng.random() < 0.5
+        keep_cands = m_rng.random() < 0.5
+
         def add(suffix: str, view: str, state: dict, heads: dict[str, Any], _q: Q = q, _t: int = t,
-                _qid: str = qid) -> None:
+                _qid: str = qid, _m: bool = minimal, _ks: bool = keep_score, _kc: bool = keep_cands) -> None:
+            if _m:
+                state = _minimal_state(state, _ks, _kc)
             it = LabelItem(id=f"{_qid}:{suffix}", view=view, state=state, display=display_for(view, state),
                            group=_q.template, t=_t, meta={"family": _q.family, "lang": _q.lang, "synthetic": True})
             items.append(it)

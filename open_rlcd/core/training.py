@@ -161,7 +161,8 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
         oof_P.append(cal.predict(base.raw(ds.X[ca])))
         fold_info.append({"n_train": int(len(tr)), "n_train_trusted": int(ds.trusted[tr].sum()),
                           "n_calibration": int(len(ca))})
-    ensemble = CalibratedEnsemble(spec, members, ds.feature_names, ds.feature_version)
+    nan_rate = np.isnan(ds.X[split.dev]).mean(axis=0).round(4).tolist() if split.dev.any() else None
+    ensemble = CalibratedEnsemble(spec, members, ds.feature_names, ds.feature_version, nan_rate)
     oof_i = np.concatenate(oof_idx)
     oof = np.vstack(oof_P)
 

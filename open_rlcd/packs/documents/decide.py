@@ -157,7 +157,7 @@ def decide(pack: Any, service: Any, request: dict) -> dict:
     if cands and "chunk_relevant" in specs:
         spec = specs["chunk_relevant"]
         states = [{"query": query, "chunk": c, "candidates": cands, **extra} for c in cands]
-        P, calibrated = service.probabilities(version, spec, states)
+        P, calibrated = service.probabilities(version, spec, states, warnings)
         p = [float(x) for x in P[:, 1]]
         order = sorted(range(len(cands)), key=lambda i: -p[i])      # stable: ties keep the retrieval order
         ranked = [{"id": cands[i]["id"], "probability": round(p[i], 6), "rank": r + 1} for r, i in enumerate(order)]

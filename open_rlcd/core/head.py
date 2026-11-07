@@ -325,10 +325,22 @@ def resolve_model(kind: str) -> tuple[str, str | None]:
 
 class CalibratedEnsemble:
     def __init__(self, spec: HeadSpec, members: list[tuple[Any, Calibrator]], feature_names: list[str],
-                 feature_version: str):
+                 feature_version: str, nan_rate: list[float] | None = None):
         self.spec, self.members = spec, members
         self.feature_names, self.feature_version = list(feature_names), feature_version
         self.n_classes = len(spec.labels)
+        # share of training rows in which each feature was missing (the input guard compares requests to it)
+        self.nan_rate = None if nan_rate is None else [float(v) for v in nan_rate]
+
+    def missing_inputs(self, X: np.ndarray, threshold: float = 0.05) -> list[str]:
+        """Features that were present in at least 95% of training rows but are missing (NaN) in any row of X:
+        the probabilities were calibrated on inputs that had them, so they may not hold for this request."""
+        if self.nan_rate is None:
+            return []
+        X = np.atleast_2d(np.asarray(X, np.float32))
+        rate = np.asarray(self.nan_rate)
+        miss = np.isnan(X).any(axis=0) & (rate < threshold)
+        return [self.feature_names[i] for i in np.flatnonzero(miss)]
 
     @property
     def kind(self) -> str:
@@ -408,7 +420,7 @@ class CalibratedEnsemble:
             members.append({"file": name, "kind": base.kind, "params": base.params,
                             "calibrator": cal.to_dict()})
         meta = {"spec": self.spec.to_dict(), "n_classes": self.n_classes, "feature_names": self.feature_names,
-                "feature_version": self.feature_version, "members": members}
+                "feature_version": self.feature_version, "members": members, "nan_rate": self.nan_rate}
         (directory / "ensemble.json").write_text(json.dumps(meta, indent=1), encoding="utf-8")
         return [*files, "ensemble.json"]
 
@@ -437,4 +449,4 @@ class CalibratedEnsemble:
             else:
                 raise ValueError(f"unknown member kind {m['kind']!r}")
             members.append((base, Calibrator.from_dict(m["calibrator"])))
-        return cls(spec, members, meta["feature_names"], meta["feature_version"])
+        return cls(spec, members, meta["feature_names"], meta["feature_version"], meta.get("nan_rate"))

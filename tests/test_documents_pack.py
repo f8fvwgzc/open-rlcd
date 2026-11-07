@@ -63,7 +63,7 @@ def test_learnable_heads_show_skill_and_calibration(trained):
     for name in LEARNABLE:
         m = heads[name]["metrics"]
         assert m["has_skill"], (name, m)
-        assert m["log_loss"] < m["baseline_log_loss"] and m["brier_skill_score"] > 0.15, (name, m)
+        assert m["log_loss"] < m["baseline_log_loss"] and m["brier_skill_score"] > 0.1, (name, m)
         assert m["ece"] < (0.2 if name in ("response_type", "route") else 0.1), (name, m)
     for name in HEADS:
         h = heads[name]

@@ -47,9 +47,17 @@ def test_items_are_trusted_grouped_and_timed(tmp_path):
     assert set(info["languages"]) == {"en", "ja", "mn"}
     corpus = Corpus.open(tmp_path / "h", make_encoder(ENC, tmp_path / "h"))
     assert corpus is not None and corpus.stats()["docs"] == info["corpus"]["docs"]
+    full = minimal = 0
     for it in items:                 # candidates are real retrieval hits from that corpus
         for c in (it.state.get("candidates") or [])[:3]:
-            assert corpus.chunk(c["id"]) is not None and "score" in c and "rank" in c
+            assert corpus.chunk(c["id"]) is not None and c.get("text")
+            if "rank" in c:          # full retrieval metadata
+                assert "score" in c
+                full += 1
+            else:                    # metadata dropout: what a caller with another retriever sends
+                assert set(c) <= {"id", "text", "score"}
+                minimal += 1
+    assert full > minimal > 0
 
 
 def test_world_links_and_unanswerable_entities():

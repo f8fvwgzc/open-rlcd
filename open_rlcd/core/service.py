@@ -181,13 +181,26 @@ class Service:
         except (TypeError, ValueError):
             raise ContractError("x must contain only numbers or null", kind="bad_feature_vector") from None
 
-    def probabilities(self, version: str, spec: HeadSpec, states: list[Any]) -> tuple[np.ndarray, bool]:
-        """(P (n, K) in spec.labels order, calibrated). An untrained head answers with the uninformed prior."""
+    def probabilities(self, version: str, spec: HeadSpec, states: list[Any],
+                      warnings: list[str] | None = None) -> tuple[np.ndarray, bool]:
+        """(P (n, K) in spec.labels order, calibrated). An untrained head answers with the uninformed prior.
+        With `warnings`, the input guard adds a warning when the request lacks features that training had."""
         head = self.loaded(version, spec.name)
         k = len(spec.labels)
         if head is None:
             return np.full((len(states), k), 1.0 / k), False
         X = self.features(version, spec, states, head)
+        if warnings is not None:
+            missing = head.ensemble.missing_inputs(X)
+            if missing:
+                groups = self.provider(version).groups(spec.view) if missing else {}
+                shown = sorted({groups.get(f, f) for f in missing})
+                msg = (f"head '{spec.name}': the request lacks {len(missing)} input feature(s) that almost every "
+                       f"training row had ({', '.join(shown[:6])}; e.g. {', '.join(missing[:4])}): the probabilities "
+                       f"were calibrated on inputs that had them and may not hold. Send the same fields as in "
+                       f"training (GET /v1/heads describes them)")
+                if msg not in warnings:
+                    warnings.append(msg)
         return head.ensemble.predict_proba(X), True
 
     def _warn_head(self, version: str, spec: HeadSpec, calibrated: bool, warnings: list[str],
@@ -207,7 +220,7 @@ class Service:
     def answer(self, version: str, q: Question, state: Any, warnings: list[str]) -> dict:
         spec = self.spec(q.head, version, q.id)
         q.bind(spec)
-        P, calibrated = self.probabilities(version, spec, [state])
+        P, calibrated = self.probabilities(version, spec, [state], warnings)
         self._warn_head(version, spec, calibrated, warnings)
         return build_answer(q, spec, P[0], calibrated)
 
@@ -250,8 +263,8 @@ class Service:
             elif c.state is None:
                 state = req.state
             states.append(state)
-        P, calibrated = self.probabilities(version, spec, states)   # one batch: the encoder runs once
         warnings: list[str] = []
+        P, calibrated = self.probabilities(version, spec, states, warnings)   # one batch: the encoder runs once
         self._warn_head(version, spec, calibrated, warnings)
         ranked = []
         for c, p in zip(req.candidates, P, strict=True):
@@ -275,7 +288,7 @@ class Service:
                       calibrated: bool | None = None, explain: bool = True) -> dict:
         """Answer one head on one state and run it through the policy. Returns {answer, decision, reasons}."""
         if probs is None:
-            P, calibrated = self.probabilities(version, spec, [state])
+            P, calibrated = self.probabilities(version, spec, [state], warnings)
             probs = P[0]
         head = self.loaded(version, spec.name)
         cfg = self.policy(version)
