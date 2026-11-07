@@ -67,11 +67,13 @@ the interfaces the packages build against.
   weak + trusted rows; **calibrators are fitted, and holdout metrics reported, on trusted rows only.** The
   judge's agreement with humans (accuracy, Cohen's kappa, confusion) is reported next to the head's own metrics.
 * **Split-conformal abstention** (`core/calibration.py`): for gate heads with `conformal: {target_error: a}`,
-  a threshold on P(true) chosen on out-of-fold trusted development predictions by fixed-sequence testing
-  (Learn-then-Test, exact binomial upper bound at `delta = 0.1`): with probability >= 1 - delta the error rate
-  among rows that pass is <= a, under exchangeability. The threshold is then checked on the untouched holdout
-  and both numbers are published. If no threshold qualifies the head is capped at `confirm` and says so.
-  Choice and score heads report the split-conformal prediction-set quantile as well.
+  a threshold on P(true) chosen by fixed-sequence testing (Learn-then-Test, exact binomial test at `delta = 0.1`)
+  on cross-fitted out-of-fold trusted development scores: the fold's base model never trained on the row, and a
+  calibrator fitted on the other half of its calibration block never saw it. With probability >= 1 - delta the
+  error rate among rows that pass is <= a, under exchangeability. The threshold is then checked on the untouched
+  holdout and both numbers are published. If no threshold qualifies the head is capped at `confirm` and says so.
+  Choice and score heads report the split-conformal prediction-set quantile (the ceil((n+1)(1-alpha))-th smallest
+  score); measured fresh coverage at alpha = 0.1, 4 classes: 0.92 at n = 300, 0.90 at n = 1000-2000.
 * **Feature layer** (`features/`): a frozen open multilingual encoder (default `intfloat/multilingual-e5-small`,
   MIT, about 100 languages including English, Japanese and Mongolian) run through ONNX Runtime int8 on CPU,
   embeddings cached on disk keyed by content hash (sqlite, no pickle); lexical signals (BM25, TF-IDF cosine,
@@ -79,10 +81,11 @@ the interfaces the packages build against.
   agreement, freshness, authority, graph path length / degree, query-term coverage of the evidence). An offline
   `hashing` encoder (signed char n-gram feature hashing) needs no download; tests and the demo bundle use it.
 * **Packs**: `documents` (RAG router / gatekeeper / evaluator), `tabular` (CSV / Parquet: churn, fraud, lead
-  scoring, approvals), `trading` (thin HTTP adapter to the View Engine quant sidecar's `/dataset` and
-  `/features`; no trading logic copied).
-* **Connectors** (optional extras): vector Qdrant, pgvector, local FAISS -> hnswlib -> exact numpy; graph Neo4j,
-  local NetworkX. Remote hosts are refused unless explicitly allowed.
+  scoring, approvals), `trading` (M8, its own pull request: a thin HTTP adapter to the View Engine quant
+  sidecar's `/dataset` and `/features`; no trading logic copied).
+* **Connectors**: local FAISS -> hnswlib -> exact numpy vector index and a local NetworkX entity graph today;
+  Qdrant, pgvector and Neo4j (optional extras) are milestone M7. Remote hosts are refused unless explicitly
+  allowed.
 * **Labeling**: `rlcd label bootstrap` (LLM judge: Claude via the user's own `claude` CLI subscription or
   `ANTHROPIC_API_KEY`, or a local model via Ollama / any OpenAI-compatible server), `rlcd label audit`
   (terminal review), `rlcd label next` (uncertainty + judge/model disagreement + diversity sampling).
@@ -112,8 +115,9 @@ open_rlcd/
     service.py           Service: answer questions / rank / decide / evaluate / feedback (no HTTP)
     jobs.py              Trainer: one background training job at a time
   features/  text.py  lexical.py  retrieval.py
-  packs/     base.py (Pack, FeatureProvider, LabelTask protocols, loader)  documents/  tabular/  trading/
-  connectors/ base.py  security.py  local_vector.py  local_graph.py  qdrant.py  pgvector.py  neo4j.py
+  packs/     base.py (Pack, FeatureProvider protocols, loader, dataset_from_labels)  documents/  tabular/
+             (trading/ arrives with M8)
+  connectors/ base.py  security.py  local_vector.py  local_graph.py   (qdrant / pgvector / neo4j: M7)
   labeling/  judges.py  store.py  bootstrap.py  audit.py  active.py
   serve/     api.py (FastAPI app factory)
   report/    model_card.py  html.py
@@ -167,9 +171,12 @@ class Dataset:
 
 `train_head(spec, ds, cfg: TrainConfig) -> TrainedHead`
 
-1. **Holdout**: `splits.holdout(ds, fraction=0.2)` -> the last 20 % of time (or the latest / a seeded subset of
-   groups). Only **trusted** rows are scored there; untrusted rows of holdout groups are dropped; rows whose
-   label window reaches the cut are purged. Feedback rows never enter the holdout.
+1. **Holdout**: `splits.holdout_split(ds, fraction=0.2)` -> time ordering: the latest 20 % of the trusted rows,
+   development rows whose label window reaches the cut purged; group ordering: the latest-starting groups (or a
+   seeded subset without timestamps), groups never straddle, and there is no time cut or purge between groups
+   (use time ordering when groups share time context). Only **trusted**, representatively sampled rows are scored
+   there; untrusted rows of holdout groups are dropped; feedback rows never enter the holdout, and a trusted row
+   that duplicates a feedback row is taken out of it.
 2. **Folds** over development: time-ordered expanding window with gap and purge, or group k-fold. Each fold's
    base model trains on every development row of its train side (weak + trusted + feedback, weighted); its
    calibrator is fitted on the **trusted** rows of its calibration block only.
@@ -198,7 +205,7 @@ class Dataset:
 
 ```yaml
 policy:
-  abstain: escalate            # name of the abstaining action (tabular / trading packs use "hold")
+  abstain: escalate            # name of the abstaining action (the tabular pack uses "hold")
   stakes:
     low:    {act: 0.70, confirm: 0.50, min_accuracy: 0.60}
     medium: {act: 0.85, confirm: 0.65, min_accuracy: 0.75}
@@ -245,14 +252,16 @@ Every head also accepts a precomputed state `{x, feature_names, feature_version}
 
 ```
 <bundle>/
-  model.json             format "open-rlcd-bundle/1", version id, created_at, pack {name, version, config},
-                         feature_version, encoder {id, sha256, dim}, policy config, heads {name: {spec, files,
-                         calibration, metrics, verdict, conformal}}, data_card
-  heads/<head>/model.json          spec, base model kind, members, calibrator params (JSON)
-  heads/<head>/member_<k>.safetensors   logreg: coef, intercept, mean, scale
-  heads/<head>/member_<k>.txt           lightgbm: native text model
-  heads/<head>/report.json         full holdout report
-  heads/<head>/bernoulli.json      holdout table the ledger restarts from
+  model.json                      format "open-rlcd-bundle/1", version id, created_at, pack {name, version, config},
+                                  feature_version, encoder {id, sha256, dim}, policy config, heads {name: {spec,
+                                  dir, files {name: sha256}, metrics, verdict, calibration, conformal}}, data_card
+  heads/<dir>/ensemble.json       spec, members (kind, params, calibrator JSON), feature names, missing-input rates
+  heads/<dir>/member_<k>.safetensors   logreg: coef, intercept, mean, scale, fill
+  heads/<dir>/member_<k>.txt           lightgbm: native text model
+  heads/<dir>/head.json           metrics, verdict, calibration, conformal, data card, notes (hashed: the policy
+                                  caps are read from here, not from model.json)
+  heads/<dir>/report.json         the full holdout report
+  heads/<dir>/bernoulli.json      the holdout table the Bernoulli ledger restarts from
   MODEL_CARD.md
 ```
 
@@ -288,10 +297,23 @@ and out-of-scope queries, perturbed drafts with unsupported numbers) gives groun
 
 ## 9. Security
 
-`RLCD_API_KEY` (every route but `/health` then needs `Authorization: Bearer <key>` or `x-api-key`); bundles
-load only from `RLCD_HOME` and contain no pickles; connectors and judges refuse non-loopback hosts unless
-`allow_remote: true` (config) or `RLCD_ALLOW_REMOTE=1`; secrets come from the environment only; `.gitignore`
-covers `var/`, `*.npz`, `.env`, caches and bundles other than the demo.
+* `RLCD_API_KEY`: every route but `/health` then needs `Authorization: Bearer <key>` or `x-api-key` (constant-time
+  compare); request bodies are capped (`RLCD_MAX_BODY_BYTES`); 500s never echo exception text or paths.
+* Bundles load only from `RLCD_HOME` and contain no pickles or code. A bundle's `pack.name` is a plain name: the
+  service serves it only with the project's own pack (same name) or a built-in pack, and never imports code named
+  by a bundle. Import copies without following symlinks, validates the copy (hashes, file types, sizes, path
+  containment) and parses every LightGBM member in a short-lived subprocess, refusing the bundle if it fails.
+  Policy caps (verdict, conformal threshold, set quantile) are read from each head's hash-checked `head.json`.
+* Connectors and judges refuse non-loopback hosts unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1`.
+  Unix sockets are only explicit paths, `unix://`-style schemes without a network host, and libpq `?host=/dir`;
+  a name ending in `.sock` is a host name.
+* The `claude-cli` judge runs Claude Code with every tool and MCP server disabled (`--tools "" --strict-mcp-config
+  --no-session-persistence`) in an empty temporary directory; judge prompts mark item text as untrusted data.
+  The worst a prompt-injected document can do is earn itself a wrong weak label, which never calibrates.
+* Tabular bundles carry the most frequent values of categorical columns; `pack_config.hash_categories: true`
+  stores salted hashes instead, and `rlcd export` / `rlcd push` warn. `rlcd push --private` refuses a public repo.
+* Secrets come from the environment only; `.gitignore` covers `var/`, `*.npz`, `.env`, caches and bundles other
+  than the demo.
 
 ## 10. What it is not
 

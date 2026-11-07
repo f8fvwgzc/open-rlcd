@@ -1,0 +1,194 @@
+# Open RLCD
+
+**A small decision model that answers typed questions with calibrated probabilities — and says so when it
+can't.** Train it on a laptop CPU in an afternoon, on your own data, and put it in front of (and behind) an LLM
+as the fast, measurable router, gatekeeper and evaluator.
+
+Open RLCD (Reinforcement Learning Calibrated Decision) answers three kinds of question:
+
+| type | answers | example |
+|---|---|---|
+| `noul` | yes / no, as P(yes) | Is the retrieved evidence enough to answer? |
+| `choice` | one of N options | Which response does this request need: direct answer, extraction, summary, …? |
+| `score` | an ordered level 0..K | How risky is this drafted answer, 0–3? |
+
+…and turns the answers into **`act` / `confirm` / `escalate`** through an explicit policy with
+stakes-dependent thresholds. It never writes prose: the expensive LLM only writes text after the cheap model has
+decided *what*, *whether* and *from which evidence*.
+
+```bash
+git clone https://github.com/f8fvwgzc/open-rlcd && cd open-rlcd
+uv sync                      # core: CPU only, no torch
+uv run rlcd serve            # serves the bundled demo model (synthetic data) on 127.0.0.1:8095
+```
+
+```bash
+curl -s localhost:8095/v1/systemone -H 'content-type: application/json' -d '{
+  "state": {"query": "Who leads the team that owns the K-200 scanner?"},
+  "questions": {"kind": {"type": "choice", "head": "response_type"},
+                "multi_hop": {"type": "noul", "head": "needs_graph"}}}'
+```
+
+Teammates: **[docs/teammate-quickstart.md](docs/teammate-quickstart.md)** takes you from zero to a calibrated
+model on your own documents in one page.
+
+## What it promises — and how it checks
+
+* **A probability of 0.8 comes true about 80 % of the time on data the model never saw.** Every head is scored
+  once on an untouched holdout and the result is published at `/v1/calibration`: log loss and Brier next to the
+  base-rate forecaster, Brier skill score, reliability bins, ECE, and a block-bootstrap skill test.
+* **No skill, no decision.** If the holdout shows no reliable gain over the base rate, the head abstains
+  (`escalate`) on every request and says why. Noise is never dressed up as a signal.
+* **Probabilities stay frequencies.** No class weights, no resampling.
+* **Weak labels train, humans calibrate.** An LLM judge can label thousands of rows cheaply; the calibrators are
+  fitted, and every published number is measured, on human-verified (or ground-truth) rows only — and the
+  judge's own agreement with humans is reported next to them.
+* **Promised error rates are tested.** Gate heads (`answerable`, `grounded`) can promise "when I say yes, I'm
+  wrong at most 5 % of the time" via split-conformal abstention; the promise is checked on the holdout and
+  published. If it can't be made with the data you have, the head is capped at `confirm` and says so.
+* **Every answer carries** `head`, `calibrated`, `confidence` and `skill`; every decision also carries `reasons`
+  (exact feature attributions for linear heads, TreeSHAP for LightGBM), the thresholds it used and its warnings.
+
+## What it is not
+
+* **Not an LLM.** No text generation, no chat. Free-form `instructions` are accepted and ignored.
+* **No nanosecond magic.** Heads take microseconds to well under a millisecond per row on a CPU; the text encoder
+  is the dominant cost (single-digit to tens of milliseconds per query on CPU with ONNX int8); ANN search over
+  millions of vectors in a dedicated vector database is typically low milliseconds. `rlcd bench` prints the real
+  p50/p95/p99 on your machine — see the measured numbers below.
+* **Not better than its labels.** LLM-judge labels carry the judge's mistakes into the base model; that is why
+  calibration uses human labels only. With few human labels the holdout is small and the intervals are wide —
+  read them.
+* **Not a guarantee under drift.** Calibration holds for data like the training data. New document types, a new
+  product line, a new language: audit fresh rows and retrain.
+* **Synthetic numbers are a sanity check.** The demo bundle and the test suite run on synthetic data; their
+  metrics show that the pipeline is honest, not how good a model will be on your traffic.
+
+## The enterprise-documents pack
+
+For each incoming request in front of a document store (today: the local corpus `rlcd ingest` builds, with a
+FAISS / numpy vector index and a NetworkX entity graph; Qdrant, pgvector and Neo4j connectors are the next
+milestone), or in front of your own retriever (pass the candidates in the request):
+
+| head | type | decides |
+|---|---|---|
+| `response_type` | choice | direct_answer, extract_fields, summarize, compare, list, clarify_question, escalate_human, out_of_scope |
+| `route` | choice | vector, graph, hybrid, none |
+| `needs_graph` | noul | is multi-hop graph traversal needed |
+| `chunk_relevant` | noul | which retrieved chunks matter (`/v1/rank` re-ranks the ANN candidates) |
+| `answerable` | noul, gate | is the evidence enough to answer — otherwise ask, escalate or refuse |
+| `grounded` | noul, gate | evaluator: is every claim of a drafted answer supported by the evidence |
+| `complete` | score 0–3 | evaluator: how much of the question the answer covers |
+| `risk_tier` | score 0–3 | evaluator: how much damage a wrong answer could do |
+
+`POST /v1/decide` returns a plan (`response_type`, `route`, `use_chunks`, `call_llm`, `next`) with one overall
+`act / confirm / escalate` that is never stronger than its weakest gate; `POST /v1/evaluate` judges a drafted
+answer: ship (`act`), human review (`confirm`) or reject (`escalate`).
+
+Features: a frozen open multilingual encoder (default **intfloat/multilingual-e5-small**, MIT, ~100 languages
+including English, Japanese and Mongolian) through ONNX Runtime int8 on CPU, embeddings cached by content
+hash; lexical signals (BM25, term coverage, number support); retrieval signals (ANN scores, rank gaps, score
+entropy, source agreement, freshness, authority, graph path length and degree). Heads are logistic regression or
+LightGBM on top: they train in seconds to minutes. Never fine-tunes a transformer by default.
+
+Other packs: **tabular** (CSV / Parquet: churn, fraud, lead scoring, approvals; categorical values travel with
+the model — set `hash_categories: true` for columns that could hold personal data). A thin **trading** adapter to the
+View Engine quant sidecar follows as a separate pull request. Writing your own:
+[docs/writing-a-pack.md](docs/writing-a-pack.md).
+
+## Train on your own data
+
+```bash
+uv sync --extra documents --extra labeling
+uv run rlcd init my-business --pack documents && cd my-business
+uv run rlcd ingest ./data                          # your folder of .md / .txt / .html / .pdf / .json
+# write queries.jsonl: real questions people ask, one {"query": ..., "time": ..., "group": ...} per line
+uv run rlcd label bootstrap --judge claude-cli     # or: anthropic | ollama:<model> | openai:<url>|<model>
+uv run rlcd label audit --heads answerable,grounded --n 600   # your labels: these calibrate the model
+uv run rlcd train                                  # all heads; prints the calibration summary
+uv run rlcd report                                 # MODEL_CARD.md + an HTML reliability page
+uv run rlcd label next --head answerable           # what to audit next; retrain, watch the curve tighten
+uv run rlcd serve --port 8095
+uv run rlcd bench
+uv run rlcd export ./bundle                        # open weights: JSON + safetensors + LightGBM text
+```
+
+How many human labels? A head needs at least 30 trusted rows to train at all, and its holdout (20 %) needs about
+30 rows the policy would act on before `act` can be verified — roughly **150–300 trusted rows per head**. Fewer
+still gives calibrated `confirm`-level decisions, and the report says exactly what is missing. Audit the heads
+that gate actions first.
+
+Production outcomes posted to `/v1/feedback` update the Beta-Bernoulli posteriors at once and become
+up-weighted training rows at the next train. That is the whole "reinforcement" — described as modestly as it is.
+
+## What the synthetic demo shows (and doesn't)
+
+`rlcd demo --encoder onnx` builds a fictional company corpus in English, Japanese and Mongolian with 900 queries
+and ground truth for every head, trains all eight heads and reports on template groups the heads never saw:
+
+| head | holdout rows | log loss (base rate) | Brier skill | ECE | verdict at medium stakes |
+|---|---|---|---|---|---|
+| response_type | 182 | 0.27 (1.91) | 0.84 | 0.06 | act |
+| route | 182 | 0.24 (1.23) | 0.81 | 0.05 | act |
+| needs_graph | 182 | 0.16 (0.43) | 0.60 | 0.03 | **escalate**: the gain is not reliably positive across 56 template groups |
+| chunk_relevant | 747 | 0.21 (0.62) | 0.70 | 0.03 | act |
+| answerable | 277 | 0.39 (0.70) | 0.51 | 0.03 | confirm: the 5 % conformal promise cannot be made yet |
+| grounded | 322 | 0.15 (0.69) | 0.84 | 0.05 | confirm |
+| complete | 322 | 0.48 (0.88) | 0.41 | 0.05 | act |
+| risk_tier | 322 | 0.23 (1.23) | 0.81 | 0.03 | act |
+
+These are synthetic numbers: they show that the pipeline is honest (a head with a Brier skill of 0.60 still
+abstains when the evidence for its skill is not solid), not how good a model will be on your documents. The
+bundle shipped in `bundles/demo-documents` is the same pipeline with the offline hashing encoder, so it works
+without a download; its heads are weaker.
+
+## Measured latency (one machine, not a promise)
+
+`rlcd bench` on an Apple M2 Pro (10 cores), Python 3.12, single requests, the synthetic documents demo trained
+with multilingual-e5-small (int8 ONNX):
+
+| stage | p50 | p95 |
+|---|---|---|
+| one head on one prepared feature row (logistic regression, 5 calibrated members) | 0.06–0.20 ms | 0.07–0.22 ms |
+| build a feature row (query, chunk, evidence or answer view), embeddings cached | 0.01–0.02 ms | 0.01–0.03 ms |
+| embed one query (e5-small int8 ONNX, CPU) | 3.7 ms | 5.6 ms |
+| embed 32 passages | 325 ms | 430 ms |
+| top-10 search in the local index (50 chunks) / 2-hop entity expansion | 0.015 ms / 0.26 ms | 0.016 ms / 0.27 ms |
+| whole `/v1/decide` for a **new** query (query and candidate chunks embedded) | 52 ms | 65 ms |
+| whole `/v1/decide` for a repeated query (caches warm) | 3.6 ms | 4.1 ms |
+
+The encoder dominates; the decision heads are a rounding error. Search over millions of vectors depends on your
+vector database and index settings — measure it with your own store.
+
+## API
+
+`POST /v1/systemone` (System One-compatible: a View Engine RLCD client works unchanged), `/v1/rank`,
+`/v1/decide`, `/v1/evaluate`, `/v1/feedback`, `/v1/train` (+ `GET /v1/train/{job}`); `GET /health`,
+`/v1/models`, `/v1/heads`, `/v1/calibration`, `/v1/bernoulli`. Full contract and the extensions table:
+[docs/contract.md](docs/contract.md).
+
+## Open-weight bundles
+
+A trained model is a directory: `model.json` (version, heads, classes, feature version, encoder id + sha256,
+thresholds, data card), LightGBM native text models, calibrators as JSON, linear weights as `safetensors`, and a
+generated `MODEL_CARD.md`. **No pickle or joblib anywhere: loading a bundle never executes code.** The repository
+ships one demo bundle trained only on synthetic data (`bundles/demo-documents`); bundles trained on your data
+stay on your machine unless you choose to `rlcd export` or `rlcd push --hf` them.
+
+## Security
+
+`RLCD_API_KEY` protects every route but `/health`. Bundles load only from `RLCD_HOME` and contain no code.
+Connectors and LLM judges refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or
+`RLCD_ALLOW_REMOTE=1`). Secrets come from environment variables only.
+
+## Examples
+
+* [examples/documents](examples/documents): build the synthetic company corpus, train, decide and evaluate
+  (optionally retrieve from your own folder of documents).
+* [examples/tabular](examples/tabular): the UCI Bank Marketing dataset (CC BY 4.0, downloaded at run time),
+  trained and reported.
+
+## Design and provenance
+
+[docs/design.md](docs/design.md) explains what was reused from the reference RLCD service, what was generalised and
+what is new. MIT licensed; see [NOTICE](NOTICE) for credits.
