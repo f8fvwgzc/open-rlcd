@@ -1,0 +1,133 @@
+# Defaults of the documents pack: the router / gatekeeper / evaluator around a RAG system.
+#
+# Every head is overridable in rlcd.yaml under `heads:` (stakes, conformal, model, enabled, ...).
+# The descriptions below are what a human labeller and an LLM judge read (`rlcd label bootstrap` puts them in
+# the judge's prompt verbatim), so they say exactly what each label means.
+#
+# Views (what a head sees; the provider documents each state in /v1/heads):
+#   query                  {query, candidates?, now?}
+#   query_chunk            {query, chunk, candidates?, now?}
+#   query_evidence         {query, evidence, candidates?, now?}
+#   query_evidence_answer  {query, evidence, answer}
+heads:
+  response_type:
+    type: choice
+    classes: [direct_answer, extract_fields, summarize, compare, list, clarify_question, escalate_human, out_of_scope]
+    levels:
+      - "a short factual answer to one question (a price, a date, a name, a number)"
+      - "several named fields pulled out of the documents (e.g. SKU, price and warranty of one product)"
+      - "a summary or overview of a document, policy, product or team"
+      - "a comparison of two or more things (differences, which is cheaper / heavier / longer)"
+      - "an enumeration of all items that match (all products of a team, all teams of a department)"
+      - "the request is too ambiguous to answer (it does not say what it is about): ask a clarifying question"
+      - "a person must handle it: complaints, legal threats or questions, requests for personal data"
+      - "unrelated to the organisation's documents (weather, sports, recipes, general chit-chat)"
+    view: query
+    model: logreg
+    decision: argmax
+    stakes: medium
+    description: >-
+      What kind of response does this request need? Judge the request itself, not whether the documents contain
+      the answer: a question about a product that does not exist is still a direct_answer (the gatekeeper
+      `answerable` catches it). Pick clarify_question only when the request does not name what it is about.
+
+  route:
+    type: choice
+    classes: [vector, graph, hybrid, none]
+    levels:
+      - "one passage of one document answers it (semantic / keyword lookup)"
+      - "the answer needs a chain of links across documents or entities (product -> owning team -> team lead)"
+      - "several documents must be gathered side by side (comparisons, lists across documents)"
+      - "no retrieval should run (clarify, escalate to a human, or out of scope)"
+    view: query
+    model: logreg
+    decision: argmax
+    stakes: medium
+    description: >-
+      Which retrieval route should answer this request? vector for a single-document lookup, graph for multi-hop
+      relations between entities, hybrid for comparisons and lists that gather several documents, none when no
+      retrieval should run at all.
+
+  needs_graph:
+    type: noul
+    view: query
+    model: logreg
+    decision: argmax
+    stakes: medium
+    positive: >-
+      answering needs multi-hop traversal across linked documents or entities (the answer is not in any single
+      document; e.g. "who leads the team that owns product X?")
+    description: Does answering this request need multi-hop traversal across linked documents or entities?
+
+  chunk_relevant:
+    type: noul
+    view: query_chunk
+    model: logreg
+    decision: argmax
+    stakes: medium
+    positive: >-
+      this chunk contains information needed to answer the request (a chunk about a similar but different
+      entity, or one that only shares words with the request, is false)
+    description: Does this retrieved chunk contain information needed to answer the request?
+
+  answerable:
+    type: noul
+    view: query_evidence
+    model: logreg
+    decision: gate
+    conformal: 0.05
+    stakes: medium
+    positive: >-
+      the evidence is sufficient to answer the request fully and correctly (every requested fact is stated in
+      the evidence; false when the entity asked about is not in it, a requested fact is missing, or one link
+      of a multi-hop chain is missing)
+    description: Is the evidence sufficient to answer the request fully and correctly?
+
+  grounded:
+    type: noul
+    view: query_evidence_answer
+    model: logreg
+    decision: gate
+    conformal: 0.05
+    stakes: high
+    positive: >-
+      every factual claim in the answer is supported by the evidence (a changed number, a wrong name, or a claim
+      about something the evidence does not mention makes it false; an answer may be incomplete and still
+      grounded)
+    description: Is every factual claim in the drafted answer supported by the evidence?
+
+  complete:
+    type: score
+    levels:
+      - "0: misses the question"
+      - "1: answers a small part"
+      - "2: answers most of it"
+      - "3: complete"
+    view: query_evidence_answer
+    model: logreg
+    decision: argmax
+    stakes: medium
+    description: >-
+      How much of the request does the drafted answer address? Judge coverage of what was asked, not
+      correctness (a wrong number that answers the question still counts as answering it; `grounded` judges
+      correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3.
+
+  risk_tier:
+    type: score
+    levels:
+      - "0: harmless"
+      - "1: low risk (internal, reversible)"
+      - "2: elevated (customer-facing, money, personal data)"
+      - "3: high (legal, medical, safety, irreversible)"
+    view: query_evidence_answer
+    model: logreg
+    decision: argmax
+    stakes: medium
+    description: >-
+      How much harm could a wrong answer to this request cause? Judge the topic of the request and answer:
+      product specifications are harmless, internal organisation facts low, prices / refunds / warranties /
+      personal data elevated, legal, medical and safety matters high.
+
+policy:
+  # A request the model cannot vouch for goes to a person; rlcd.yaml `policy.abstain` overrides the name.
+  abstain: escalate
