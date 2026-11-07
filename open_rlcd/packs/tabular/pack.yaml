@@ -1,0 +1,8 @@
+# Defaults of the tabular pack (generic CSV / Parquet: churn, fraud, lead scoring, approvals).
+#
+# Heads are not listed here: there is one head per label column, declared in rlcd.yaml under
+# pack_config.targets (or the one-head shorthand `label: <column>`), each with view "row" and model "auto"
+# (LightGBM when importable, else logistic regression). rlcd.yaml `heads:` overrides any of their fields.
+policy:
+  # A business decision without evidence holds (no action is taken); rlcd.yaml `policy.abstain` overrides it.
+  abstain: hold
