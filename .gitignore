@@ -31,3 +31,6 @@ build/
 .coverage
 htmlcov/
 .DS_Store
+
+# local tool state (agent worktrees, editor settings)
+.claude/
