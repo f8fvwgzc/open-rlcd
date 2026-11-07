@@ -1,0 +1,33 @@
+# private build prompt: never published
+START_HERE_PROMPT.md
+
+# local artifacts: models, registry, feedback, decision logs, label stores, caches
+var/
+*.npz
+*.npy
+.env
+.env.*
+!.env.example
+**/embeddings-cache/
+**/.rlcd-cache/
+*.onnx
+*.sqlite
+*.sqlite3
+
+# bundles: only the shipped demo bundle is tracked
+bundles/*
+!bundles/demo-documents/
+
+# python / tooling
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+.coverage
+htmlcov/
+.DS_Store

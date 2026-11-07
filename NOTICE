@@ -1,0 +1,16 @@
+Open RLCD
+Copyright (c) 2026 f8fvwgzc. Licensed under the MIT License (see LICENSE).
+
+This project is extracted from, and generalises, RLCD (Reinforcement Learning Calibrated Decision), the
+decision service of the View Engine project by the same author (MIT License). Reused from that reference
+implementation: the System One-compatible wire contract and its confidence formulas, the calibration
+metrics and skill test design, the Beta-Bernoulli posterior ledger and binomial / Wilson evidence gates,
+time-ordered purged calibration folds, and the feedback loop design. No trading logic is included.
+
+The wire contract follows the public documentation of Typesafe's "System One" evaluation API (one
+evaluation endpoint, three question types, the same confidence formulas). Open RLCD is not affiliated
+with Typesafe.
+
+Default text encoder (downloaded on first use, not redistributed in this repository):
+- intfloat/multilingual-e5-small (https://huggingface.co/intfloat/multilingual-e5-small), MIT License.
+  Wang et al., "Multilingual E5 Text Embeddings: A Technical Report", 2024.

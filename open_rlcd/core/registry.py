@@ -1,0 +1,197 @@
+"""Versioned models under RLCD_HOME.
+
+    RLCD_HOME/
+      registry.json              {"latest": "rlcd-0.1.3", "next": 4, "versions": {id: {...}}}
+      models/<version>/          one bundle per version (see core/bundle.py)
+      bernoulli.json             the live Beta-Bernoulli ledger (restarts from each new holdout)
+      feedback.jsonl, decisions.jsonl
+
+`rlcd-latest` is an alias of the newest version; old versions stay addressable through `model`. A retrain that
+touches some heads carries the others over unchanged, so a version always describes the whole model. Bundles
+are only ever loaded from inside RLCD_HOME (registry.json is data: a path in it that escapes the home is refused).
+"""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import threading
+from pathlib import Path
+from typing import Any
+
+from .. import LATEST, MODEL_PREFIX
+from . import bundle as BD
+from .bernoulli import Ledger
+from .training import now_iso
+
+
+class UnknownModel(Exception):
+    pass
+
+
+def default_home() -> Path:
+    return Path(os.environ.get("RLCD_HOME") or "var").expanduser().resolve()
+
+
+class Registry:
+    def __init__(self, home: Path | None = None):
+        self.home = Path(home).expanduser().resolve() if home else default_home()
+        (self.home / "models").mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._bundles: dict[str, BD.Bundle] = {}
+        self.ledger = Ledger(self.home / "bernoulli.json")
+
+    # ------------------------------------------------------------------ registry.json
+    @property
+    def _path(self) -> Path:
+        return self.home / "registry.json"
+
+    def registry(self) -> dict:
+        with self._lock:
+            if self._path.exists():
+                return json.loads(self._path.read_text(encoding="utf-8"))
+            return {"latest": None, "next": 1, "versions": {}}
+
+    def _write(self, reg: dict) -> None:
+        tmp = self._path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(reg, indent=1), encoding="utf-8")
+        tmp.replace(self._path)
+
+    def latest_id(self) -> str:
+        """The versioned id `rlcd-latest` points at. `rlcd-0.1.0` is the untrained service."""
+        return self.registry()["latest"] or f"{MODEL_PREFIX}0"
+
+    def resolve(self, model: str | None) -> str:
+        reg = self.registry()
+        latest = reg["latest"] or f"{MODEL_PREFIX}0"
+        if model in (None, "", LATEST, latest):
+            return latest
+        if model in reg["versions"]:
+            return model
+        raise UnknownModel(model)
+
+    def available(self) -> list[str]:
+        return [LATEST, *sorted(self.registry()["versions"], key=_vkey)]
+
+    def entry(self, version: str) -> dict | None:
+        return self.registry()["versions"].get(version)
+
+    # ------------------------------------------------------------------ bundles
+    def _dir(self, version: str) -> Path:
+        e = self.entry(version)
+        if e is None:
+            raise UnknownModel(version)
+        d = (self.home / e["path"]).resolve()
+        if not d.is_relative_to(self.home):
+            raise RuntimeError(f"model path escapes RLCD_HOME: {e['path']}")
+        return d
+
+    def bundle(self, version: str) -> BD.Bundle | None:
+        """The bundle of a version, or None for the untrained rlcd-0.1.0."""
+        if version == f"{MODEL_PREFIX}0" and self.entry(version) is None:
+            return None
+        with self._lock:
+            if version not in self._bundles:
+                self._bundles[version] = BD.Bundle(self._dir(version))
+            return self._bundles[version]
+
+    def _register(self, reg: dict, vid: str, meta: dict, extra: dict | None = None) -> None:
+        reg["versions"][vid] = {"path": f"models/{vid}", "created_at": meta.get("created_at"),
+                                "pack": (meta.get("pack") or {}).get("name"),
+                                "feature_version": meta.get("feature_version"),
+                                "retrained": meta.get("retrained", []),
+                                "heads": {n: {"trained_at": h.get("trained_at"), "metrics": h.get("metrics"),
+                                              "verdict": h.get("verdict"), "model": h.get("model")}
+                                          for n, h in meta.get("heads", {}).items()},
+                                **(extra or {})}
+        n = int(vid.rsplit(".", 1)[1])
+        reg["latest"] = vid if reg["latest"] is None or _vkey(vid) >= _vkey(reg["latest"]) else reg["latest"]
+        reg["next"] = max(int(reg["next"]), n + 1)
+
+    def commit(self, trained: dict[str, Any], *, pack: dict, feature_version: str, encoder: dict | None,
+               policy: dict, data_card: dict | None = None, notes: list[str] | None = None) -> str:
+        """Save freshly trained heads as a new version, carrying over the previous version's other heads when
+        they were trained on the same pack and feature version."""
+        with self._lock:
+            reg = self.registry()
+            vid = f"{MODEL_PREFIX}{int(reg['next'])}"
+            carried: dict[str, tuple[Path, dict]] = {}
+            dropped: list[str] = []
+            prev = self.bundle(reg["latest"]) if reg["latest"] else None
+            if prev is not None:
+                same = (prev.meta.get("feature_version") == feature_version
+                        and (prev.meta.get("pack") or {}).get("name") == pack.get("name"))
+                for name in prev.names():
+                    if name in trained:
+                        continue
+                    if same:
+                        h = prev.head(name)
+                        carried[name] = (h.dir, h.entry)
+                    else:
+                        dropped.append(name)
+            if dropped:
+                notes = [*(notes or []), f"not carried over (other feature version or pack): {sorted(dropped)}"]
+            meta = BD.write_bundle(self.home / "models" / vid, version=vid, created_at=now_iso(), pack=pack,
+                                   feature_version=feature_version, encoder=encoder, policy=policy, trained=trained,
+                                   carried=carried, data_card=data_card, notes=notes)
+            prev_vid = reg["latest"]
+            self._register(reg, vid, meta)
+            self._write(reg)
+            for name, th in trained.items():   # the Bernoulli ledger restarts from the new holdout
+                self.ledger.reset(name, {**th.ledger, "model_version": vid})
+            # A carried-over head is the very same model, so its evidence (holdout counts plus the outcomes scored
+            # since) carries over too. Without re-tagging, its table would still name the old version: the
+            # Bernoulli gate would see no evidence (act -> confirm) and feedback would stop updating it.
+            for name, (old_dir, _) in carried.items():
+                table = self.ledger.table(name)
+                if not (table and table.get("model_version") == prev_vid):
+                    table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
+                self.ledger.reset(name, {**table, "model_version": vid})
+            return vid
+
+    # ------------------------------------------------------------------ export / import
+    def export(self, version: str, dest: Path) -> Path:
+        src = self._dir(version)
+        dest = Path(dest).expanduser().resolve()
+        if dest.exists() and any(dest.iterdir()):
+            raise BD.BundleError(f"{dest} exists and is not empty")
+        if dest.exists():
+            dest.rmdir()
+        shutil.copytree(src, dest, symlinks=False)
+        BD.validate(dest)
+        return dest
+
+    def import_(self, src: Path, *, make_latest: bool = True) -> str:
+        """Validate a bundle directory and register it as a new version of this home."""
+        src = Path(src).expanduser()
+        meta = BD.validate(src)
+        with self._lock:
+            reg = self.registry()
+            vid = f"{MODEL_PREFIX}{int(reg['next'])}"
+            dest = self.home / "models" / vid
+            shutil.copytree(src, dest, symlinks=False)
+            try:   # the source could have changed between validate and copy: check what actually landed
+                BD.validate(dest)
+            except BD.BundleError:
+                shutil.rmtree(dest, ignore_errors=True)
+                raise
+            meta = {**meta, "version": vid, "imported_from": meta.get("version")}
+            (dest / "model.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
+            latest_before = reg["latest"]
+            self._register(reg, vid, meta, {"imported_from": meta["imported_from"], "imported_at": now_iso()})
+            if not make_latest:
+                reg["latest"] = latest_before
+            self._write(reg)
+            bundle = BD.Bundle(dest, meta)
+            for name in bundle.names():
+                table = bundle.head(name).holdout_ledger()
+                if make_latest:
+                    self.ledger.reset(name, {**table, "model_version": vid})
+            return vid
+
+
+def _vkey(vid: str) -> int:
+    try:
+        return int(vid.rsplit(".", 1)[1])
+    except (IndexError, ValueError):
+        return -1
