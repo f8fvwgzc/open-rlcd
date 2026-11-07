@@ -59,8 +59,12 @@ TEMPLATES: dict[str, dict] = {
                         "hash_categories": False},
         "policy": {"abstain": "hold"},
     },
+    "trading": {
+        "pack_config": {"quant_url": "http://127.0.0.1:8090", "symbols": ["XAUUSD", "EURUSD"], "intervals": ["15m"],
+                        "sl_pips": 20, "tp_pips": 50, "tp2_pips": 100, "horizon": 48},
+        "policy": {"abstain": "hold"},
+    },
 }
-# `rlcd init` offers only the packs that ship on this branch (the trading adapter lives on its own branch).
 
 HEADER = """# Open RLCD project configuration. Every key: docs/configuration.md. Check it with `rlcd config check`.
 # Docs: docs/teammate-quickstart.md (documents), docs/tabular-quickstart.md (tables), docs/control-layer.md

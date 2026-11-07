@@ -37,6 +37,7 @@ from ..core.head import HeadSpec
 BUILTIN = {
     "documents": "open_rlcd.packs.documents:DocumentsPack",
     "tabular": "open_rlcd.packs.tabular:TabularPack",
+    "trading": "open_rlcd.packs.trading:TradingPack",
 }
 # what to install when a built-in pack's optional dependencies are missing
 EXTRAS = {"documents": "documents"}

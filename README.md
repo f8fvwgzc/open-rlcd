@@ -123,8 +123,9 @@ LightGBM on top: they train in seconds to minutes. Never fine-tunes a transforme
 Other packs: **tabular** (CSV / Parquet: churn, fraud, lead scoring, approvals; categorical values travel with
 the model — set `hash_categories: true` for columns that could hold personal data; free-text columns go under
 `text:` and are hashed, so no text is stored in the bundle; columns only known after the decision go under
-`exclude:`). A thin **trading** adapter to the View Engine quant sidecar follows as a separate pull request.
-Writing your own: [docs/writing-a-pack.md](docs/writing-a-pack.md), with a complete ticket-triage pack in
+`exclude:`). A thin **trading** adapter talks to the View Engine quant sidecar's `/dataset` and `/features` over
+HTTP (no trading logic inside; analysis tool, not financial advice). Writing your own:
+[docs/writing-a-pack.md](docs/writing-a-pack.md), with a complete ticket-triage pack in
 [examples/custom-pack](examples/custom-pack).
 
 ## Train on your own data
