@@ -157,3 +157,23 @@ def test_unknown_strategy_and_heads(project, store):
         plan_audit(store, {"kind": KIND}, strategy="random")
     with pytest.raises(ValueError, match="unknown heads"):
         audit(project, AuditPack(), heads=["nope"], input_fn=scripted([]), print_fn=lambda *a: None, store=store)
+
+
+def test_head_summary_says_how_many_rows_a_verified_holdout_needs(home):
+    """F36: 30 trusted rows let a head train, but its 20 % holdout then has ~6 rows, under the 30 that `verify`
+    needs: the summary says so and how many more rows are missing (it follows train.holdout_fraction)."""
+    from open_rlcd.labeling.audit import head_summary
+
+    store = LabelStore(home)
+    store.add_items([LabelItem(f"t{i}", "text", {"i": i}) for i in range(160)])
+    for i in range(40):
+        store.add_human(f"t{i}", "polite", "true" if i % 2 else "false")
+    s = head_summary(store, POLITE)
+    assert s["for_verified_holdout"] == 150 and s["more_for_verified_holdout"] == 110
+    assert "capped at confirm" in s["status"] and "110 more" in s["status"]
+    s = head_summary(store, POLITE, holdout_fraction=0.25)
+    assert s["for_verified_holdout"] == 120 and s["more_for_verified_holdout"] == 80
+    for i in range(40, 155):
+        store.add_human(f"t{i}", "polite", "true")
+    s = head_summary(store, POLITE)
+    assert s["more_for_verified_holdout"] == 0 and "can train with a 30-row holdout" in s["status"]

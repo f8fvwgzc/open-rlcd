@@ -11,6 +11,8 @@
       categorical: auto               # columns whose values are not all numbers; a list adds columns to
                                       #   treat as categorical even if numeric (zip codes, plan ids)
       max_categories: 50              # one-hot vocabulary size per categorical column (plus __other__, __missing__)
+      hash_categories: false          # true: bundles store salted SHA-256 hashes of categorical values, not the
+                                      #   raw values (use it when a categorical column could hold personal data)
       delimiter: auto                 # auto = the most frequent of , ; TAB | in the header line
       na_values: ["", NA, N/A, NaN, null, "<NA>", "#N/A"]      # case-insensitive
       label_source: ground_truth      # provenance of the file's labels: ground_truth | human | synthetic | judge
@@ -52,7 +54,7 @@ PARQUET_SUFFIXES = (".parquet", ".pq")
 TARGET_KEYS = ("label", "type", "positive", "classes", "levels")
 SPEC_KEYS = ("model", "stakes", "decision", "conformal", "description", "params", "input", "enabled")
 BASE_KEYS = ("data", "id", "group", "time", "segment", "features", "categorical", "max_categories", "targets",
-             "delimiter", "encoding", "na_values", "label_source", "question")
+             "delimiter", "encoding", "na_values", "label_source", "question", "hash_categories")
 # general keys other parts of open-rlcd may put into any pack_config; tolerated, unused here
 TOLERATED_KEYS = ("allow_remote",)
 _INT_FLOAT = re.compile(r"^[+-]?\d+\.0+$")
@@ -270,6 +272,7 @@ class TabularConfig:
     features: tuple[str, ...] | None = None        # None = auto
     categorical: tuple[str, ...] | None = None     # None = auto
     max_categories: int = 50
+    hash_categories: bool = False                  # vocabularies as salted SHA-256 hashes (see provider.py)
     delimiter: str = "auto"
     encoding: str = "utf-8-sig"
     na_values: frozenset[str] = frozenset(DEFAULT_NA)
@@ -339,6 +342,11 @@ def parse_config(pc: dict, resolve_path: Any) -> TabularConfig:
     mc = pc.get("max_categories", 50)
     if not isinstance(mc, int) or isinstance(mc, bool) or not 1 <= mc <= 10000:
         raise TabularConfigError(f"pack_config.max_categories must be an integer in 1..10000, got {mc!r}")
+    hc = pc.get("hash_categories", False)
+    if hc is None:
+        hc = False
+    if not isinstance(hc, bool):
+        raise TabularConfigError(f"pack_config.hash_categories must be true or false, got {hc!r}")
     src = str(pc.get("label_source") or "ground_truth")
     if src not in SOURCES or src == "feedback":
         raise TabularConfigError(f"pack_config.label_source must be one of {[s for s in SOURCES if s != 'feedback']}")
@@ -349,7 +357,7 @@ def parse_config(pc: dict, resolve_path: Any) -> TabularConfig:
         data=Path(resolve_path(data)), id=_col(pc.get("id"), "id"), group=_col(pc.get("group"), "group"),
         time=_col(pc.get("time"), "time"), segment=_col(pc.get("segment"), "segment"),
         features=_cols(pc.get("features"), "features"), categorical=_cols(pc.get("categorical"), "categorical"),
-        max_categories=mc, delimiter=str(pc.get("delimiter") or "auto"),
+        max_categories=mc, hash_categories=hc, delimiter=str(pc.get("delimiter") or "auto"),
         encoding=str(pc.get("encoding") or "utf-8-sig"),
         na_values=frozenset(str(x).strip().lower() for x in na), label_source=src, targets=targets)
 

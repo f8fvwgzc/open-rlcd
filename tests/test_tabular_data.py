@@ -360,3 +360,108 @@ def test_synthetic_data_is_deterministic_and_calibrated_by_construction(tmp_path
     assert np.ptp(noise["churned"]) == 0                                   # independent of the features
     info = TabularPack().synth(seed=2, n=50, path=tmp_path / "s.csv")
     assert info["rows"] == 50 and info["pack_config"]["data"] == str(tmp_path / "s.csv")
+
+
+# ----------------------------------------------------------------------------- hashed vocabularies (F23)
+
+def _homed(root: Path, pack_config: dict) -> Project:
+    pr = project(root, pack_config)
+    pr.home_override = root / "var"          # its own home (RLCD_HOME is shared by the whole test session)
+    return pr
+
+
+def _with_emails(tmp_path: Path, n: int = 600) -> Path:
+    """The synthetic churn table plus a personal-data column that repeats per customer (not identifier-like)."""
+    import csv
+
+    raw = tmp_path / "raw.csv"
+    write_synthetic_csv(raw, n=n, seed=3)
+    rows = list(csv.DictReader(raw.open()))
+    for r in rows:
+        r["contact_email"] = f"{r['customer_id']}.person@example.com"
+    out = tmp_path / "customers.csv"
+    with out.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]))
+        w.writeheader()
+        w.writerows(rows)
+    return out
+
+
+def test_hashed_vocabularies_keep_raw_values_out_and_transform_identically(tmp_path):
+    from open_rlcd.packs.tabular.provider import category_hash
+
+    data = _with_emails(tmp_path)
+    pc = synthetic_pack_config(data)
+    raw = TabularPack().provider(_homed(tmp_path / "a", pc))
+    hashed = TabularPack().provider(_homed(tmp_path / "b", {**pc, "hash_categories": True}))
+    cfg = json.dumps(hashed.to_config())
+    names = hashed.names("row")
+    assert "person@example.com" not in cfg and "basic" not in cfg and "premium" not in cfg
+    assert not any("example.com" in n or n == "plan=basic" for n in names)
+    assert "plan=__other__" in names and "plan=__missing__" in names and "tenure_months" in names
+    assert any(n.startswith("contact_email=h:") for n in names)
+    assert "person@example.com" in json.dumps(raw.to_config())         # raw mode: unchanged (and warned about)
+    assert hashed.data_card()["tabular"]["categorical_values"] == "salted sha256 hashes"
+    assert any("salted SHA-256" in n for n in hashed.notes) and any("hash_categories" in n for n in raw.notes)
+    # same rows -> the same one-hot positions, column by column (hashed blocks are ordered by hash)
+    first = next(c for c in raw.columns if c.name == "contact_email").vocabulary[0]
+    rows = [state(contact_email=first), state(plan="PREMIUM", region=None, contact_email=first.upper()),
+            state(plan="enterprise", contact_email="nobody@example.com"), state(paperless="Yes", contact_email=None)]
+    xr, xh = raw.transform("row", rows), hashed.transform("row", rows)
+    rn, hn = raw.names("row"), hashed.names("row")
+    for name in rn:
+        col, sep, val = name.partition("=")
+        if sep and val not in ("__other__", "__missing__"):
+            name_h = f"{col}={category_hash(hashed.salt, val)}"
+        else:
+            name_h = name
+        assert np.array_equal(xr[:, rn.index(name)], xh[:, hn.index(name_h)], equal_nan=True), name
+    assert len(rn) == len(hn)
+    # what /v1/heads shows: no category values for a hashed column
+    d = hashed.describe("row")["columns"]["plan"]
+    assert d["categories"] == [] and d["hashed"] is True and d["more_categories"] == 3
+
+
+def test_hashed_provider_round_trip_and_tamper_checks(tmp_path):
+    data = _with_emails(tmp_path)
+    pr = _homed(tmp_path, {**synthetic_pack_config(data), "hash_categories": True})
+    prov = TabularPack().provider(pr)
+    cfg = json.loads(json.dumps(prov.to_config()))                      # what the bundle stores
+    again = TabularProvider.from_config(cfg)
+    assert again.feature_version == prov.feature_version and again.names("row") == prov.names("row")
+    rows = [state(contact_email="C00003.person@example.com"), state(plan="Premium", contact_email=None)]
+    assert np.array_equal(again.transform("row", rows), prov.transform("row", rows), equal_nan=True)
+    bad = json.loads(json.dumps(cfg))
+    bad["category_salt"] = "0" * 32                                     # another salt: other hashes
+    with pytest.raises(TabularConfigError, match="modified"):
+        TabularProvider.from_config(bad)
+    bad = json.loads(json.dumps(cfg))
+    del bad["category_salt"]
+    with pytest.raises(TabularConfigError, match="salt"):
+        TabularProvider.from_config(bad)
+    # one salt per project home: a retrain keeps the schema (heads it does not retrain carry over) ...
+    assert TabularPack().provider(pr).feature_version == prov.feature_version
+    salt_file = pr.home / "tabular" / "category_salt"
+    assert salt_file.read_text().strip() == prov.salt and (salt_file.stat().st_mode & 0o077) == 0
+    # ... and another home hashes differently
+    other = TabularPack().provider(_homed(tmp_path / "other", {**synthetic_pack_config(data),
+                                                                 "hash_categories": True}))
+    assert other.salt != prov.salt and other.feature_version != prov.feature_version
+
+
+def test_raw_schema_hash_is_unchanged_by_the_option(tmp_path, synth):
+    """Bundles trained before hash_categories existed must keep validating: raw mode hashes the same schema."""
+    import hashlib
+
+    prov = TabularPack().provider(project(tmp_path, synthetic_pack_config(synth)))
+    old_schema = {"columns": [{"name": c.name, "kind": c.kind, **({"vocabulary": list(c.vocabulary)}
+                                                                  if c.kind == "categorical" else {})}
+                              for c in prov.columns], "na_values": sorted(prov.na_values)}
+    text = json.dumps(old_schema, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert prov.feature_version == f"tabular-v1:{hashlib.sha256(text.encode()).hexdigest()[:12]}"
+    assert "category_salt" not in prov.to_config()
+
+
+def test_hash_categories_must_be_a_boolean(tmp_path, synth):
+    with pytest.raises(TabularConfigError, match="hash_categories"):
+        TabularPack().provider(project(tmp_path, {**synthetic_pack_config(synth), "hash_categories": "yes"}))

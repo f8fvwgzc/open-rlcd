@@ -23,6 +23,38 @@ INTENDED = {
 }
 
 
+def categorical_columns(meta: dict) -> dict[str, dict]:
+    """{column: {"values": n, "hashed": bool}} for every categorical feature column whose vocabulary is stored in
+    the bundle's provider config (the tabular pack's `pack.config.columns`). Read from the bundle itself, so it is
+    right for bundles trained before `hash_categories` existed (they store raw values)."""
+    cfg = (meta.get("pack") or {}).get("config") or {}
+    out: dict[str, dict] = {}
+    cols = cfg.get("columns") if isinstance(cfg, dict) else None
+    for c in cols if isinstance(cols, list) else []:
+        if isinstance(c, dict) and c.get("kind") == "categorical":
+            out[str(c.get("name"))] = {"values": len(c.get("vocabulary") or []), "hashed": bool(c.get("hashed"))}
+    return out
+
+
+def categorical_summary(meta: dict) -> str:
+    """One line naming the categorical columns stored in a bundle and how their values are stored ('' if none)."""
+    cols = categorical_columns(meta)
+    if not cols:
+        return ""
+    parts = [f"{name} ({c['values']} values, {'salted sha256' if c['hashed'] else 'raw'})" for name, c in cols.items()]
+    return "categorical columns stored in the bundle: " + ", ".join(parts)
+
+
+def raw_categorical_warning(meta: dict) -> str:
+    """A warning when raw categorical values from the training rows are embedded in the bundle ('' if none)."""
+    raw = [name for name, c in categorical_columns(meta).items() if not c["hashed"] and c["values"]]
+    if not raw:
+        return ""
+    return (f"the bundle embeds raw values of categorical column(s) {raw} verbatim, copied from the training rows "
+            f"(the most frequent values of each, in model.json and every head's feature names). If any could be "
+            f"personal or confidential, set pack_config.hash_categories: true and retrain before sharing.")
+
+
 def _fmt(x: Any, nd: int = 3) -> str:
     if x is None:
         return "–"
@@ -33,10 +65,12 @@ def _fmt(x: Any, nd: int = 3) -> str:
     return str(x)
 
 
-def _head_row(name: str, e: dict) -> str:
-    m = e.get("metrics") or {}
-    v = (e.get("verdict") or {}).get((e.get("spec") or {}).get("stakes") or "medium") or {}
-    c = e.get("conformal") or {}
+def _head_row(name: str, h: Any) -> str:
+    """One table row from the hash-checked head.json (the values the service enforces)."""
+    e, summ = h.entry, h.summary
+    m = summ.get("metrics") or {}
+    v = (summ.get("verdict") or {}).get((e.get("spec") or {}).get("stakes") or "medium") or {}
+    c = summ.get("conformal") or {}
     return (f"| `{name}` | {(e.get('spec') or {}).get('type')} | {e.get('model')} | "
             f"{(e.get('calibration') or {}).get('method')} | {_fmt(m.get('n_holdout'))} | "
             f"{_fmt(m.get('log_loss'))} / {_fmt(m.get('baseline_log_loss'))} | {_fmt(m.get('brier_skill_score'))} | "
@@ -82,11 +116,20 @@ def model_card(bundle: Bundle) -> str:
     if enc:
         lines += [f"Text encoder: `{enc.get('id')}` (dim {enc.get('dim')}, sha256 `{str(enc.get('sha256'))[:16]}…`).",
                   ""]
+    cats = categorical_columns(meta)
+    if cats:
+        lines.append("Categorical feature columns (their most frequent values are stored in this bundle): " + ", ".join(
+            f"`{name}` ({c['values']} values, {'salted SHA-256 hashes' if c['hashed'] else 'raw values'})"
+            for name, c in cats.items()) + ".")
+        lines.append("")
+        warning = raw_categorical_warning(meta)
+        if warning:
+            lines += [f"> **Raw training values inside.** {warning[0].upper()}{warning[1:]}", ""]
     lines += ["## Heads (trusted holdout)", "",
               "| head | type | model | calibration | holdout rows | log loss / baseline | Brier skill | ECE | skill | "
               "verdict | conformal threshold |", "|---|---|---|---|---|---|---|---|---|---|---|"]
-    for name, e in meta.get("heads", {}).items():
-        lines.append(_head_row(name, e))
+    for name in bundle.names():
+        lines.append(_head_row(name, bundle.head(name)))
     lines.append("")
     for name in bundle.names():
         h = bundle.head(name)
@@ -102,7 +145,7 @@ def model_card(bundle: Bundle) -> str:
         lines.append(f"Skill test: {sk.get('method')}; mean Brier gain {_fmt(sk.get('mean_brier_gain'), 4)}, "
                      f"lower 95% {_fmt(sk.get('lower_95'), 4)} -> **{'skill' if sk.get('has_skill') else 'no skill'}**.")
         lines.append("")
-        for stakes, v in (e.get("verdict") or {}).items():
+        for stakes, v in (h.verdict or {}).items():
             lines.append(f"* {stakes} stakes: **{v.get('max_tier')}** — {v.get('reason')}")
         lines.append("")
         cls = spec.get("classes") or []

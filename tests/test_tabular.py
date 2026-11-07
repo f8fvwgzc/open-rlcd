@@ -214,3 +214,28 @@ def test_default_model_auto(tmp_path):
     row = features(generate(5, seed=1)[0][0])
     d = svc.generic_decide(DecideRequest(state=row, heads=["churned"]))
     assert d["heads"]["churned"]["reasons"]
+
+
+def test_hashed_categories_train_serve_and_carry_over(tmp_path):
+    """F23: with hash_categories the bundle holds no raw category value, answers JSON rows like raw mode, and a
+    retrain of one head carries the others over (one salt per project home keeps the feature schema)."""
+    csv = tmp_path / "churn.csv"
+    write_synthetic_csv(csv, n=1500, seed=4)
+    data = {"pack": "tabular", "pack_config": {**synthetic_pack_config(csv), "hash_categories": True},
+            "heads": {h: {"model": "logreg"} for h in HEADS}}
+    project = Project(root=tmp_path, data=data)
+    svc = Service(project, home=tmp_path / "var")
+    v1 = train(svc)["model"]
+    b = svc.bundle(v1)
+    blob = (b.path / "model.json").read_text() + "".join(p.read_text() for p in b.path.rglob("ensemble.json"))
+    for value in ("basic", "premium", "north", "month-to-month", "one-year"):
+        assert f"={value}" not in blob and f'"{value}"' not in blob, value
+    row = {"tenure_months": 3, "monthly_charges": 99.5, "support_calls": 5, "plan": "Premium",
+           "contract": "month-to-month", "region": "north", "paperless": "yes"}
+    a = svc.systemone(SystemOneRequest(state=row, questions=QUESTIONS))["answers"]
+    truth = true_probabilities([{k: str(v).lower() for k, v in row.items()}])   # "Premium": case-only match
+    assert a["churned"]["calibrated"] is True and abs(a["churned"]["noul"] - truth["churned"][0]) < 0.15
+    v2 = train(svc, heads=["churned"])["model"]
+    meta = svc.bundle(v2).meta
+    assert set(meta["heads"]) == set(HEADS) and meta["feature_version"] == b.meta["feature_version"]
+    assert not any("not carried over" in n for n in meta.get("notes") or [])

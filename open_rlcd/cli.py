@@ -1,9 +1,9 @@
 """`rlcd` — the command teammates use.
 
-    rlcd init my-business --pack documents     write my-business/rlcd.yaml
-    rlcd ingest ./data                         build the local corpus (documents pack) / check the table (tabular)
-    rlcd label bootstrap --judge claude-cli    weak labels from an LLM judge
-    rlcd label audit                           human review in the terminal (start with ~300)
+    rlcd init my-business --pack documents     write my-business/rlcd.yaml (packs: documents, tabular)
+    rlcd ingest ./data                         build the local corpus (documents pack; tabular has no ingest step)
+    rlcd label bootstrap --judge claude-cli    weak labels from an LLM judge (documents: needs queries.jsonl)
+    rlcd label audit --heads answerable        human review in the terminal (~150+ trusted rows per head)
     rlcd label next --head answerable          the most informative rows to audit next
     rlcd train                                 every head; prints the calibration summary
     rlcd report                                MODEL_CARD.md + report.html (+ per-head JSON)
@@ -37,15 +37,11 @@ TEMPLATES: dict[str, dict] = {
     },
     "tabular": {
         "pack_config": {"data": "./data.csv", "label": "outcome", "id": None, "group": None, "time": None,
-                        "features": "auto", "categorical": "auto"},
-        "policy": {"abstain": "hold"},
-    },
-    "trading": {
-        "pack_config": {"quant_url": "http://127.0.0.1:8090", "symbols": ["XAUUSD", "EURUSD"],
-                        "intervals": ["15m"]},
+                        "features": "auto", "categorical": "auto", "hash_categories": False},
         "policy": {"abstain": "hold"},
     },
 }
+# `rlcd init` offers only the packs that ship on this branch (the trading adapter lives on its own branch).
 
 HEADER = """# Open RLCD project configuration. Docs: docs/teammate-quickstart.md
 # Secrets (ANTHROPIC_API_KEY, RLCD_API_KEY, database passwords) come from the environment, never from this file.
@@ -91,9 +87,33 @@ def cmd_init(args: argparse.Namespace) -> int:
     gi = root / ".gitignore"
     if not gi.exists():
         gi.write_text("var/\n.env\n*.npz\n", encoding="utf-8")
-    print(f"wrote {root / 'rlcd.yaml'} (pack: {args.pack}). Next: cd {root} && edit rlcd.yaml, then "
-          f"{'rlcd ingest ./data' if args.pack == 'documents' else 'rlcd train'}")
+    print(f"wrote {root / 'rlcd.yaml'} (pack: {args.pack}). Next:\n" + next_steps(args.pack, root))
     return 0
+
+
+def next_steps(pack: str, root: Path) -> str:
+    """The steps after `rlcd init`, in an order that runs as written (each step has what it needs)."""
+    if pack == "documents":
+        steps = [
+            f"cd {root}",
+            "put your documents in ./data (.md .txt .html .pdf .json .jsonl)",
+            "write ./queries.jsonl: real questions, one {\"query\": \"...\"} per line (bootstrap labels these)",
+            "the encoder in rlcd.yaml is ONNX: it needs the documents extra (`uv sync --extra documents`) and "
+            "downloads ~135 MB on the first ingest; offline, set pack_config.encoder to {kind: hashing, dim: 256}",
+            "rlcd ingest ./data",
+            "rlcd label bootstrap        # needs `claude` on PATH, or --judge anthropic | ollama:<model>",
+            "rlcd label audit --heads answerable,grounded --n 600   # your labels calibrate the model",
+            "rlcd train",
+        ]
+    else:
+        steps = [
+            f"cd {root}",
+            "copy your table to ./data.csv (or point pack_config.data at it)",
+            "edit rlcd.yaml: pack_config.label = the outcome column (id / group / time columns if you have them); "
+            "hash_categories: true if a categorical column could hold personal data (bundles store its values)",
+            "rlcd train",
+        ]
+    return "\n".join(f"  {i}. {st}" for i, st in enumerate(steps, 1))
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -102,6 +122,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             "neo4j": args.neo4j, "max_chars": args.max_chars}
     _print(svc.pack.ingest(svc.project, {k: v for k, v in opts.items() if v is not None}))
     return 0
+
+
+def _bootstrap_progress(done: int, total: int, message: str) -> None:
+    """`bootstrap(progress=...)` calls this after every judge batch: (items done, items in this run, message)."""
+    print(f"[{done}/{total}] {message}", flush=True)
 
 
 def cmd_label(args: argparse.Namespace) -> int:
@@ -115,7 +140,7 @@ def cmd_label(args: argparse.Namespace) -> int:
         judge = make_judge(args.judge or project.get("labeling.judge", "claude-cli"), project)
         provider = pack.provider(project, None)
         res = bootstrap(project, pack, provider, judge, heads=heads, limit=args.limit,
-                        batch=args.batch or int(project.get("labeling.batch", 20)), progress=lambda m: print(m))
+                        batch=args.batch or int(project.get("labeling.batch", 20)), progress=_bootstrap_progress)
         _print(res)
     elif args.label_cmd == "audit":
         from .labeling.audit import audit
@@ -249,6 +274,19 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_data_exposure(meta: dict) -> None:
+    """What of the training data travels inside a bundle: categorical columns (raw or hashed) on stdout, and a
+    warning on stderr when raw categorical values from the training rows are embedded."""
+    from .report.model_card import categorical_summary, raw_categorical_warning
+
+    summary = categorical_summary(meta)
+    if summary:
+        print(summary)
+    warning = raw_categorical_warning(meta)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from .core.bundle import Bundle
     from .report.model_card import write_model_card
@@ -259,9 +297,11 @@ def cmd_export(args: argparse.Namespace) -> int:
         print("no trained model to export", file=sys.stderr)
         return 1
     dest = svc.registry.export(version, Path(args.dest))
-    write_model_card(Bundle(dest))
+    b = Bundle(dest)
+    write_model_card(b)
     print(f"exported {version} to {dest} (JSON + safetensors + LightGBM text; no pickles). It contains no training "
-          f"data, but heads learned from your data: share it only if that is allowed.")
+          f"rows, but heads learned from your data: share it only if that is allowed.")
+    _print_data_exposure(b.meta)
     return 0
 
 
@@ -287,17 +327,60 @@ def cmd_push(args: argparse.Namespace) -> int:
         print("no trained model to push", file=sys.stderr)
         return 1
     validate(b.path)
+    api = HfApi()
+    # create_repo(exist_ok=True) never changes (or reports) the visibility of a repo that already exists, so it is
+    # checked here: --private must never end with the bundle in a public repo
+    state, detail = _hub_visibility(api, args.hf)
+    if args.private and state == "public":
+        print(f"refusing to push: {args.hf} already exists and is PUBLIC, so --private would not keep this bundle "
+              f"private. Make the repo private on the Hub first, or push to a new repo id.", file=sys.stderr)
+        return 1
+    if args.private and state == "unknown":
+        print(f"refusing to push: cannot verify that {args.hf} is private ({detail}). Check the repo and your "
+              f"Hugging Face login, then retry.", file=sys.stderr)
+        return 1
+    where = {"absent": f"new repo, created {'private' if args.private else 'PUBLIC'}",
+             "private": "existing private repo", "public": "existing PUBLIC repo: anyone can download it",
+             "unknown": f"visibility unknown: {detail}"}[state]
+    _print_data_exposure(b.meta)
     if not args.yes:
-        ans = input(f"Upload {version} to the Hugging Face Hub repo {args.hf} "
-                    f"({'private' if args.private else 'PUBLIC'})? [y/N] ")
+        ans = input(f"Upload {version} to the Hugging Face Hub repo {args.hf} ({where})? [y/N] ")
         if ans.strip().lower() not in ("y", "yes"):
             print("cancelled")
             return 1
-    api = HfApi()
-    api.create_repo(args.hf, private=args.private, exist_ok=True)
+    if state != "private" and state != "public":
+        api.create_repo(args.hf, private=args.private, exist_ok=True)
+        if args.private:
+            after, detail = _hub_visibility(api, args.hf)
+            if after != "private":
+                print(f"refusing to upload: {args.hf} is not a private repo you can see after creating it "
+                      f"({after}{': ' + detail if detail else ''}); nothing was uploaded.", file=sys.stderr)
+                return 1
     api.upload_folder(folder_path=str(b.path), repo_id=args.hf, commit_message=f"open-rlcd bundle {version}")
-    print(f"pushed {version} to https://huggingface.co/{args.hf}")
+    final = "private" if state == "private" or args.private else "PUBLIC" if state != "unknown" else where
+    print(f"pushed {version} to https://huggingface.co/{args.hf} ({final})")
     return 0
+
+
+def _hub_visibility(api: Any, repo_id: str) -> tuple[str, str]:
+    """('private' | 'public' | 'absent' | 'unknown', detail) for a model repo on the Hugging Face Hub. 'absent'
+    also covers a private repo this login cannot see (the Hub answers 'not found' for both)."""
+    try:
+        from huggingface_hub.errors import RepositoryNotFoundError
+    except ImportError:  # older huggingface_hub
+        from huggingface_hub.utils import RepositoryNotFoundError
+    try:
+        info = api.repo_info(repo_id)
+    except RepositoryNotFoundError:
+        return "absent", ""
+    except Exception as e:  # network, auth, a gated repo: visibility cannot be verified
+        return "unknown", f"{type(e).__name__}: {str(e)[:200]}"
+    private = getattr(info, "private", None)
+    if private is True:
+        return "private", ""
+    if private is False:
+        return "public", ""
+    return "unknown", "the Hub did not say whether the repo is private"
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
@@ -366,13 +449,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_init)
 
-    s = sub.add_parser("ingest", help="ingest data (documents: a folder; connectors: --qdrant / --neo4j)")
-    s.add_argument("path", nargs="?")
-    s.add_argument("--csv")
-    s.add_argument("--qdrant")
-    s.add_argument("--collection")
-    s.add_argument("--neo4j")
-    s.add_argument("--max-chars", type=int, dest="max_chars")
+    s = sub.add_parser("ingest", help="documents pack: read a local folder into the corpus (uses the project's "
+                                      "encoder)")
+    s.add_argument("path", nargs="?", help="folder of documents (default: pack_config.corpus)")
+    # remote connectors are not implemented yet: the pack refuses them with a clear message, so they stay out of
+    # the help instead of advertising a flow that cannot run
+    for flag in ("--csv", "--qdrant", "--collection", "--neo4j"):
+        s.add_argument(flag, help=argparse.SUPPRESS)
+    s.add_argument("--max-chars", type=int, dest="max_chars", help="chunk size in characters")
     s.set_defaults(fn=cmd_ingest)
 
     s = sub.add_parser("label", help="labels: bootstrap with an LLM judge, audit, choose what to audit next")
@@ -384,7 +468,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--batch", type=int)
     a = lsub.add_parser("audit", help="human review in the terminal")
     a.add_argument("--heads")
-    a.add_argument("--n", type=int, default=300)
+    a.add_argument("--n", type=int, default=300,
+                   help="questions this session, spread over the selected heads (a head needs ~150 trusted rows "
+                        "for a 30-row holdout: audit a few heads at a time with --heads)")
     a.add_argument("--queue", action="store_true", help="audit the `rlcd label next` queue")
     a.add_argument("--annotator")
     nx = lsub.add_parser("next", help="queue the most informative rows for audit")

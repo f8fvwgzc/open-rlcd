@@ -59,9 +59,9 @@ def reliability_svg(rows: list[dict], title: str, size: int = 220) -> str:
 def head_section(name: str, h: Any) -> str:
     e, rep = h.entry, h.report
     spec = e.get("spec") or {}
-    m = e.get("metrics") or {}
+    m = h.summary.get("metrics") or e.get("metrics") or {}
     verdicts = "".join(f'<li>{_e(s)}: <span class="tier {_e(v.get("max_tier"))}">{_e(v.get("max_tier"))}</span> — '
-                       f'{_e(v.get("reason"))}</li>' for s, v in (e.get("verdict") or {}).items())
+                       f'{_e(v.get("reason"))}</li>' for s, v in (h.verdict or {}).items())
     rel = rep.get("reliability") or {}
     if spec.get("type") == "noul":
         figs = [((rel.get("per_class") or {}).get("true"), "P(true)")]

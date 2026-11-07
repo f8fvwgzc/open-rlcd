@@ -12,7 +12,10 @@ early rather than failing the same way on every batch; it resumes where it stopp
 
 Security: HTTP judges refuse non-loopback hosts unless remote hosts are allowed (allow_remote=True,
 RLCD_ALLOW_REMOTE=1, or security.allow_remote / pack_config.allow_remote in rlcd.yaml), never follow redirects,
-and read secrets only from environment variables. The CLI judge runs without a shell; the prompt goes to stdin.
+and read secrets only from environment variables. The CLI judge runs without a shell (the prompt goes to stdin),
+with every Claude Code tool and MCP server disabled, in an empty temporary directory (see ClaudeCliJudge). The
+prompt tells every judge that item text is untrusted data, never an instruction, and neutralises the prompt's
+own tags inside it (prompts.quote).
 
 What this does not do: make the judge right. Judge labels only train base models; calibrators and holdout metrics
 use trusted (human / ground-truth / synthetic) rows only.
@@ -25,6 +28,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
@@ -200,9 +204,18 @@ def parse_cli_envelope(stdout: str) -> tuple[str, dict]:
 class ClaudeCliJudge(_PromptJudge):
     """Labels through the `claude` executable (Claude Code) in print mode, on the user's own subscription.
 
-    Runs `claude -p --output-format json [--model M]` with the prompt on stdin (no shell). Note that Claude Code
-    decides itself which credentials it uses (if ANTHROPIC_API_KEY is set it may bill that key rather than the
-    subscription). Item texts are sent to Anthropic by Claude Code, as with the API judge."""
+    Runs `claude -p --output-format json --tools "" --strict-mcp-config --no-session-persistence [--model M]`
+    with the prompt on stdin (no shell), in a fresh empty temporary directory that is deleted afterwards.
+    The item texts it labels are untrusted (corpus documents, query logs), so the agent is locked down: no
+    built-in tools at all (`--tools ""`: no shell, no file reads or writes, no web), no MCP servers
+    (`--strict-mcp-config` without `--mcp-config`), no saved session, and a working directory with nothing in it
+    instead of the project. open-rlcd's own secrets (RLCD_API_KEY, OPENAI_API_KEY, database passwords; see
+    `SCRUBBED_ENV`) are removed from the child's environment; everything Claude Code needs to log in is kept.
+    Note that Claude Code decides itself which credentials it uses (if ANTHROPIC_API_KEY is set it may bill that
+    key rather than the subscription). Item texts are sent to Anthropic by Claude Code, as with the API judge."""
+
+    LOCKDOWN = ("--tools", "", "--strict-mcp-config", "--no-session-persistence")
+    SCRUBBED_ENV = ("RLCD_API_KEY", "OPENAI_API_KEY", "PGPASSWORD", "NEO4J_PASSWORD", "QDRANT_API_KEY")
 
     def __init__(self, model: str | None = None, executable: str = "claude", timeout: float = DEFAULT_TIMEOUT,
                  extra_args: Sequence[str] = ()):
@@ -220,14 +233,21 @@ class ClaudeCliJudge(_PromptJudge):
         exe = shutil.which(self.executable)
         if exe is None:
             raise self._missing()
-        return [exe, "-p", "--output-format", "json", *(["--model", self.model] if self.model else []),
-                *self.extra_args]
+        exe = os.path.abspath(exe)   # the child runs in another directory: a relative path would not resolve
+        return [exe, "-p", "--output-format", "json", *self.LOCKDOWN,
+                *(["--model", self.model] if self.model else []), *self.extra_args]
+
+    def child_env(self) -> dict[str, str]:
+        """The environment the `claude` process gets: ours minus open-rlcd's own secrets (SCRUBBED_ENV)."""
+        return {k: v for k, v in os.environ.items() if k not in self.SCRUBBED_ENV}
 
     def complete(self, system: str, user: str, problems: list[str]) -> str | None:
         cmd = self.command()
         try:
-            proc = subprocess.run(cmd, input=f"{system}\n\n{user}", capture_output=True, text=True,
-                                  encoding="utf-8", errors="replace", timeout=self.timeout, check=False)
+            with tempfile.TemporaryDirectory(prefix="rlcd-judge-") as cwd:   # empty: nothing to read or change
+                proc = subprocess.run(cmd, input=f"{system}\n\n{user}", capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=self.timeout, check=False,
+                                      cwd=cwd, env=self.child_env())
         except FileNotFoundError as e:
             raise self._missing() from e
         except subprocess.TimeoutExpired as e:

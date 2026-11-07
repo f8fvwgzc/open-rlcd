@@ -25,6 +25,7 @@ audit records which sampling produced each human label in its `note` ("sample=qu
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -94,7 +95,8 @@ def uncertainty(P: np.ndarray) -> np.ndarray:
 
 def _standardise(X: np.ndarray) -> np.ndarray:
     X = np.asarray(X, float)
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)   # all-NaN columns ("mean of empty slice"): handled below
         mu = np.nanmean(X, axis=0)
         sd = np.nanstd(X, axis=0)
     mu = np.where(np.isfinite(mu), mu, 0.0)

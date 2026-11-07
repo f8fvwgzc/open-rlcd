@@ -23,6 +23,8 @@ their bundle, which stores their specs and the provider's schema.
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -48,7 +50,7 @@ from .data import (
     read_table,
     resolve_target,
 )
-from .provider import VIEW, TabularProvider
+from .provider import VIEW, TabularProvider, new_salt
 
 MISSING_SEGMENT = "__missing__"
 
@@ -122,11 +124,13 @@ class TabularPack(BasePack):
         return dict(out)
 
     def provider(self, project: Project, config: dict | None = None) -> TabularProvider:
-        """From a bundle's config: the exact trained schema. Without: learned from the training file."""
+        """From a bundle's config: the exact trained schema. Without: learned from the training file (with
+        `hash_categories`, hashed with this project home's salt, see `category_salt`)."""
         if config:
             return TabularProvider.from_config(config)
         cfg, merged = self.targets(project)
-        return TabularProvider.learn(self.table(cfg), cfg, label_columns(merged))
+        salt = category_salt(Path(project.home)) if cfg.hash_categories else None
+        return TabularProvider.learn(self.table(cfg), cfg, label_columns(merged), salt=salt)
 
     def datasets(self, project: Project, provider: Any, heads: list[str], feedback: list[dict] | None = None,
                  feedback_weight: float = 5.0) -> dict[str, Dataset]:
@@ -223,6 +227,34 @@ class TabularPack(BasePack):
         dest = Path(path) if path is not None else Path.cwd() / "data" / "synthetic_churn.csv"
         info = write_synthetic_csv(dest, n=n, seed=seed, signal=signal, noise=noise)
         return {**info, "pack_config": synthetic_pack_config(dest)}
+
+
+def category_salt(home: Path) -> str:
+    """The salt for hashed vocabularies of this project home: <home>/tabular/category_salt, created once with a
+    random value (owner-only permissions). One salt per home rather than per training run, so a retrain of the same
+    table keeps its feature schema and the heads it does not retrain are carried over; every bundle stores the salt
+    it was trained with, so a bundle never depends on this file."""
+    path = Path(home) / "tabular" / "category_salt"
+    for _ in range(2):
+        try:
+            text = path.read_text(encoding="ascii").strip()
+        except (OSError, UnicodeDecodeError):
+            text = ""
+        if re.fullmatch(r"[0-9a-f]{32}", text):
+            return text
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            if text:   # present but not a salt: refuse to guess (replacing it would change every hash)
+                raise TabularConfigError(f"{path} does not hold a salt (32 hex characters); fix or delete it") from None
+            continue   # another process is writing it right now: read it again
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(new_salt() + "\n")
+    text = path.read_text(encoding="ascii").strip()
+    if not re.fullmatch(r"[0-9a-f]{32}", text):
+        raise TabularConfigError(f"{path} does not hold a salt (32 hex characters); fix or delete it")
+    return text
 
 
 def _t(v: int | None) -> int:
