@@ -180,9 +180,16 @@ def combined_skill(gain_vs_train: np.ndarray, P: np.ndarray, Y: np.ndarray, bloc
     res_ok = res.get("lower_95") is not None and res["lower_95"] > 0
     if out["has_skill"] and not res_ok:
         out["has_skill"] = False
-        out["why_not"] = ("the gain over the training base rate is not matched by a gain over the holdout's own "
-                          "class frequencies: the forecasts do not separate outcomes, they only sit nearer to this "
-                          "holdout's base rate")
+        mean = res.get("mean_brier_gain")
+        if mean is not None and mean > 0:
+            out["why_not"] = (f"the gain over the holdout's own class frequencies averages {mean} but is not reliably "
+                              f"positive across the {res.get('blocks')} blocks resampled (95% lower bound "
+                              f"{res.get('lower_95')}): too few independent groups or time blocks to establish it; "
+                              f"more trusted rows from more groups would settle it")
+        else:
+            out["why_not"] = ("the gain over the training base rate is not matched by a gain over the holdout's own "
+                              "class frequencies: the forecasts do not separate outcomes, they only sit nearer to "
+                              "this holdout's base rate")
     if out.get("lower_95") is not None:
         out["method"] = (out["method"] + "; and the same for the gain over the holdout's own class frequencies "
                          "(recomputed in every resample), which no constant forecast can beat")

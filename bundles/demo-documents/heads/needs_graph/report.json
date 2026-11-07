@@ -41,7 +41,7 @@
    "blocks": 56,
    "resampled": "56 groups"
   },
-  "why_not": "the gain over the training base rate is not matched by a gain over the holdout's own class frequencies: the forecasts do not separate outcomes, they only sit nearer to this holdout's base rate"
+  "why_not": "the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it"
  },
  "reliability": {
   "top_label": [
@@ -463,17 +463,17 @@
    "low": {
     "max_tier": "escalate",
     "tier": 0,
-    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
    },
    "medium": {
     "max_tier": "escalate",
     "tier": 0,
-    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
    },
    "high": {
     "max_tier": "escalate",
     "tier": 0,
-    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+    "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
    }
   }
  },

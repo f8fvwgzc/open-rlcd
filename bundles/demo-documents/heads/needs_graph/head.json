@@ -2,7 +2,7 @@
  "head": "needs_graph",
  "type": "noul",
  "model": "logreg",
- "trained_at": "2026-11-07T15:10:59Z",
+ "trained_at": "2026-11-07T15:17:59Z",
  "metrics": {
   "n_holdout": 182,
   "brier": 0.113703,
@@ -26,17 +26,17 @@
   "low": {
    "max_tier": "escalate",
    "tier": 0,
-   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
   },
   "medium": {
    "max_tier": "escalate",
    "tier": 0,
-   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
   },
   "high": {
    "max_tier": "escalate",
    "tier": 0,
-   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+   "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
   }
  },
  "calibration": {

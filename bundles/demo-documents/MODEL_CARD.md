@@ -1,6 +1,6 @@
 # Model card — rlcd-0.1.1 (documents pack)
 
-Created 2026-11-07T15:10:59Z. Format `open-rlcd-bundle/1`. Feature version `documents-v2:hashing-256-s0:0b1d19ee81e5`.
+Created 2026-11-07T15:17:59Z. Format `open-rlcd-bundle/1`. Feature version `documents-v2:hashing-256-s0:0b1d19ee81e5`.
 
 > **Trained on synthetic data only.** These numbers show that the pipeline works and that the metrics are computed honestly; they say nothing about accuracy on real traffic.
 
@@ -100,9 +100,9 @@ Rows 900 (trusted 900; by source {"synthetic": 900}), ordering `group`, holdout 
 
 Skill test: block bootstrap (56 groups, 2000 resamples): one-sided 95% lower bound of the mean Brier gain over the base rate; and the same for the gain over the holdout's own class frequencies (recomputed in every resample), which no constant forecast can beat; mean Brier gain 0.1474, lower 95% 0.0134 -> **no skill**.
 
-* low stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill
-* medium stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill
-* high stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill
+* low stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)
+* medium stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)
+* high stakes: **escalate** — the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)
 
 Reliability (P(true), holdout):
 

@@ -250,6 +250,11 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
     # ------------------------------------------------------------------ policy, verdict, ledger
     pol = P.evaluate(spec, Ph, yh, cfg.policy, threshold)
     verdict = P.verify(report["skill"]["has_skill"], n_hold, pol, cfg.policy, conformal, spec)
+    skill_why = report["skill"].get("why_not")
+    if skill_why and not report["skill"]["has_skill"]:   # say which kind of "no skill" this is
+        for v in verdict.values():
+            if v.get("tier") == 0:
+                v["reason"] = f"{v['reason']} ({skill_why})"
     report["policy"] = {"config": cfg.policy.to_dict(), "holdout": pol, "verdict": verdict}
     c_h, _ = P.chosen(spec, Ph)
     ledger = B.holdout_table(Ph, yh, labels, c_h)

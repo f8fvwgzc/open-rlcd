@@ -2,7 +2,7 @@
  "head": "chunk_relevant",
  "type": "noul",
  "model": "logreg",
- "trained_at": "2026-11-07T15:10:59Z",
+ "trained_at": "2026-11-07T15:17:59Z",
  "metrics": {
   "n_holdout": 744,
   "brier": 0.219525,

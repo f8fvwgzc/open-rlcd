@@ -1,7 +1,7 @@
 {
  "format": "open-rlcd-bundle/1",
  "version": "rlcd-0.1.1",
- "created_at": "2026-11-07T15:10:59Z",
+ "created_at": "2026-11-07T15:17:59Z",
  "pack": {
   "name": "documents",
   "version": "0.1.0",
@@ -68,7 +68,7 @@
    "head": "response_type",
    "type": "choice",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 182,
     "brier": 0.232383,
@@ -203,7 +203,7 @@
     "member_3.safetensors": "aa4d529805fccccd3be40983083c683d14d6f92c31c7176786452f7e459b2c72",
     "member_4.safetensors": "3e7d8391826376d19628cb0c82743494cd8d47784f5bfa212a07ae49e84ab537",
     "ensemble.json": "b97ca65e5bdc1f72caf45958832442316cb027acb929d5a450f19591bc070aee",
-    "head.json": "15ac7b526942f038154034a49960edf1ac699b6be8a817fcb510e77f04d01dd1",
+    "head.json": "f64b7d2259b175774c571d6a17318b64ccdab643aa29e539c5114c0a9d462253",
     "report.json": "a8450495b5e7ec86fc2d5b53828fe986b8861310c4fd29d2a66073eb4ee9a9da",
     "bernoulli.json": "de2bb6c46aedc2674981c040823b577fbd96dd5413b7ce0c7a25aa43e820f726"
    },
@@ -213,7 +213,7 @@
    "head": "route",
    "type": "choice",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 182,
     "brier": 0.247537,
@@ -339,7 +339,7 @@
     "member_3.safetensors": "662cd8e9091edc96b7169b04124c6c026b75d7376441b6f18864dd62706bc3e3",
     "member_4.safetensors": "7d1b1caf5f89b368a7cac81ba2999e1d6d4e9fc95a4479112afe62552972c5b4",
     "ensemble.json": "99ea8df491825c011ea7a5a2b4f5238a034411b40736a36dbb788b57935880a4",
-    "head.json": "3b0ea293cb24e371de0fe98eb8dc644174ad2ed7d61c679242aac8d42b4cc924",
+    "head.json": "61319eae723a521f91db61422371d9ef9928b0b3c9465276501fe972fe413016",
     "report.json": "02d3b9a870331ffc3469ea0bb2dd34bee97ad9d6c20ecbd0187b14b42c1146f5",
     "bernoulli.json": "884cff4ea70f68843a26d1c3687494012b84d1007c0226d6bfcbfc74c4247fe1"
    },
@@ -349,7 +349,7 @@
    "head": "needs_graph",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 182,
     "brier": 0.113703,
@@ -373,17 +373,17 @@
     "low": {
      "max_tier": "escalate",
      "tier": 0,
-     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
     },
     "medium": {
      "max_tier": "escalate",
      "tier": 0,
-     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
     },
     "high": {
      "max_tier": "escalate",
      "tier": 0,
-     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"
+     "reason": "the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill (the gain over the holdout's own class frequencies averages 0.146652 but is not reliably positive across the 56 blocks resampled (95% lower bound -0.004235): too few independent groups or time blocks to establish it; more trusted rows from more groups would settle it)"
     }
    },
    "calibration": {
@@ -465,8 +465,8 @@
     "member_3.safetensors": "6f82dc2b4bca35daa9e2aece4b2aabc925834bac4d344c2271d634cf45e45c1e",
     "member_4.safetensors": "b01209f720b7ecb9a63ad43956c01360e9f795d3198cc2aefc8b3748576ea91b",
     "ensemble.json": "79ebbf9387cfb263847db5c27d7f6f47bf6419155c5a90363be0c0fffa7fce99",
-    "head.json": "740b68b8662c4a1df97f680923a611991ab0cba86af85d0f22337d83d00e31d9",
-    "report.json": "715ab4869e46bc73e943afd669ef5d9fcb33b8770149c32f53f8f901abad63c6",
+    "head.json": "4d4177610170e0ba667443635cbf1b9892bc176f74b59f862beb049569fb4be4",
+    "report.json": "a6165e1a4f9a36bde2a6293f1eb71cc408649081e17c4e5cab3339970f66f286",
     "bernoulli.json": "d8a02fa9a2b8249d9dd6e2696280e6d4a6a3d8007b2cc37eb45f821c4fac3578"
    },
    "trained_in": "rlcd-0.1.1"
@@ -475,7 +475,7 @@
    "head": "chunk_relevant",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 744,
     "brier": 0.219525,
@@ -591,7 +591,7 @@
     "member_3.safetensors": "ee105381e92248b4e2e6cc561355bd2bd230d70ca0cb28db2db08477d65c83c4",
     "member_4.safetensors": "66c5bc150893e233fec3c60d64efacdaffa05cd2b3e8300b49d3d07d0ffac208",
     "ensemble.json": "74e46d16b29164331f2df3883a455a2dbaed0c59477dedb71095df68a50fa646",
-    "head.json": "4cf6ba525a32434fef38460c21ce69e73b8e4a1f2e52913ef3b2f5b788bf78d2",
+    "head.json": "4a3c83f37483767a5e6a75b3d5748fd735c0edd593f39e155860cbad25451e51",
     "report.json": "5479a0ac79e33a2841f50d9a6c69a542c2003d142da9c984a458d09367287726",
     "bernoulli.json": "fb065ad9681df55e3046342c9e905d5b180cc5f6691f0cc74b8462bc4fc039fe"
    },
@@ -601,7 +601,7 @@
    "head": "answerable",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 281,
     "brier": 0.391791,
@@ -730,7 +730,7 @@
     "member_3.safetensors": "0631e75650ff3ed6dce5459bc328b1e570048c5692f5cf251687ef4248c555b9",
     "member_4.safetensors": "f2b240cf51de8b43f0aadf30cd779f4e1e9f5e9dd79a849a2294d13953aa3e1f",
     "ensemble.json": "53a88ea8ca293449a8a3c799c0a645c24df93f6769ef827959cf2ad3980f9bfb",
-    "head.json": "0d575d72e108dc7ba828912c92bc99545bfdd4a82dfce779b08d2727243a6804",
+    "head.json": "8139405a3e6e118b00042d8f8c30284f45e94d7aecc16527b1de5775dc4a14ce",
     "report.json": "035c16c3fb8e99bb29c597836f93a7c46937569cc0652e23f3773ee753289ffe",
     "bernoulli.json": "d8a87fe422d1027cf43400420822c0704ddd88db6308c040f38e1e4dd67abdae"
    },
@@ -740,7 +740,7 @@
    "head": "grounded",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 316,
     "brier": 0.10832,
@@ -869,7 +869,7 @@
     "member_3.safetensors": "7bedc4a078c5dc0ac0a26c1f1ee6b53aaafc03d9528859026c08c00a2532445a",
     "member_4.safetensors": "a7746829712dd5fbc826210b25dd7be775b53b8464f89b724288e13b0dc96660",
     "ensemble.json": "b074162c6733e654ccd67fa655d15180f941d3b122142bb902838513d98192a2",
-    "head.json": "51ddbb3c65dfd1eb3101e1e7fb3b9e366892961eeb1dc377d4719187cd315624",
+    "head.json": "fa5eafc30a18906d1be582deb770aa8db8071d514423a2bef39d3623dbb5c7bd",
     "report.json": "92a70bc16865478099213692ed027638ae9b169a8109c1bcb84c8fb302d86c16",
     "bernoulli.json": "b66aaab0a2962069d5c61c1d4a1b9471ace0906d28b8a6a0a02ea033ef3efc0c"
    },
@@ -879,7 +879,7 @@
    "head": "complete",
    "type": "score",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 316,
     "brier": 0.281566,
@@ -1005,7 +1005,7 @@
     "member_3.safetensors": "4c7cd4237285f2c64ef70918f468f66f43840a2d900f5694901f3c924482aaeb",
     "member_4.safetensors": "5f9826fb864a192804ba340ea39a8b275af178065a248942a817c59b21890346",
     "ensemble.json": "b8c7884e01dfc8e9d3da6a0c60b8803d8f2dc2166f43742d8cbc33516210fe75",
-    "head.json": "7860cc13f09535cf5dc9fb5bf32cc4247332ee389415f32eecea49197ffcd742",
+    "head.json": "1e1a3e0ea8bc633c44383fbeec1fd0050cb472aec80900f64316a1d8032a4b03",
     "report.json": "a12864b35a37322108bba27976de7a2f787ea6e31b71ab0ed6369dfbecec1dda",
     "bernoulli.json": "ab10f8a0374eb53f48403ee872c771f01010c10a3aad899d983b3ea254c4640e"
    },
@@ -1015,7 +1015,7 @@
    "head": "risk_tier",
    "type": "score",
    "model": "logreg",
-   "trained_at": "2026-11-07T15:10:59Z",
+   "trained_at": "2026-11-07T15:17:59Z",
    "metrics": {
     "n_holdout": 316,
     "brier": 0.212105,
@@ -1141,7 +1141,7 @@
     "member_3.safetensors": "f4041ca26022656c216a723414195536c10a0d60b8aa57df6cf4c51bd032c543",
     "member_4.safetensors": "b74fe458c849065c6213b950f32f1d3e895af68889bda2b0eae00b283573a08c",
     "ensemble.json": "c01a9ca176c85c1b7271c299cae2564f80b91397f59f9adf08fff559e0d4f50c",
-    "head.json": "42ab73baab9b2ecde58f3daa22229b8e53cef5edd6ca3c6a3048110e5e46427e",
+    "head.json": "b9233505356b35868cfcd98471a144cd4254c70950325c855d46f778b8c277d8",
     "report.json": "db9ff4b1c4f9d0aeca86ab11e18f4ef12c94229523079ceaaca5b2fc94777314",
     "bernoulli.json": "b9b7bd7cd75773e7d6fd753b06cea23ebfd94300279c87e7cf3bbe022e25e1e8"
    },
@@ -1324,6 +1324,6 @@
   "feature_version": "documents-v2:hashing-256-s0:0b1d19ee81e5"
  },
  "notes": [
-  "job de79856f263d"
+  "job 746486c449d0"
  ]
 }
