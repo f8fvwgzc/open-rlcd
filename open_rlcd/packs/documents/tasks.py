@@ -37,7 +37,7 @@ from ...core.config import Project
 from ...core.contract import ContractError
 from ...labeling.store import LabelItem
 from ..base import epoch
-from .settings import DEFAULT_RETRIEVE_K, corpus_settings
+from .settings import DEFAULT_RETRIEVE_K, project_corpus_settings
 
 DISPLAY_CHUNK_CHARS = 700
 DISPLAY_LIST = 8
@@ -174,7 +174,7 @@ def label_tasks(project: Project, provider: Any, corpus: Any = None) -> list[Lab
     if corpus is None:
         from .corpus import Corpus
 
-        corpus = Corpus.open(project.home, provider.encoder, corpus_settings(cfg))
+        corpus = Corpus.open(project.home, provider.encoder, project_corpus_settings(project))
     items: list[LabelItem] = []
     seen: set[str] = set()
 

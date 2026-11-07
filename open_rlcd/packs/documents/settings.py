@@ -5,14 +5,20 @@
       corpus: ./data                     # folder `rlcd ingest` reads when no path is given
       queries: ./queries.jsonl           # query log for `rlcd label bootstrap` (CSV with a `query` column, or JSONL)
       chunking: {max_chars: 1200, overlap: 150}
-      vector: {kind: local}              # only local connectors exist so far
-      graph: {kind: local, terms: [...]} # known entity names (needed for kanji names)
+      vector: {kind: local}              # or {kind: qdrant | pgvector, mode: index | attach, ...}
+      graph: {kind: local, terms: [...]} # known entity names (needed for kanji names); or {kind: neo4j, ...}
       retrieve_k: 5                      # Corpus.retrieve(k): each retriever's top-k, fused (up to 3k candidates)
       label_top_k: 5                     # label tasks: chunks per query for query_chunk / query_evidence items
 
 `config_keys()` lists every key the pack reads (these and the less common ones) for `rlcd config check`.
+The remote connector keys (url / collection / dsn_env / table / uri / password_env / field mappings / Cypher
+templates) are documented in open_rlcd/connectors/{qdrant,pgvector,neo4j}.py.
 """
 from __future__ import annotations
+
+from typing import Any
+
+from ...connectors.security import remote_allowed
 
 DEFAULT_ENCODER = {"kind": "onnx", "model_id": "intfloat/multilingual-e5-small"}
 DEFAULT_RETRIEVE_K = 5
@@ -36,6 +42,14 @@ def corpus_settings(pack_config: dict) -> dict:
     for key in ("rrf_k", "batch_size", "on_encoder_change"):
         if pack_config.get(key) is not None:
             out[key] = pack_config[key]
+    return out
+
+
+def project_corpus_settings(project: Any) -> dict:
+    """`corpus_settings` of a project plus `allow_remote` from its security settings (`security.allow_remote`,
+    `pack_config.allow_remote` or RLCD_ALLOW_REMOTE=1): remote connector hosts are refused without it."""
+    out = corpus_settings(project.pack_config)
+    out["allow_remote"] = remote_allowed(project)
     return out
 
 

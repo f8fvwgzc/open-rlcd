@@ -34,6 +34,48 @@ in `var/` on your machine: chunks, the vector index, the entity graph, embedding
 
 No network? Set `pack_config.encoder: {kind: hashing, dim: 256}` in `rlcd.yaml`: no download, weaker features.
 
+### Already have a vector DB?
+
+Skip the ingest and **attach** it read-only: open-rlcd searches your collection / table directly and never writes
+to it. Install the extra (`uv sync --extra qdrant`, `--extra pgvector` or `--extra neo4j`) and map your payload
+fields (or columns) in `rlcd.yaml`:
+
+```yaml
+pack_config:
+  encoder: {kind: onnx, model_id: intfloat/multilingual-e5-small}   # the SAME model your vectors were made with
+  vector:
+    kind: qdrant                       # or pgvector: {kind: pgvector, mode: attach, dsn_env: KB_DSN, table: kb_chunks,
+    mode: attach                       #               id_field: id, vector_field: embedding, text_field: body, ...}
+    url: http://localhost:6333
+    collection: kb
+    api_key_env: QDRANT_API_KEY        # the NAME of an environment variable; never put the key itself here
+    text_field: body                   # payload key holding the chunk text (required)
+    doc_id_field: source_id            # null for "my payload has no such field"
+    title_field: title
+    updated_at_field: modified
+    authority_field: null
+    id_field: null                     # null: the point id is the chunk id
+security: {allow_remote: true}         # only if the database is not on this machine
+```
+
+Read this before you rely on it:
+
+* **Query vectors come from open-rlcd's encoder.** Your collection must have been embedded with the model in
+  `pack_config.encoder`. A collection with another vector size is refused with `encoder_mismatch`; one embedded
+  by a different model of the same size cannot be detected and would give nonsense neighbours. If your vectors
+  come from another model (an OpenAI or Cohere embedding, say), don't attach: retrieve with your own stack and pass
+  `candidates: [{id, text, score}]` in each request instead.
+* There is no BM25 in attach mode (the chunks are not on your laptop): candidates come from the vector search and,
+  if you attach a Neo4j graph (`graph: {kind: neo4j, mode: attach, uri, password_env, expand_cypher}` with a
+  read-only Cypher template that maps `$keys` to chunk ids and `path_length`), from the graph.
+* Label, train and serve with the same configuration: the heads learn from the candidates this retriever returns.
+* A database that is down makes `/v1/decide` answer 503 `connector_unavailable`; the message never contains your
+  URL, DSN or password.
+
+Want open-rlcd to keep its own index in your database instead (index mode)? `rlcd ingest ./data --qdrant
+http://localhost:6333 --collection acme_chunks --neo4j bolt://localhost:7687`, then put the same `vector` /
+`graph` blocks in `rlcd.yaml` (the command prints them) so `rlcd serve` searches them too.
+
 ## 2. Collect real questions (15 minutes)
 
 Write `queries.jsonl` — the questions people actually ask (support tickets, chat logs, search logs), one per line:
@@ -142,6 +184,10 @@ A bundle contains no training data, but its heads learned from your data: share 
 | `the request lacks … input feature(s)` | your request omits fields the model was trained with (e.g. candidate scores): send them |
 | `encoder unavailable … HF_HUB_OFFLINE` | run once online so the encoder downloads, or use the hashing encoder |
 | a head always says `escalate` | read its `skill` and `verdict` in `rlcd report`: that is the honest answer for now |
+| `encoder_mismatch … -dimensional vectors` | the attached collection was embedded with another model: attach one made with your encoder, or pass candidates |
+| `refusing non-loopback host` | the database is on another machine: set `security.allow_remote: true` (or `RLCD_ALLOW_REMOTE=1`) |
+| `indexed into other stores than the configured ones` | `pack_config.vector` / `graph` changed since the last ingest: run `rlcd ingest` once |
+| `connector_unavailable … needs its client library` | install the named extra, e.g. `uv sync --extra qdrant` |
 
 ## Next: put it in front of (and behind) your LLM
 

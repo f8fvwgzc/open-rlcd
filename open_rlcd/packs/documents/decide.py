@@ -33,10 +33,12 @@ instruction); `retrieve_more` when there is no evidence or the answerable gate s
 another link abstained; else `answer`. `reason` says why in words (None for `answer`); `call_llm` is true exactly
 when next is `answer`.
 
-Retrieval failures: when the local corpus cannot be opened or searched (a broken vector store, an unreadable
-graph), decide() answers 503 `connector_unavailable` instead of deciding without evidence; the message names the
-failure without absolute paths. A corpus refused for a configuration reason (encoder mismatch, unknown format)
-still gives a plan without candidates and a warning, as before.
+Retrieval failures: when the corpus cannot be opened or searched (a broken local vector store, an unreadable
+graph, a Qdrant / Postgres / Neo4j server that cannot be reached, a missing connector extra), decide() answers 503
+`connector_unavailable` instead of deciding without evidence; the message names the failure without absolute
+paths, URLs, DSNs or passwords. A corpus refused for a configuration reason (encoder mismatch, including an
+attached collection whose vector size is not the encoder's; unknown format; a connector configuration that
+cannot work, such as a refused remote host) still gives a plan without candidates and a warning, as before.
 
 evaluate(request) -> ship / review / reject for an answer some LLM drafted: grounded (gate), complete (only level
 3 can ship, level 2 at most review) and risk_tier, which sets the stakes when the caller does not (0 low,
@@ -223,6 +225,8 @@ def _retrieve(pack: Any, service: Any, version: str, query: str, warnings: list[
         provider = service.provider(version)
         corpus = pack.corpus(service.project, provider)
     except ContractError as e:
+        if e.kind == "connector_unavailable":   # a store that cannot be reached: 503, never a plan without evidence
+            raise ContractError(_no_paths(e.message, home), kind=e.kind, status=e.status, **e.details) from None
         warnings.append(f"no candidates were given and retrieval is unavailable: {_no_paths(e.message, home)}")
         return [], "none"
     except Exception as e:  # a broken store: a 503, never a 500 with the store's path, never a silent empty plan

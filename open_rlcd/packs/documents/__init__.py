@@ -13,13 +13,16 @@ Modules: provider.py (features), corpus.py (local corpus: chunks, vectors, graph
 evaluate), tasks.py (label tasks from a query log), world.py + synth.py (synthetic data), settings.py
 (pack_config keys).
 
-What it does not do: only the local corpus connectors exist (Qdrant / pgvector / Neo4j are not implemented
-here), retrieval for `decide()` runs only against the local corpus or the candidates the caller sends, and the
-heads judge relations between texts with features, not by reading them like an LLM would.
+Retrieval for `decide()` runs against the configured stores (the local corpus, or Qdrant / pgvector / Neo4j in
+index or attach mode: open_rlcd/connectors) or uses the candidates the caller sends.
+
+What it does not do: the heads judge relations between texts with features, not by reading them like an LLM
+would; an attached store is searched with this pack's encoder, so it must have been embedded with the same model.
 """
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from pathlib import Path
 from typing import Any
@@ -31,7 +34,7 @@ from ...features.text import EncoderError, EncoderMismatch, make_encoder
 from ...labeling.store import LabelItem, LabelStore
 from ..base import BasePack, dataset_from_labels
 from .provider import VIEWS, DocumentsProvider
-from .settings import DEFAULT_ENCODER, config_keys, corpus_settings, encoder_settings
+from .settings import DEFAULT_ENCODER, config_keys, encoder_settings, project_corpus_settings
 
 PROVIDER_CONFIG_VERSION = 1
 
@@ -46,7 +49,7 @@ class DocumentsPack(BasePack):
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._defaults: dict | None = None
-        self._corpora: dict[tuple[str, str], tuple[int, Any]] = {}
+        self._corpora: dict[tuple[str, str, str], tuple[int, Any]] = {}
 
     def defaults(self) -> dict:
         if self._defaults is None:
@@ -114,45 +117,68 @@ class DocumentsPack(BasePack):
 
     # ------------------------------------------------------------------ corpus
     def corpus(self, project: Project, provider: Any) -> Any:
-        """The project's local corpus opened with the provider's encoder (cached until the next ingest), or None
-        when nothing was ingested. A corpus embedded with another encoder raises ContractError (encoder_mismatch)."""
+        """The project's corpus opened with the provider's encoder and connected to its configured stores (cached
+        until the next ingest), or None when nothing was ingested and no store is attached. A corpus embedded with
+        another encoder, or an attached store whose vector size is not the encoder's, raises ContractError
+        (`encoder_mismatch`); an unreachable remote store raises a 503 (`connector_unavailable`)."""
+        from ...connectors.factory import mode_of
         from .corpus import Corpus
 
+        settings = project_corpus_settings(project)
+        attached = mode_of(settings.get("vector"), "vector") == "attach"
         meta = Path(project.home) / "corpus" / "meta.json"
-        if not meta.is_file():
+        if not attached and not meta.is_file():
             return None
-        key = (str(project.home), provider.encoder.sha256)
-        mtime = meta.stat().st_mtime_ns
+        key = (str(project.home), provider.encoder.sha256, json.dumps(settings, sort_keys=True, default=str))
+        stamp = 0 if attached else meta.stat().st_mtime_ns
         with self._lock:
             hit = self._corpora.get(key)
-            if hit is not None and hit[0] == mtime:
+            if hit is not None and hit[0] == stamp:
                 return hit[1]
-            c = Corpus.open(project.home, provider.encoder, corpus_settings(project.pack_config))
-            self._corpora[key] = (mtime, c)
+            c = Corpus.open(project.home, provider.encoder, settings)
+            if c is not None:
+                c.connect()             # fail now (503 / config) rather than in the middle of a retrieval
+            self._corpora[key] = (stamp, c)
             return c
 
     def ingest(self, project: Project, args: dict) -> dict:
-        """`rlcd ingest [PATH]`: read a folder (txt, md, html, pdf, json, jsonl) into the local corpus with the
-        project's encoder. Remote connectors (--qdrant / --neo4j / --csv) are not available in this pack yet."""
+        """`rlcd ingest [PATH]`: read a folder (txt, md, html, pdf, json, jsonl) into the corpus with the project's
+        encoder: chunks, BM25 and (by default) the vectors and entity graph under RLCD_HOME, or the vectors in
+        Qdrant / pgvector and the graph in Neo4j when pack_config.vector / graph name them in index mode.
+
+        `--qdrant URL --collection C` and `--neo4j URI` (args `qdrant`, `collection`, `neo4j`) index into those
+        stores for this run, on top of pack_config (api_key_env / password_env / ... are kept when the configured
+        kind is the same); they never turn an attach-mode store into a writable one. The result carries a `note`
+        when the stores differ from rlcd.yaml: set the same there, or `rlcd serve` refuses to search an index it was
+        not told about. Stores in attach mode are read-only: there is nothing to ingest (read_only_connector)."""
         from .corpus import Corpus
 
-        for key in ("qdrant", "neo4j", "csv", "collection"):
-            if args.get(key):
-                raise ContractError(f"--{key} is not available for the documents pack yet: only local folders can be "
-                                    f"ingested", kind="unsupported_connector")
+        if args.get("csv"):
+            raise ContractError("--csv is not available for the documents pack: ingest a folder of .md / .txt / "
+                                ".html / .pdf / .json / .jsonl files", kind="unsupported_connector")
         cfg = project.pack_config
         path = args.get("path") or cfg.get("corpus")
         if not path:
             raise ContractError("nothing to ingest: give a folder (`rlcd ingest ./data`) or set pack_config.corpus")
+        settings = project_corpus_settings(project)
+        overridden = _cli_stores(settings, args)
         chunking = cfg.get("chunking") if isinstance(cfg.get("chunking"), dict) else {}
         provider = self.provider(project)
-        corpus = Corpus(project.home, provider.encoder, corpus_settings(cfg))
+        corpus = Corpus(project.home, provider.encoder, settings, reindex=True)
         out = corpus.ingest_folder(project.resolve_path(path),
                                    max_chars=int(args.get("max_chars") or chunking.get("max_chars") or 1200),
                                    overlap=int(chunking.get("overlap") if chunking.get("overlap") is not None else 150))
         with self._lock:
-            self._corpora.pop((str(project.home), provider.encoder.sha256), None)
-        return {**out, "corpus": corpus.stats()}
+            for k in [k for k in self._corpora if k[0] == str(project.home)]:
+                self._corpora.pop(k, None)
+        res = {**out, "corpus": corpus.stats(), "stores": corpus.store_targets()}
+        if corpus.reindexed:
+            res["reindexed"] = corpus.reindexed
+        if overridden:
+            lines = "\n".join(f"    {name}: {json.dumps(settings[name], ensure_ascii=False)}" for name in overridden)
+            res["note"] = (f"indexed into the stores given on the command line; put the same in rlcd.yaml so that "
+                           f"`rlcd serve` and `rlcd label` search them:\n  pack_config:\n{lines}")
+        return res
 
     # ------------------------------------------------------------------ labels and synthetic data
     def label_tasks(self, project: Project, provider: Any = None) -> list[LabelItem]:
@@ -190,6 +216,50 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
 
 
 __all__ = ["DEFAULT_ENCODER", "VIEWS", "DocumentsPack", "DocumentsProvider", "write_synth"]
+
+
+def _cli_stores(settings: dict, args: dict) -> list[str]:
+    """Apply `rlcd ingest --qdrant URL --collection C --neo4j URI` to the corpus settings (in place); returns the
+    names of the stores that changed ("vector", "graph")."""
+    changed = []
+    if args.get("qdrant") or args.get("collection"):
+        cur = dict(settings.get("vector") or {})
+        base = dict(cur) if str(cur.get("kind") or "").lower() == "qdrant" else {"kind": "qdrant"}
+        if str(base.get("mode") or "index").lower() == "attach":
+            raise ContractError("pack_config.vector is a qdrant collection in attach mode (read-only): --qdrant / "
+                                "--collection index into a collection open-rlcd owns. Name another collection in an "
+                                "index-mode config, or remove mode: attach", kind="read_only_connector")
+        if args.get("qdrant"):
+            base["url"] = str(args["qdrant"])
+            base.pop("path", None)
+        if args.get("collection"):
+            base["collection"] = str(args["collection"])
+        if not base.get("collection"):
+            raise ContractError("--qdrant needs --collection NAME: the collection open-rlcd writes its chunks into",
+                                kind="connector_config")
+        if not base.get("url") and not base.get("path"):
+            raise ContractError("--collection needs --qdrant URL (or pack_config.vector: {kind: qdrant, url: ...})",
+                                kind="connector_config")
+        base["mode"] = "index"
+        if base != cur:
+            settings["vector"] = base
+            changed.append("vector")
+    if args.get("neo4j"):
+        cur = dict(settings.get("graph") or {})
+        if str(cur.get("kind") or "").lower() == "neo4j":
+            base = dict(cur)
+        else:   # from the local graph keep what also applies to neo4j: known entity names and the hub cut-off
+            base = {"kind": "neo4j", **{k: cur[k] for k in ("terms", "max_fanout") if cur.get(k) is not None}}
+        if str(base.get("mode") or "index").lower() == "attach":
+            raise ContractError("pack_config.graph is a neo4j graph in attach mode (read-only): --neo4j indexes "
+                                "open-rlcd's own entity graph; remove mode: attach to let it write",
+                                kind="read_only_connector")
+        base["uri"] = str(args["neo4j"])
+        base["mode"] = "index"
+        if base != cur:
+            settings["graph"] = base
+            changed.append("graph")
+    return changed
 
 
 def _query_group(state: object) -> str | None:

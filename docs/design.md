@@ -83,9 +83,11 @@ the interfaces the packages build against.
 * **Packs**: `documents` (RAG router / gatekeeper / evaluator), `tabular` (CSV / Parquet: churn, fraud, lead
   scoring, approvals), `trading` (M8, its own pull request: a thin HTTP adapter to the View Engine quant
   sidecar's `/dataset` and `/features`; no trading logic copied).
-* **Connectors**: local FAISS -> hnswlib -> exact numpy vector index and a local NetworkX entity graph today;
-  Qdrant, pgvector and Neo4j (optional extras) are milestone M7. Remote hosts are refused unless explicitly
-  allowed.
+* **Connectors**: a local FAISS -> hnswlib -> exact numpy vector index and a local NetworkX entity graph by
+  default; Qdrant, pgvector and Neo4j (optional extras, M7) in **index** mode (open-rlcd writes its own chunks /
+  graph there) or **attach** mode (read-only retrieval from a collection, table or graph that already exists).
+  Remote hosts are refused unless explicitly allowed; credentials come only from environment variables
+  (sections 9 and 10).
 * **Labeling**: `rlcd label bootstrap` (LLM judge: Claude via the user's own `claude` CLI subscription or
   `ANTHROPIC_API_KEY`, or a local model via Ollama / any OpenAI-compatible server), `rlcd label audit`
   (terminal review), `rlcd label next` (uncertainty + judge/model disagreement + diversity sampling).
@@ -117,7 +119,8 @@ open_rlcd/
   features/  text.py  lexical.py  retrieval.py
   packs/     base.py (Pack, FeatureProvider protocols, loader, dataset_from_labels)  documents/  tabular/
              (trading/ arrives with M8)
-  connectors/ base.py  security.py  local_vector.py  local_graph.py   (qdrant / pgvector / neo4j: M7)
+  connectors/ base.py  security.py  local_vector.py  local_graph.py  factory.py
+             qdrant.py  pgvector.py  neo4j.py   (optional extras, imported only when configured)
   labeling/  judges.py  store.py  bootstrap.py  audit.py  active.py
   serve/     api.py (FastAPI app factory)
   report/    model_card.py  html.py
@@ -126,7 +129,7 @@ open_rlcd/
   client.py  Python client: typed questions, typed errors, retries for transport failures only, fail-closed
 ```
 
-The control layer (section 12) adds to `core/`: `digest.py` (canonical JSON digests), `inputs.py` (question state
+The control layer (section 13) adds to `core/`: `digest.py` (canonical JSON digests), `inputs.py` (question state
 paths), `battery.py` (versioned question sets), `routes.py` (route contracts and deterministic filters),
 `rollout.py` (rollout modes and the kill switch), `receipts.py` (hash-chained receipts, staleness checks),
 `review.py` (evaluate's decision table and revision loop), `uncertainty.py` (uncertainty sources), `redact.py`
@@ -294,7 +297,7 @@ Heads (all overridable in `rlcd.yaml`):
 | `risk_tier` | score 0-3 | query_evidence_answer | argmax | evaluator |
 
 `/v1/decide` composes: response_type + route + needs_graph on the query; `chunk_relevant` re-ranks the candidates
-(given by the caller, or retrieved through the configured connectors); `answerable` on the kept evidence; the
+(given by the caller, or retrieved through the configured connectors, section 9); `answerable` on the kept evidence; the
 result is a plan (`response_type`, `route`, `use_chunks`, `call_llm`) with an overall `act / confirm / escalate`
 that is never stronger than its weakest gate. `/v1/evaluate` judges a drafted answer (grounded, complete,
 risk_tier) and returns ship / review / reject as `act / confirm / escalate`.
@@ -303,7 +306,57 @@ Labels: an LLM judge weak-labels (query, candidates, draft answers); humans audi
 generator (fictional company corpus in English, Japanese and Mongolian, multi-hop entity links, unanswerable
 and out-of-scope queries, perturbed drafts with unsupported numbers) gives ground truth for tests and the demo.
 
-## 9. Security
+## 9. Connectors (M7)
+
+The documents pack retrieves through two protocols (`connectors/base.py`): a `VectorStore` (`search`, `upsert`,
+`count`; remote stores add `fetch` by id, `delete` and `connect`) and a `GraphStore` (`expand` from query entities
+to chunk ids with path length and degree, `neighbors`). `pack_config.vector` and `pack_config.graph` choose them:
+
+| config | store | modes |
+|---|---|---|
+| `vector: {kind: local}` (default) | `LocalVectorStore`: faiss -> hnswlib -> numpy, `vectors.npy` under RLCD_HOME | - |
+| `vector: {kind: qdrant, url, collection}` | `QdrantVectorStore` (extra `qdrant`) | index, attach |
+| `vector: {kind: pgvector, dsn_env, table}` | `PgVectorStore` (extra `pgvector`: psycopg 3; the `vector` Postgres extension) | index, attach |
+| `graph: {kind: local}` (default) | `LocalGraphStore`: networkx or a dict, `graph.json` under RLCD_HOME | - |
+| `graph: {kind: neo4j, uri}` | `Neo4jGraphStore` (extra `neo4j`) | index, attach |
+
+* **index** (default for remote kinds): open-rlcd owns the collection / table / graph. `rlcd ingest` creates it if
+  missing with the encoder's dimension (an existing one of another dimension is refused) and writes its own chunks:
+  Qdrant points are uuid5(chunk id) with payload `{chunk_id, doc_id, title, text, updated_at, authority}`; the
+  pgvector table has those columns plus `embedding vector(dim)` and an HNSW cosine index; Neo4j gets the local
+  graph's schema under prefixed labels (`RlcdDoc`, `RlcdChunk`, `RlcdEntity`; `HAS_CHUNK`, `MENTIONS`, `LINKS`).
+  Chunk text, docs.jsonl and BM25 stay local, so retrieval is still vector + graph + lexical, fused by RRF exactly
+  as with local stores (tests check that a Qdrant- or pgvector-backed corpus returns the local corpus' candidates
+  and scores). meta.json records which stores hold the index; opening it with other stores configured is refused
+  until `rlcd ingest` re-indexes the existing chunks into them.
+* **attach**: read-only retrieval from a store that already exists; nothing is ingested locally and nothing is
+  ever written (`upsert` / `delete` / `ingest` raise `read_only_connector` before any request; pgvector runs in
+  `READ ONLY` transactions, Neo4j in read sessions). `text_field`, `doc_id_field`, `title_field`,
+  `updated_at_field`, `authority_field` (and `id_field`, pgvector `vector_field`) map payload keys / columns to
+  candidate fields; Neo4j takes a Cypher template (`expand_cypher`) that maps the query's entities (`$terms`,
+  `$keys`) to chunk ids with `path_length` / `degree` and receives every value as a parameter; templates with write
+  clauses are refused. Retrieval is vector + graph (no BM25: the chunks are not local); a graph hit that the vector
+  search did not return is fetched by id and scored by the same cosine.
+* **Query vectors come from open-rlcd's encoder.** An attached store must have been embedded with the model in
+  `pack_config.encoder`. A collection / table whose vector size differs from the encoder's dimension is refused
+  (`encoder_mismatch`); equal sizes cannot prove it is the same model. A team whose vectors come from another
+  model passes `candidates` in the request instead (the heads then see that retriever's scores, which is what
+  they must be trained on).
+* Scores: every candidate's `score` is a cosine similarity (Qdrant's score for a cosine collection, computed from
+  the vectors for dot / euclidean ones; `1 - (embedding <=> q)` for pgvector).
+* Failures: an unreachable store, a refused login or a missing extra is a 503 `connector_unavailable` (decide never
+  answers without the evidence it was configured to retrieve); the message names the store kind, the collection /
+  table / database and the exception type, never a URL, DSN, password or path. A configuration that cannot work
+  (unknown key, a credential in rlcd.yaml, a refused host, a missing collection in attach mode) is a 422
+  `connector_config`; decide then answers without candidates and says why, as for a local encoder mismatch.
+
+Verified offline: Qdrant through qdrant-client's in-process engine (real upsert / search / fetch / delete round
+trips, attach mode with foreign payload schemas, dot-product and named-vector collections, the dimension check);
+pgvector and Neo4j with fakes that record every statement, its parameters and its transaction mode. Tests marked
+`network` run the same flows against live servers (`RLCD_TEST_NETWORK=1` plus `RLCD_TEST_QDRANT_URL`,
+`RLCD_TEST_PG_DSN`, `RLCD_TEST_NEO4J_URI`).
+
+## 10. Security
 
 * `RLCD_API_KEY`: every route but `/health` then needs `Authorization: Bearer <key>` or `x-api-key` (constant-time
   compare); request bodies are capped (`RLCD_MAX_BODY_BYTES`); 500s never echo exception text or paths.
@@ -315,7 +368,14 @@ and out-of-scope queries, perturbed drafts with unsupported numbers) gives groun
 * Connectors and judges refuse non-loopback hosts unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1`.
   The `claude-cli` and `anthropic` judges count as non-loopback: they send item text to Anthropic.
   Unix sockets are only explicit paths, `unix://`-style schemes without a network host, and libpq `?host=/dir`;
-  a name ending in `.sock` is a host name.
+  a name ending in `.sock` is a host name. Every host of a Postgres DSN (and `PGHOST` when it names none) is
+  checked, after the DSN is parsed the way libpq parses it.
+* Connector credentials come only from environment variables named in config (`api_key_env`, `password_env`,
+  `user_env`, `dsn_env`): a `password` / `api_key` / `dsn` key in rlcd.yaml, or a URL with `user:password@`, is
+  refused. Connector errors never echo URLs, DSNs or passwords; the server log gets the details with the secrets
+  the store read replaced by `***`.
+* Attach mode never writes (see section 9); Cypher templates and SQL take values only as parameters (identifiers
+  are quoted with `psycopg.sql.Identifier`).
 * The `claude-cli` judge runs Claude Code with every tool and MCP server disabled (`--tools "" --strict-mcp-config
   --no-session-persistence`) in an empty temporary directory; judge prompts mark item text as untrusted data.
   The worst a prompt-injected document can do is earn itself a wrong weak label, which never calibrates.
@@ -324,7 +384,7 @@ and out-of-scope queries, perturbed drafts with unsupported numbers) gives groun
 * Secrets come from the environment only; `.gitignore` covers `var/`, `*.npz`, `.env`, caches and bundles other
   than the demo.
 
-## 10. What it is not
+## 11. What it is not
 
 Not an LLM and not a text generator. No nanosecond claims: heads take microseconds to well under a
 millisecond per row; the encoder dominates (milliseconds to tens of ms per query on CPU); `rlcd bench` prints
@@ -332,14 +392,17 @@ the real numbers. Weak labels from an LLM judge are only as good as the judge, w
 the published metrics use human-verified rows only. Synthetic-data metrics (tests, demo bundle) are a sanity
 check, not accuracy on anyone's real traffic.
 
-## 11. Milestones
+## 12. Milestones
 
 M1 core + contract + tests -> M2 tabular pack -> M3 documents pack (local FAISS / NetworkX, synthetic RAG data)
 -> M4 labeling -> M5 serve API + CLI + bench -> M6 bundle export / import, demo bundle, model card -> M7 Qdrant /
-pgvector / Neo4j -> M8 trading adapter -> M9 docs, examples, CI -> M10 the control layer (section 12). One commit
+pgvector / Neo4j -> M8 trading adapter -> M9 docs, examples, CI -> M10 the control layer (section 13). One commit
 per milestone with tests green.
 
-## 12. The control layer (M10)
+M7 is done: the three remote connectors in index and attach mode, wired into `Corpus.retrieve` and
+`rlcd ingest --qdrant URL --collection C --neo4j URI` (section 9).
+
+## 13. The control layer (M10)
 
 The field guide *How to use Jev with LLMs* describes the harness a typed decision model needs around an LLM.
 What open-rlcd took from it, and the choices made ([control-layer.md](control-layer.md) is the user's view):

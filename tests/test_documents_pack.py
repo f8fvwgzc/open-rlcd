@@ -289,8 +289,12 @@ def test_ingest_a_folder_and_heads_view(trained, tmp_path, monkeypatch):
     project = Project(root=tmp_path, data={"pack": "documents", "pack_config": {"encoder": ENC}})
     out = DocumentsPack().ingest(project, {"path": str(docs)})
     assert out["docs_added"] == 2 and out["corpus"]["chunks"] >= 2
-    with pytest.raises(ContractError, match="not available"):
-        DocumentsPack().ingest(project, {"qdrant": "http://example.org:6333"})
+    with pytest.raises(ContractError, match="needs --collection"):
+        DocumentsPack().ingest(project, {"path": str(docs), "qdrant": "http://localhost:6333"})
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    with pytest.raises(ContractError, match="refusing non-loopback host") as e:   # refused before any connection
+        DocumentsPack().ingest(project, {"path": str(docs), "qdrant": "http://example.org:6333", "collection": "d"})
+    assert e.value.kind == "connector_config"
     view = trained.svc.heads_view(None)
     by = {h["name"]: h for h in view["heads"]}
     assert by["answerable"]["decision"] == "gate" and by["grounded"]["stakes"] == "high"
