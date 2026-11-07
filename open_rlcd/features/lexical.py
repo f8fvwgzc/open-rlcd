@@ -170,6 +170,36 @@ _MULT = {"万": Decimal(10) ** 4, "億": Decimal(10) ** 8, "兆": Decimal(10) **
          "мянга": Decimal(10) ** 3, "мянган": Decimal(10) ** 3, "сая": Decimal(10) ** 6, "тэрбум": Decimal(10) ** 9}
 
 
+# Japanese composite numerals written with Arabic digits: 2万5000, 1万5千, 1億2000万, 3億, 5百 (one value each)
+_JA_UNITS = {"十": 10, "百": 100, "千": 1000, "万": 10 ** 4, "億": 10 ** 8, "兆": 10 ** 12}
+_JA_NUM = re.compile(r"(?<![\d.,])\d[\d,]*(?:\.\d+)?[十百千万億兆](?:(?:\d[\d,]*(?:\.\d+)?)?[十百千万億兆])*\d*")
+_JA_PART = re.compile(r"(\d[\d,]*(?:\.\d+)?)|([十百千万億兆])")
+# a plain space as thousands separator ("1 250 000 төгрөг", common in Mongolian and Russian): only when every group
+# after the first has three digits and a currency or unit word follows, so "items 1 200" stays two numbers
+_UNIT_WORD = (r"(?:төгрөг|₮|tugrik|tögrög|mnt|usd|eur|jpy|gbp|cny|yen|円|¥|€|\$|dollar|euro|рубл|руб|доллар|юан|"
+              r"kg|кг|km|км|тонн|ton|литр|ширхэг|pcs|units?)")
+_SPACED = re.compile(rf"(?<![\d.,])(\d{{1,3}}(?: \d{{3}})+)(?![\d,])(?=\s?{_UNIT_WORD})", re.IGNORECASE)
+
+
+def _ja_value(s: str) -> Decimal:
+    """2万5000 -> 25000, 1億2千万 -> 120000000: 十 / 百 / 千 multiply within a section, 万 / 億 / 兆 close one."""
+    total = section = Decimal(0)
+    num: Decimal | None = None
+    for m in _JA_PART.finditer(s):
+        if m.group(1):
+            num = Decimal(m.group(1).replace(",", ""))
+            continue
+        unit = _JA_UNITS[m.group(2)]
+        if unit < 10 ** 4:
+            section += (num if num is not None else Decimal(1)) * unit
+        else:
+            section += num if num is not None else 0
+            total += (section or Decimal(1)) * unit
+            section = Decimal(0)
+        num = None
+    return total + section + (num if num is not None else 0)
+
+
 def _canon(d: Decimal) -> str:
     if d == d.to_integral_value():
         return str(int(d))
@@ -179,10 +209,15 @@ def _canon(d: Decimal) -> str:
 
 def numbers(text: str) -> set[str]:
     """Normalised numeric tokens: `1,200` = `1200` = `１２００` -> "1200"; `12.50%` -> "12.5%"; `1.2 million`
-    and `120万` -> "1200000". Thousands separators are `,`, NBSP, narrow NBSP and `'`; a comma not followed by
-    exactly three digits separates numbers. Signs are ignored. Dates split into their parts."""
+    and `120万` -> "1200000"; Japanese composites `2万5000` / `1万5千` -> "25000" / "15000". Thousands separators
+    are `,`, NBSP, narrow NBSP and `'`, and a plain space when every later group has three digits and a currency or
+    unit word follows (`1 250 000 төгрөг` -> "1250000"); a comma not followed by exactly three digits separates
+    numbers. Signs are ignored. Dates split into their parts."""
     out: set[str] = set()
-    for m in _NUM.finditer(unicodedata.normalize("NFKC", str(text or ""))):
+    norm = unicodedata.normalize("NFKC", str(text or ""))
+    norm = _SPACED.sub(lambda m: m.group(1).replace(" ", ""), norm)
+    norm = _JA_NUM.sub(lambda m: _canon(_ja_value(m.group(0))), norm)
+    for m in _NUM.finditer(norm):
         raw = re.sub(r"[,\u00a0\u202f']", "", m.group(1))
         try:
             val = Decimal(raw)
@@ -213,7 +248,8 @@ def number_support(answer: str, evidence: str) -> tuple[float, int]:
 # ----------------------------------------------------------------------------- query features
 
 # Cue lists: plain words match a token exactly, words ending in "*" match a token prefix, entries containing
-# CJK or a space match as substrings of the normalised query.
+# CJK match as substrings of the normalised query, phrases (with a space) as consecutive tokens (or a substring),
+# and symbols without any letter or digit ("$") as substrings.
 _QW: dict[str, tuple[str, ...]] = {
     "what": ("what", "何", "なに", "なん", "юу", "ямар"),
     "who": ("who", "whom", "whose", "誰", "だれ", "хэн*"),
@@ -259,10 +295,16 @@ QUERY_FEATURES: list[str] = [
 ]
 
 
+def match_cues(text: str, cues: tuple[str, ...]) -> bool:
+    """True when any cue matches `text` on token boundaries (rules above the cue lists): "fee" matches "fee" and
+    "Fee," but not "feedback" or "coffee"; "refund*" matches "refunds"; "first aid" matches the two tokens."""
+    return _matches(_norm(text).strip(), tokens(text), cues)
+
+
 def _matches(qnorm: str, toks: list[str], cues: tuple[str, ...]) -> bool:
     joined = f" {' '.join(toks)} "
     for c in cues:
-        if _CJK.search(c):
+        if _CJK.search(c) or not any(ch.isalnum() for ch in c):    # CJK, or a symbol such as "$" (never a token)
             if c in qnorm:
                 return True
         elif " " in c or ";" in c:

@@ -247,7 +247,8 @@ def test_graph_multi_hop_expand(tmp_path, monkeypatch, mode):
                                                       "via": "Bluebird Bakery", "seed": "Bluebird Bakery"}]
     assert g.expand(["Unknown Corp"], hops=2) == [] and g.expand([], hops=2) == []
     assert len(g.expand(["Zentrix"], hops=3, limit=2)) == 2
-    assert _summary(g.neighbors(["b#0"], hops=1)) == [("a#0", 1), ("c#0", 1)]
+    # both share one degree-2 entity with b#0 (same specificity); c#0 names fewer other entities (more focused)
+    assert _summary(g.neighbors(["b#0"], hops=1)) == [("c#0", 1), ("a#0", 1)]
     assert g.neighbors(["nope"]) == []
 
 

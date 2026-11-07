@@ -14,7 +14,31 @@ Entities come from cheap, language-aware surface patterns (`entities`): capitali
 capitalised words mid-sentence (Latin and Mongolian Cyrillic), ALL-CAPS codes and product ids, quoted terms,
 katakana runs, and terms from a configured list (needed for kanji names, which have no capitalisation). It is
 not named-entity recognition: it misses lower-case names and picks up some capitalised non-entities; the
-features built on it (path length, degree) are weighed by calibrated heads, not trusted blindly.
+features built on it (path length, degree) are weighed by calibrated heads, not trusted blindly. Filters that
+keep ordinary words out:
+  * a space is inserted where Latin letters or digits meet CJK text first ("チームはRobotics Labです" has no word
+    boundary before "Robotics" otherwise, and the name would come out as "Lab");
+  * units, currencies and stock-keeping words (USD, KG, SKU, ...) are never entities, and are stripped from the
+    ends of a capitalised phrase ("SKU KV-1234" -> "KV-1234");
+  * common katakana nouns (チーム, リーダー, サービス, データ, ...) and compounds made only of them (チームリーダー) are
+    never entities;
+  * "last", "next", "first", "new" ... stay in front of a capitalised phrase of two or more words ("the Last Mile
+    team" is "Last Mile", not "Mile"), while articles and other openers are stripped ("The Acme Robotics");
+  * a capitalised fragment of a configured term at the same place ("Үйл" of "Үйл ажиллагааны хэлтэс") is dropped.
+
+Hubs: an entity mentioned by more chunks than `hub_degree()` = min(`max_fanout` (200), max(`hub_min` (10),
+`hub_share` (5 %) of all chunks)) is a hub (a company name on every page). A hub is never a seed and expansion
+does not walk through it, so one common token cannot pull in the whole corpus. The floor keeps small corpora
+working: in a 50-chunk corpus a team named on its page and three product sheets is not a hub.
+
+Ranking: rows are ordered by path length, then by how specific their connection is, then by focus (fewer other
+entities named: a product's own sheet before a news item that lists five products), and only then by id (exact
+ties). A 1-hop chunk scores by the query entities it mentions: their count, then the sum of 1/degree over them.
+A chunk 2 or more hops away scores by its bridges to the chunks one hop nearer: the sum of 1/degree over the
+non-hub entities it shares with them, plus 1 when it is in the same document as one of them or in a document
+linked to one of theirs (an explicit link is the most specific bridge there is: no shared entity can weigh more
+than 1/2). So for "who leads the team that owns X?", the team page that X's sheet links to and names ranks before
+the sheets of the team's other products, which share only the team name.
 
 Persistence: one JSON file (node-link style), never pickle.
 """
@@ -22,6 +46,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import math
 import os
 import re
 import unicodedata
@@ -30,6 +55,12 @@ from pathlib import Path
 from typing import Any
 
 FORMAT = "open-rlcd-graph/1"
+# version of `entities()`: a graph saved by another version holds other entity keys, and the corpus re-extracts
+# them on load (`Corpus._load`); 1 = no script glue, units and common katakana nouns were entities
+ENTITY_VERSION = 2
+HUB_SHARE = 0.05        # an entity in more than this share of all chunks is a hub ...
+HUB_MIN = 10            # ... but never one mentioned by this many chunks or fewer (small corpora)
+LINK_WEIGHT = 1.0       # bridge weight of the same / an explicitly linked document (an entity bridge is 1/degree)
 
 # ----------------------------------------------------------------------------- entity extraction
 
@@ -37,26 +68,76 @@ def _wordset(text: str) -> frozenset[str]:
     return frozenset(text.split())
 
 
+_CJK_CHARS = "぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
+# where Latin letters / digits meet CJK text: \b sees no boundary there ("はRobotics" is one \w run)
+SCRIPT_GLUE = re.compile(rf"(?<=[{_CJK_CHARS}])(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])(?=[{_CJK_CHARS}])")
 _LAT_WORD = r"[A-Z][A-Za-z0-9&'\-]*"
 _CYR_UP, _CYR_LO = "А-ЯЁӨҮ", "а-яёөүА-ЯЁӨҮA-Za-z0-9\\-"
 _CAP_RUN = re.compile(rf"\b{_LAT_WORD}(?:[ \t]+{_LAT_WORD})*")
 _CYR_RUN = re.compile(rf"(?<![\w])[{_CYR_UP}][{_CYR_LO}]+(?:[ \t]+[{_CYR_UP}][{_CYR_LO}]+)*")
 _CODE = re.compile(r"(?<![\w-])(?=[A-Z0-9_-]*[A-Z])(?=[A-Z0-9_-]*(?:\d|[A-Z]{2}))[A-Z0-9][A-Z0-9_-]*[A-Z0-9](?![\w-])")
-_QUOTED = re.compile(r"[\"“„«「『]([^\"”»」』\n]{2,80})[\"”»」』]")
-_KATAKANA = re.compile(r"[\u30a1-\u30fa\u30fc\u30fb]{2,}")
-_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
-_SENT_START = re.compile(r"([.!?。！？:;\n]\s*|[\"“„«(\[]\s*)$")
+_QUOTED = re.compile("[\"“„«「『]([^\"”»」』\\n]{2,80})[\"”»」』]")
+_KATAKANA = re.compile(r"[ァ-ヺー・]{2,}")
+_CJK = re.compile(rf"[{_CJK_CHARS}]")
+_SENT_START = re.compile("([.!?。！？:;\\n]\\s*|[\"“„«(\\[]\\s*)$")
 _LEADING = _wordset("""a an the this that these those in on at for of and or but if when where who what which why how
 does do did is are was were will would can could should shall may might must please our your their its it he she
 they we i my me us them his her there here then also after before during since while with from by to as all each
 every some any no not new see yes ok okay hi hello dear thanks thank note notes total both many most more other
 such first second third finally overall according based following last next until unlike like however therefore
 thus today yesterday tomorrow now currently recently meanwhile moreover furthermore although though because so
-summary introduction conclusion background overview table figure section chapter page part step""")
-_CYR_LEADING = _wordset("энэ тэр манай танай бүх ямар хэн юу хаана хэзээ яагаад яаж аль")
+summary introduction conclusion background overview table figure section chapter page part step about""")
+# leading words that also begin real names ("Last Mile", "New Holland", "First Aid"): never stripped from the front of
+# a capitalised phrase of two or more words (a lone "Last" is still dropped as a sentence opener)
+_NAME_LEADING = _wordset("last next first second third new")
+_CYR_LEADING = _wordset("энэ тэр манай танай бүх ямар хэн юу хаана хэзээ яагаад яаж аль тус ихэвчлэн")
+# units, currencies and stock-keeping words: written in capitals like names, but an entity "USD" would connect every
+# price line to every other. Dropped when alone and stripped from either end of a phrase ("SKU KV-1234").
+_UNITS = _wordset("""usd eur jpy gbp cny rmb mnt rub chf aud cad krw inr hkd sgd kg km cm mm mg ml kwh kw mw mph kph
+lb lbs oz ft sku pcs qty""")
+# generic codes that are never a name on their own (but may end one: "the Billing API")
+_GENERIC = _wordset("am pm utc gmt pdf url faq eta vat")
+# common katakana nouns (loanwords for team, leader, member, service, data, ...): ordinary words, not names
+_KATAKANA_COMMON = _wordset("""
+チーム リーダー メンバー マネージャー マネジャー スタッフ サービス データ システム オフィス センター グループ
+プロジェクト ロボット ポリシー ルール ガイド ガイドライン レポート リスト ページ サイト ユーザー カスタマー クライアント
+パートナー サポート セキュリティ ネットワーク サーバー ソフトウェア ハードウェア アプリ アプリケーション ファイル
+フォルダ フォルダー メール メッセージ ニュース イベント ミーティング スケジュール タスク プロセス コスト コード モデル
+タイプ カテゴリ カテゴリー レベル ステータス エラー テスト バージョン アップデート ツール デバイス センサー パッケージ
+ケース セール セールス マーケティング ビジネス オンライン トレーニング ドキュメント コンテンツ フォーム リンク アクセス
+アカウント パスワード ログイン ポイント キャンペーン プログラム インターネット コンピューター パソコン ホテル タクシー
+バス ビル フロア ルーム エリア ゾーン ライン ルート ステップ フロー リスク クレーム トラブル フィードバック アンケート
+サイズ カラー デザイン プラン オプション サンプル ブランド メーカー ショップ ストア オーダー キャンセル トップ ホーム
+メニュー ボタン マニュアル ミス チェック リクエスト
+""")
+_KATAKANA_PIECES = frozenset({p for k in _KATAKANA_COMMON for p in (k, k.rstrip("ー"))})
 # multi-letter case endings only: single letters (dative -д / -т) end too many stems to strip safely
 _MN_SUFFIXES = ("уудын", "үүдийн", "ийнхээ", "ынхаа", "аас", "ээс", "оос", "өөс", "тай", "тэй", "той", "ийн", "ын",
                 "руу", "рүү", "ийг", "ыг")
+
+
+def common_katakana(run: str) -> bool:
+    """True when a katakana run is a common noun (チーム) or a compound made only of common nouns (チームリーダー)."""
+    s = run.replace("・", "")
+    if not s:
+        return True
+    ok = [True] + [False] * len(s)            # ok[i]: s[:i] splits into common pieces
+    for i in range(2, len(s) + 1):
+        ok[i] = any(ok[j] and s[j:i] in _KATAKANA_PIECES for j in range(max(0, i - 12), i - 1))
+    return ok[-1]
+
+
+def _trim_units(phrase: str) -> str:
+    """Unit / currency words dropped from both ends ("SKU KV-1234" -> "KV-1234", "USD" -> ""); a lone generic code
+    ("PDF") -> ""."""
+    words = phrase.split()
+    while words and words[0].casefold().strip(".,") in _UNITS:
+        words = words[1:]
+    while words and words[-1].casefold().strip(".,") in _UNITS:
+        words = words[:-1]
+    if len(words) == 1 and words[0].casefold().strip(".,") in _GENERIC:
+        return ""
+    return " ".join(words)
 
 
 def normalize_entity(text: str) -> str:
@@ -98,15 +179,22 @@ def _lower_elsewhere(word: str, text: str) -> bool:
     return re.search(rf"(?<!\w){re.escape(word.lower())}(?!\w)", text) is not None
 
 
-def _cap_phrases(text: str, run: re.Pattern, leading: frozenset[str]) -> list[str]:
-    """Capitalised phrases. A single capitalised word counts mid-sentence; at a sentence start (where any word
-    is capitalised) only if it is not a common sentence opener and never appears in lower case in the text."""
+def _cap_phrases(text: str, run: re.Pattern, leading: frozenset[str],
+                 name_leading: frozenset[str] = frozenset()) -> list[tuple[int, str]]:
+    """(position, phrase) of capitalised phrases. A single capitalised word counts mid-sentence; at a sentence start
+    (where any word is capitalised) only if it is not a common sentence opener and never appears in lower case in
+    the text. Leading words in `name_leading` are kept in front of a multi-word phrase."""
     out = []
     lowered = None
     for m in run.finditer(text):
         words = m.group(0).split()
+        pos = m.start()
         sentence_start = _at_sentence_start(text, m.start())
-        while words and words[0].casefold().strip("'’") in leading:   # "The Acme Robotics" -> "Acme Robotics"
+        while words:                                   # "The Acme Robotics" -> "Acme Robotics"
+            w0 = words[0].casefold().strip("'’")
+            if w0 not in leading or (w0 in name_leading and len(words) > 1):
+                break
+            pos += len(words[0]) + 1
             words = words[1:]
             sentence_start = False
         if sentence_start and len(words) >= 2:
@@ -114,51 +202,61 @@ def _cap_phrases(text: str, run: re.Pattern, leading: frozenset[str]) -> list[st
             if lowered is None:
                 lowered = set(re.findall(r"\w+", text))      # case kept: only words written in lower case count
             if words[0].lower() in lowered or normalize_entity(words[0]) in lowered:
+                pos += len(words[0]) + 1
                 words = words[1:]
                 sentence_start = False
         for i, part in enumerate(_split_possessive(words)):
             first = sentence_start and i == 0
             if len(part) >= 2:
-                out.append(" ".join(part))
+                out.append((pos, " ".join(part)))
                 continue
             w = part[0]
             if len(w) < 3 or w.casefold() in leading:
                 continue
             if first and _lower_elsewhere(w, text):
                 continue
-            out.append(w)
+            out.append((pos, w))
     return out
 
 
 def entities(text: str, extra: list[str] | None = None) -> list[str]:
-    """Entity mentions in `text`, deduplicated by `normalize_entity`, in order of first appearance.
+    """Entity mentions in `text`, deduplicated by `normalize_entity`, in order of first appearance (see the module
+    docstring for the patterns and filters).
 
     `extra` is a list of known terms (any script; needed for kanji / hanzi names) matched as case-insensitive
     substrings."""
-    s = unicodedata.normalize("NFKC", str(text or ""))
-    found: list[tuple[int, str]] = []
+    s = SCRIPT_GLUE.sub(" ", unicodedata.normalize("NFKC", str(text or "")))
+    found: list[tuple[int, str, str]] = []           # (position, surface form, kind)
     for m in _QUOTED.finditer(s):
-        found.append((m.start(1), m.group(1).strip()))
+        found.append((m.start(1), m.group(1).strip(), "quoted"))
     for m in _CODE.finditer(s):
-        found.append((m.start(), m.group(0)))
-    for phrase in _cap_phrases(s, _CAP_RUN, _LEADING):
-        found.append((s.find(phrase), phrase))
-    for phrase in _cap_phrases(s, _CYR_RUN, _CYR_LEADING):
-        found.append((s.find(phrase), phrase))
+        found.append((m.start(), m.group(0), "code"))
+    for pos, phrase in _cap_phrases(s, _CAP_RUN, _LEADING, _NAME_LEADING):
+        found.append((pos, phrase, "cap"))
+    for pos, phrase in _cap_phrases(s, _CYR_RUN, _CYR_LEADING):
+        found.append((pos, phrase, "cap"))
     for m in _KATAKANA.finditer(s):
         k = m.group(0).strip("・")
-        if len(k.replace("ー", "")) >= 2:
-            found.append((m.start(), k))
+        if len(k.replace("ー", "")) >= 2 and not common_katakana(k):
+            found.append((m.start(), k, "katakana"))
+    spans: list[tuple[int, int]] = []
     if extra:
         low = s.casefold()
         for term in extra:
             t = unicodedata.normalize("NFKC", str(term)).strip()
-            if len(t) >= 2 and (i := low.find(t.casefold())) >= 0:
-                found.append((i, t))
+            tl = SCRIPT_GLUE.sub(" ", t).casefold()
+            if len(t) >= 2 and (i := low.find(tl)) >= 0:
+                found.append((i, t, "term"))
+                spans.append((i, i + len(tl)))
     out, seen = [], set()
-    for _, e in sorted(found, key=lambda t: t[0]):
+    for pos, e, kind in sorted(found, key=lambda t: t[0]):
+        if kind != "term":
+            e = _trim_units(e)
+            # a capitalised fragment of a configured term at the same place ("Үйл" of "Үйл ажиллагааны хэлтэс")
+            if kind == "cap" and any(a <= pos and pos + len(e) < b for a, b in spans):
+                continue
         key = normalize_entity(e)
-        if len(key) >= 2 and key not in seen:
+        if len(key) >= 2 and key not in seen and key not in _UNITS:
             seen.add(key)
             out.append(e)
     return out
@@ -274,6 +372,8 @@ def _networkx() -> Any | None:
         return None
 
 
+
+
 # ----------------------------------------------------------------------------- the store
 
 class LocalGraphStore:
@@ -281,14 +381,17 @@ class LocalGraphStore:
 
     `terms`: known entity names to match as substrings (kanji names, product names without capitals).
     `use_networkx`: None = networkx when importable, False = the dict fallback, True = require networkx.
-    `max_fanout`: an entity mentioned by more chunks than this is a hub (a company name on every page); it is
-    still a seed, but expansion does not walk through it, so one hub cannot pull in the whole corpus."""
+    `max_fanout`, `hub_share`, `hub_min`: an entity mentioned by more than `hub_degree()` = min(max_fanout,
+    max(hub_min, hub_share * chunks)) chunks is a hub (a company name on every page). A hub is not a seed, and
+    expansion does not walk through it, so one hub cannot pull in the whole corpus."""
 
     def __init__(self, path: Path, terms: list[str] | None = None, use_networkx: bool | None = None,
-                 max_fanout: int = 200):
+                 max_fanout: int = 200, hub_share: float = HUB_SHARE, hub_min: int = HUB_MIN):
         self.path = Path(path)
         self.terms = [str(t) for t in (terms or [])]
         self.max_fanout = int(max_fanout)
+        self.hub_share = float(hub_share)
+        self.hub_min = int(hub_min)
         nx = _networkx() if use_networkx is not False else None
         if use_networkx is True and nx is None:
             from .base import ConnectorError
@@ -296,6 +399,8 @@ class LocalGraphStore:
             raise ConnectorError("networkx is not installed; install the 'documents' extra or use the fallback")
         self.g: _NxGraph | _DictGraph = _NxGraph(nx) if nx is not None else _DictGraph()
         self.labels: dict[str, str] = {}          # ent key -> first surface form seen
+        self.entity_version = ENTITY_VERSION      # the extractor that built the graph (older on a loaded file)
+        self._n_chunks: int | None = None         # cached chunk count (hub threshold); reset on every write
 
     @property
     def backend(self) -> str:
@@ -310,7 +415,16 @@ class LocalGraphStore:
             k = n.split(":", 1)[0]
             kinds[k] = kinds.get(k, 0) + 1
         return {"nodes": self.g.number_of_nodes(), "edges": self.g.number_of_edges(), **kinds,
-                "backend": self.backend}
+                "backend": self.backend, "hub_degree": self.hub_degree()}
+
+    def hub_degree(self) -> int:
+        """Entities mentioned by more chunks than this are hubs: min(max_fanout, max(hub_min, hub_share * chunks))."""
+        if self._n_chunks is None:
+            self._n_chunks = sum(1 for n, _ in self.g.nodes() if n.startswith("chunk:"))
+        return max(1, min(self.max_fanout, max(self.hub_min, math.ceil(self.hub_share * self._n_chunks))))
+
+    def is_hub(self, node: str) -> bool:
+        return node.startswith("ent:") and self.g.degree(node) > self.hub_degree()
 
     # ------------------------------------------------------------------ writes
 
@@ -318,6 +432,7 @@ class LocalGraphStore:
         """(Re)place a document: its chunks (id, text), the entities they mention, and links to other docs."""
         doc = f"doc:{doc_id}"
         self.remove_document(doc_id, keep_node=True)
+        self._n_chunks = None
         self.g.add_node(doc, kind="doc")
         for cid, text in chunks:
             c = f"chunk:{cid}"
@@ -343,6 +458,7 @@ class LocalGraphStore:
         doc = f"doc:{doc_id}"
         if not self.g.has_node(doc):
             return
+        self._n_chunks = None
         orphan_check = set()
         for n in self.g.neighbors(doc):
             if n.startswith("chunk:"):
@@ -368,12 +484,12 @@ class LocalGraphStore:
 
     def _seeds(self, terms: list[str]) -> list[str]:
         """Entity nodes named by `terms`: exact key match, else entities whose key contains the term as whole
-        words (Latin / Cyrillic) or as a substring (CJK), or that the term contains."""
+        words (Latin / Cyrillic) or as a substring (CJK), or that the term contains. Hubs are never seeds."""
         seeds: list[str] = []
         ent_keys = None
         for t in terms:
             key = normalize_entity(t)
-            if len(key) < 2:
+            if len(key) < 2 or key in _UNITS:
                 continue
             node = f"ent:{key}"
             if self.g.has_node(node):
@@ -387,11 +503,13 @@ class LocalGraphStore:
                 if padded in f" {k} " or (len(k) >= 3 and f" {k} " in padded) \
                         or (cjk and (key in k or (len(k) >= 2 and k in key))):
                     seeds.append(f"ent:{k}")
-        return list(dict.fromkeys(seeds))
+        hub = self.hub_degree()
+        return [s for s in dict.fromkeys(seeds) if self.g.degree(s) <= hub]
 
     def _walk(self, starts: list[str], max_edges: int) -> dict[str, tuple[int, str, str]]:
         """Multi-source BFS: node -> (edge distance, predecessor, originating start). Hubs are not walked
         through (except as starts)."""
+        hub = self.hub_degree()
         best: dict[str, tuple[int, str, str]] = {s: (0, "", s) for s in starts}
         queue = deque(starts)
         while queue:
@@ -399,7 +517,7 @@ class LocalGraphStore:
             d, _, origin = best[n]
             if d >= max_edges:
                 continue
-            if d > 0 and n.startswith("ent:") and self.g.degree(n) > self.max_fanout:
+            if d > 0 and n.startswith("ent:") and self.g.degree(n) > hub:
                 continue
             for m in sorted(self.g.neighbors(n)):
                 if m not in best:
@@ -407,19 +525,53 @@ class LocalGraphStore:
                     queue.append(m)
         return best
 
-    def _chunk_rows(self, best: dict[str, tuple[int, str, str]], hop_of, exclude: set[str], limit: int,
+    def _bridge(self, node: str, level: int, hop: dict[str, int], weight: Any, memo: dict) -> float:
+        """How specifically `node` connects to the chunks at chunk-hop `level`: the sum of 1/degree over the
+        non-hub entities it shares with them, plus LINK_WEIGHT when one of them is in the same document or in a
+        document linked to this one. `memo` caches per (node, level) how many chunks of that level a node touches,
+        so the cost stays close to that of the walk itself."""
+        def touches(n: str) -> int:
+            key = (n, level)
+            if key not in memo:
+                memo[key] = sum(1 for x in self.g.neighbors(n) if hop.get(x) == level)
+            return memo[key]
+
+        spec, linked = 0.0, False                        # `node` itself is one hop further: never counted
+        for m in self.g.neighbors(node):
+            if m.startswith("ent:"):
+                w = weight(m)
+                if w and touches(m) > 0:
+                    spec += w
+            elif m.startswith("doc:") and not linked:
+                linked = touches(m) > 0 or any(touches(x) > 0 for x in self.g.neighbors(m) if x.startswith("doc:"))
+        return spec + (LINK_WEIGHT if linked else 0.0)
+
+    def _chunk_rows(self, best: dict[str, tuple[int, str, str]], exclude: set[str], limit: int,
                     seeds: set[str] | None = None) -> list[dict]:
+        """Reached chunks as rows, nearest first, then most specific connection first (module docstring)."""
+        hub = self.hub_degree()
+        seeds = seeds or set()
+
+        def weight(e: str) -> float:
+            deg = self.g.degree(e)
+            return 1.0 / deg if 0 < deg <= hub else 0.0
+
+        hop = {n: (d + 1) // 2 for n, (d, _, _) in best.items() if n.startswith("chunk:")}
+        memo: dict = {}
         rows = []
-        for n, (d, prev, origin) in best.items():
+        for n, (_, prev, origin) in best.items():
             if not n.startswith("chunk:") or n in exclude:
                 continue
-            hops = hop_of(d)
-            seed_hits = sum(1 for m in self.g.neighbors(n) if m in seeds) if seeds else 0
-            rows.append({"id": n[6:], "path_length": hops, "degree": self.g.degree(n),
-                         "via": self._label(prev), "seed": self._label(origin), "_hits": seed_hits})
-        rows.sort(key=lambda r: (r["path_length"], -r["_hits"], r["id"]))
+            nb = self.g.neighbors(n)
+            hits = [m for m in nb if m in seeds]
+            spec = sum(weight(m) for m in hits) if hits else self._bridge(n, hop[n] - 1, hop, weight, memo)
+            n_ents = sum(1 for m in nb if m.startswith("ent:"))
+            rows.append({"id": n[6:], "path_length": hop[n], "degree": self.g.degree(n),
+                         "via": self._label(prev), "seed": self._label(origin),
+                         "_key": (-len(hits), -round(spec, 9), n_ents)})
+        rows.sort(key=lambda r: (r["path_length"], *r["_key"], r["id"]))
         for r in rows:
-            r.pop("_hits")
+            r.pop("_key")
         return rows[: max(0, int(limit))]
 
     def _label(self, node: str) -> str:
@@ -428,14 +580,14 @@ class LocalGraphStore:
         return node
 
     def expand(self, terms: list[str], hops: int = 2, limit: int = 50) -> list[dict]:
-        """Chunks within `hops` chunk-hops of the entities named by `terms`, nearest first (then by how many
-        of those entities they mention): [{id, path_length, degree, via, seed}]."""
+        """Chunks within `hops` chunk-hops of the entities named by `terms`, nearest first, then by how specific
+        their connection is (module docstring): [{id, path_length, degree, via, seed}]."""
         hops = max(1, int(hops))
         seeds = self._seeds([str(t) for t in terms or []])
         if not seeds:
             return []
         best = self._walk(seeds, max_edges=2 * hops)
-        return self._chunk_rows(best, lambda d: (d + 1) // 2, set(), limit, set(seeds))
+        return self._chunk_rows(best, set(), limit, set(seeds))
 
     def neighbors(self, ids: list[str], hops: int = 1, limit: int = 50) -> list[dict]:
         """Chunks within `hops` chunk-hops of the given chunks (through a shared entity or document)."""
@@ -444,7 +596,7 @@ class LocalGraphStore:
         if not starts:
             return []
         best = self._walk(starts, max_edges=2 * hops)
-        return self._chunk_rows(best, lambda d: (d + 1) // 2, set(starts), limit)
+        return self._chunk_rows(best, set(starts), limit)
 
     def chunk_degree(self, chunk_id: str) -> int:
         return self.g.degree(f"chunk:{chunk_id}")
@@ -452,7 +604,7 @@ class LocalGraphStore:
     # ------------------------------------------------------------------ persistence
 
     def to_dict(self) -> dict:
-        return {"format": FORMAT, "directed": False, "terms": self.terms,
+        return {"format": FORMAT, "directed": False, "terms": self.terms, "entities": self.entity_version,
                 "nodes": [{"id": n, **{k: v for k, v in a.items() if isinstance(v, (str, int, float, bool))}}
                           for n, a in self.g.nodes()],
                 "links": [{"source": a, "target": b, **{k: v for k, v in d.items() if isinstance(v, str)}}
@@ -467,13 +619,14 @@ class LocalGraphStore:
 
     @classmethod
     def load(cls, path: Path, terms: list[str] | None = None, use_networkx: bool | None = None,
-             max_fanout: int = 200) -> LocalGraphStore:
+             max_fanout: int = 200, hub_share: float = HUB_SHARE, hub_min: int = HUB_MIN) -> LocalGraphStore:
         path = Path(path)
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("format") != FORMAT:
             raise ValueError(f"{path}: unknown graph format {data.get('format')!r}")
         store = cls(path, terms=terms if terms is not None else data.get("terms"), use_networkx=use_networkx,
-                    max_fanout=max_fanout)
+                    max_fanout=max_fanout, hub_share=hub_share, hub_min=hub_min)
+        store.entity_version = int(data.get("entities") or 1)
         for node in data.get("nodes") or []:
             attrs = {k: v for k, v in node.items() if k != "id"}
             store.g.add_node(str(node["id"]), **attrs)

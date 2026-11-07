@@ -295,3 +295,42 @@ def test_ingest_a_folder_and_heads_view(trained, tmp_path, monkeypatch):
     by = {h["name"]: h for h in view["heads"]}
     assert by["answerable"]["decision"] == "gate" and by["grounded"]["stakes"] == "high"
     assert "evidence" in by["answerable"]["input"]["state"] and by["risk_tier"]["legend"]["3"].startswith("3:")
+
+
+# ----------------------------------------------------------------------------- reviewed defects on the trained model
+
+def test_decide_without_kept_evidence_retrieves_more_and_answerable_knows_the_state(trained):
+    """F30 / F39: nothing passes min_relevance -> answerable judges an empty set it was trained and calibrated on,
+    the plan does not answer, and no warning tells the caller to send fields it never had to send."""
+    d = trained.svc.decide(DecideRequest(state={"query": "How much does standard shipping cost?"}, min_relevance=1.0))
+    assert d["plan"]["use_chunks"] == [] and d["ranked"]
+    assert d["action"] == "escalate" and d["plan"]["next"] == "retrieve_more" and d["plan"]["call_llm"] is False
+    assert "min_relevance" in d["plan"]["reason"]
+    assert d["heads"]["answerable"]["answer"]["noul"] < 0.3
+    assert not any("Send the same fields" in w for w in d["warnings"]), d["warnings"]
+
+
+def test_multi_hop_question_retrieves_the_team_page_in_every_language(trained):
+    """F08 / F09 / F10: the team page the product sheet links to and names is among the candidates."""
+    team = {t.subject: t.chunk_id for t in trained.world.teams}
+    for p in trained.world.products[:6]:
+        for q in (f"Who leads the team that owns the {p.subject}?", f"{p.subject}を担当するチームのリーダーは誰ですか？",
+                  f"{p.subject}-г хариуцдаг багийн ахлагч хэн бэ?"):
+            d = trained.svc.decide(DecideRequest(state={"query": q}, heads=["chunk_relevant"]))
+            assert team[p.meta["team"]] in [x["id"] for x in d["ranked"]], q
+
+
+def test_examples_readme_matches_what_the_demo_trains(trained):
+    """F40: the 'What to expect' table of examples/documents/README.md is what build_demo.py prints (same seed, 900
+    queries, hashing encoder): skill and verdicts exactly, accuracy within 0.03."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "examples" / "documents" / "README.md").read_text(encoding="utf-8")
+    block = text.split("## What to expect", 1)[1].split("```", 2)[1]
+    rows = [ln.split() for ln in block.strip().splitlines()[1:]]
+    assert {r[0] for r in rows} == set(HEADS)
+    for name, _status, skill, acc, _base, _ece, verdict in rows:
+        h = trained.job["heads"][name]
+        assert skill == ("yes" if h["metrics"]["has_skill"] else "NO"), name
+        assert verdict == "/".join(h["verdict"][s]["max_tier"] for s in ("low", "medium", "high")), name
+        assert abs(float(acc) - h["metrics"]["accuracy"]) < 0.03, (name, acc, h["metrics"]["accuracy"])

@@ -2,71 +2,71 @@
  "head": "risk_tier",
  "type": "score",
  "model": "logreg",
- "trained_at": "2026-11-07T13:39:11Z",
+ "trained_at": "2026-11-07T15:10:59Z",
  "metrics": {
-  "n_holdout": 318,
-  "brier": 0.239996,
-  "log_loss": 0.483563,
-  "accuracy": 0.842767,
-  "ece": 0.064419,
-  "brier_skill_score": 0.640759,
-  "baseline_brier": 0.668065,
-  "baseline_log_loss": 1.220483,
-  "baseline_accuracy": 0.5,
+  "n_holdout": 316,
+  "brier": 0.212105,
+  "log_loss": 0.440965,
+  "accuracy": 0.85443,
+  "ece": 0.049821,
+  "brier_skill_score": 0.683993,
+  "baseline_brier": 0.671202,
+  "baseline_log_loss": 1.230168,
+  "baseline_accuracy": 0.474684,
   "has_skill": true,
-  "brier_gain_lower_95": 0.334226,
+  "brier_gain_lower_95": 0.357162,
   "calibration_method": "sigmoid",
   "verdict": {
-   "low": "act",
+   "low": "confirm",
    "medium": "confirm",
    "high": "confirm"
   }
  },
  "verdict": {
   "low": {
-   "max_tier": "act",
-   "tier": 2,
-   "reason": "holdout: 243 act-tier rows at low stakes, accuracy 0.91358 (95% Wilson 0.871505-0.942782) against a mean prediction of 0.928469"
+   "max_tier": "confirm",
+   "tier": 1,
+   "reason": "act-tier rows at low stakes came true 0.902527 of the time against a mean prediction of 0.948354 (one-sided p = 0.001296): the probabilities overstate; decisions are capped at confirm"
   },
   "medium": {
    "max_tier": "confirm",
    "tier": 1,
-   "reason": "act-tier rows at medium stakes came true 0.926471 of the time against a mean prediction of 0.957074 (one-sided p = 0.030941): the probabilities overstate; decisions are capped at confirm"
+   "reason": "act-tier rows at medium stakes came true 0.937759 of the time against a mean prediction of 0.973057 (one-sided p = 0.002527): the probabilities overstate; decisions are capped at confirm"
   },
   "high": {
    "max_tier": "confirm",
    "tier": 1,
-   "reason": "act-tier rows at high stakes came true 0.939394 of the time against a mean prediction of 0.986668 (one-sided p = 0.000425): the probabilities overstate; decisions are capped at confirm"
+   "reason": "act-tier rows at high stakes came true 0.969231 of the time against a mean prediction of 0.989536 (one-sided p = 0.017478): the probabilities overstate; decisions are capped at confirm"
   }
  },
  "calibration": {
   "method": "sigmoid",
-  "why": "sigmoid: the smallest class has 7 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "why": "sigmoid: the smallest class has 6 trusted rows in some calibration block (isotonic needs >= 3000)",
   "folds": [
    {
-    "n_train": 987,
-    "n_train_trusted": 987,
-    "n_calibration": 284
-   },
-   {
-    "n_train": 999,
-    "n_train_trusted": 999,
-    "n_calibration": 272
-   },
-   {
-    "n_train": 1005,
-    "n_train_trusted": 1005,
+    "n_train": 994,
+    "n_train_trusted": 994,
     "n_calibration": 266
    },
    {
-    "n_train": 1037,
-    "n_train_trusted": 1037,
-    "n_calibration": 234
+    "n_train": 998,
+    "n_train_trusted": 998,
+    "n_calibration": 262
    },
    {
-    "n_train": 1056,
-    "n_train_trusted": 1056,
-    "n_calibration": 215
+    "n_train": 983,
+    "n_train_trusted": 983,
+    "n_calibration": 277
+   },
+   {
+    "n_train": 1042,
+    "n_train_trusted": 1042,
+    "n_calibration": 218
+   },
+   {
+    "n_train": 1023,
+    "n_train_trusted": 1023,
+    "n_calibration": 237
    }
   ],
   "ensemble_members": 5,
@@ -74,23 +74,25 @@
  },
  "conformal": null,
  "data": {
-  "rows": 1589,
-  "trusted": 1589,
+  "rows": 1576,
+  "trusted": 1576,
   "by_source": {
-   "synthetic": 1589
+   "synthetic": 1576
   },
   "groups": 208,
-  "time_from": "2025-01-10T00:25:41Z",
-  "time_to": "2025-09-30T22:57:45Z",
-  "development_rows": 1271,
-  "development_trusted": 1271,
-  "holdout_rows": 318,
+  "time_from": "2025-01-14T20:04:18Z",
+  "time_to": "2030-12-20T00:56:27Z",
+  "development_rows": 1260,
+  "development_trusted": 1260,
+  "holdout_rows": 316,
   "purged_rows": 0,
   "ordering": "group",
   "split": {
-   "holdout_groups": 40,
+   "holdout_groups": 43,
    "groups": 208
   }
  },
- "notes": []
+ "notes": [
+  "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+ ]
 }

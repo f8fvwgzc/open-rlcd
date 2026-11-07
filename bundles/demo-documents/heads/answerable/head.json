@@ -2,19 +2,19 @@
  "head": "answerable",
  "type": "noul",
  "model": "logreg",
- "trained_at": "2026-11-07T13:39:10Z",
+ "trained_at": "2026-11-07T15:10:59Z",
  "metrics": {
-  "n_holdout": 249,
-  "brier": 0.428274,
-  "log_loss": 0.615956,
-  "accuracy": 0.638554,
-  "ece": 0.072596,
-  "brier_skill_score": 0.139373,
-  "baseline_brier": 0.49763,
-  "baseline_log_loss": 0.690776,
-  "baseline_accuracy": 0.554217,
+  "n_holdout": 281,
+  "brier": 0.391791,
+  "log_loss": 0.574811,
+  "accuracy": 0.69395,
+  "ece": 0.081168,
+  "brier_skill_score": 0.223206,
+  "baseline_brier": 0.504369,
+  "baseline_log_loss": 0.697531,
+  "baseline_accuracy": 0.494662,
   "has_skill": true,
-  "brier_gain_lower_95": 0.030595,
+  "brier_gain_lower_95": 0.069231,
   "calibration_method": "sigmoid",
   "verdict": {
    "low": "confirm",
@@ -27,47 +27,47 @@
   "low": {
    "max_tier": "confirm",
    "tier": 1,
-   "reason": "act-tier rows at low stakes came true 0.722222 of the time against a mean prediction of 0.824277 (one-sided p = 0.021227): the probabilities overstate; decisions are capped at confirm"
+   "reason": "act-tier rows at low stakes came true 0.725 of the time against a mean prediction of 0.834515 (one-sided p = 0.009333): the probabilities overstate; decisions are capped at confirm"
   },
   "medium": {
    "max_tier": "confirm",
    "tier": 1,
-   "reason": "only 25 act-tier rows at medium stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+   "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1078 calibration rows; decisions are capped at confirm"
   },
   "high": {
    "max_tier": "confirm",
    "tier": 1,
-   "reason": "only 7 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+   "reason": "only 10 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
   }
  },
  "calibration": {
   "method": "sigmoid",
-  "why": "sigmoid: the smallest class has 85 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "why": "sigmoid: the smallest class has 81 trusted rows in some calibration block (isotonic needs >= 3000)",
   "folds": [
    {
-    "n_train": 754,
-    "n_train_trusted": 754,
-    "n_calibration": 218
+    "n_train": 827,
+    "n_train_trusted": 827,
+    "n_calibration": 251
    },
    {
-    "n_train": 762,
-    "n_train_trusted": 762,
-    "n_calibration": 210
+    "n_train": 849,
+    "n_train_trusted": 849,
+    "n_calibration": 229
    },
    {
-    "n_train": 774,
-    "n_train_trusted": 774,
-    "n_calibration": 198
+    "n_train": 858,
+    "n_train_trusted": 858,
+    "n_calibration": 220
    },
    {
-    "n_train": 796,
-    "n_train_trusted": 796,
-    "n_calibration": 176
+    "n_train": 879,
+    "n_train_trusted": 879,
+    "n_calibration": 199
    },
    {
-    "n_train": 802,
-    "n_train_trusted": 802,
-    "n_calibration": 170
+    "n_train": 899,
+    "n_train_trusted": 899,
+    "n_calibration": 179
    }
   ],
   "ensemble_members": 5,
@@ -78,32 +78,34 @@
   "threshold": null,
   "coverage_dev": null,
   "holdout": {
-   "n": 249,
+   "n": 281,
    "n_selected": 0,
    "coverage": null,
    "error_rate": null
   },
   "set_quantile": null,
-  "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 972 calibration rows"
+  "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1078 calibration rows"
  },
  "data": {
-  "rows": 1221,
-  "trusted": 1221,
+  "rows": 1359,
+  "trusted": 1359,
   "by_source": {
-   "synthetic": 1221
+   "synthetic": 1359
   },
-  "groups": 262,
-  "time_from": "2025-01-10T00:25:41Z",
-  "time_to": "2025-09-30T22:57:45Z",
-  "development_rows": 972,
-  "development_trusted": 972,
-  "holdout_rows": 249,
+  "groups": 264,
+  "time_from": "2025-01-14T20:04:18Z",
+  "time_to": "2030-12-20T00:56:27Z",
+  "development_rows": 1078,
+  "development_trusted": 1078,
+  "holdout_rows": 281,
   "purged_rows": 0,
   "ordering": "group",
   "split": {
-   "holdout_groups": 53,
-   "groups": 262
+   "holdout_groups": 52,
+   "groups": 264
   }
  },
- "notes": []
+ "notes": [
+  "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+ ]
 }

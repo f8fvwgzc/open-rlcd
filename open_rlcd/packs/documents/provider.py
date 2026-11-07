@@ -8,7 +8,9 @@
 A candidate / chunk / evidence item is a retrieval hit as `features.retrieval` describes it: `{id, text?, title?,
 score?, source?, sources?, rank?, doc_id?, updated_at?, authority?, lexical_score?, graph?}`; a plain string is
 accepted as `{id: "e<i>", text: <string>}`. `now` (ISO 8601 or epoch seconds) is the reference time for document
-age; without it age is measured relative to the newest candidate.
+age; without it age is measured relative to the newest candidate. Training rows that carry document timestamps
+always carry `now` (the query time), so /v1/decide fills in the time of the request when it is missing; callers of
+/v1/rank and /v1/systemone should send it (the request time) for the same reason.
 
 Feature blocks (names are fixed for a given encoder dimension `d`; groups in brackets):
 
@@ -55,6 +57,7 @@ from ...features.lexical import (
     QUERY_FEATURES,
     content_tokens,
     coverage,
+    match_cues,
     number_support,
     numbers,
     pair_features,
@@ -72,7 +75,10 @@ from ...features.text import Encoder, encoder_config
 
 NAN = float("nan")
 VIEWS = ("query", "query_chunk", "query_evidence", "query_evidence_answer")
-FEATURE_SCHEMA = "documents-v1"
+# v2: entities split Latin from CJK and skip units / common katakana nouns, risk cues match whole tokens, numbers
+# read 2万5000 and "1 250 000 төгрөг". A bundle trained on v1 features is refused (feature_version_mismatch)
+# instead of being served features whose meaning changed under its calibration.
+FEATURE_SCHEMA = "documents-v2"
 SUPPORT_COSINE = 0.8            # an answer sentence counts as "supported" by embedding above this cosine
 RETRIEVAL_WINDOW = 10           # top-k window of the retrieval summary features
 MAX_TEXT_CHARS = 100_000        # per text field: longer is refused (a request, not a corpus)
@@ -86,19 +92,19 @@ A_SUPPORT = ["a_sent_cos_min", "a_sent_cos_mean", "a_sent_share_08", "a_lex_supp
              "a_n_evidence"]
 RISK_FROM_LEXICAL = ["q_cue_complaint", "q_cue_legal", "q_cue_personal_data"]
 RISK_CUES: dict[str, tuple[str, ...]] = {
-    # substrings of the casefolded query; deliberately short lists of unambiguous words in en / ja / mn
-    "q_risk_money": ("price", "cost", "refund", "fee", "discount", "invoice", "payment", "warranty", "usd", "$",
-                     "価格", "料金", "返金", "値段", "円", "保証", "үнэ", "төлбөр", "буцаан", "төгрөг", "баталгаа"),
-    "q_risk_safety": ("safety", "hazard", "forklift", "protective", "ppe", "fire", "evacuat", "chemical",
-                      "安全", "危険", "フォークリフト", "保護具", "避難", "аюулгүй", "аюултай", "хамгаалалтын",
-                      "түймэр"),
-    "q_risk_medical": ("injur", "first aid", "medical", "hospital", "accident", "illness", "けが", "怪我", "救急",
-                       "医療", "事故", "гэмтэл", "анхны тусламж", "эмнэлэг", "осол"),
+    # matched like the lexical cues (`features.lexical.match_cues`): a Latin / Cyrillic word must be a whole token
+    # ("fee" does not fire on "feedback", "ppe" not on "shipped", "fire" not on "firewall"), a word ending in "*" is
+    # a token prefix, a phrase matches as consecutive tokens, CJK cues and symbols ("$") match as substrings
+    "q_risk_money": ("price*", "cost", "costs", "costing", "costly", "refund*", "fee", "fees", "discount*", "invoice*",
+                     "payment*", "warrant*", "usd", "$", "価格", "料金", "返金", "値段", "円", "保証", "үнэ", "үнэтэй",
+                     "үнийн", "үнийг", "үнээр", "төлбөр*", "буцаан*", "төгрөг*", "баталгаа*"),
+    "q_risk_safety": ("safety", "hazard*", "forklift*", "protective", "ppe", "fire", "fires", "evacuat*", "chemical*",
+                      "安全", "危険", "フォークリフト", "保護具", "避難", "аюул*", "хамгаалалт*", "түймэр*"),
+    "q_risk_medical": ("injur*", "first aid", "medical", "hospital*", "accident*", "illness*", "けが", "怪我", "救急",
+                       "医療", "事故", "гэмтэл*", "анхны тусламж", "эмнэлэг*", "эмнэлг*", "осол*", "ослын", "ослоос"),
 }
 RISK = [*RISK_FROM_LEXICAL, *RISK_CUES]
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])|\n+")
-_CJK_CHARS = "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
-_SCRIPT_GLUE = re.compile(rf"(?<=[{_CJK_CHARS}])(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])(?=[{_CJK_CHARS}])")
 _DATE = re.compile(r"(?<!\d)(\d{4})\s*[-/.年]\s*(\d{1,2})\s*[-/.月]\s*(\d{1,2})日?(?!\d)")
 
 
@@ -120,10 +126,9 @@ def passage_text(c: dict) -> str:
 
 
 def _ents(text: str) -> set[str]:
-    # a space where Latin meets CJK: "チームはRobotics Labです" has no word boundary before "Robotics" otherwise, and
-    # the graph's surface patterns would miss the name
-    spaced = _SCRIPT_GLUE.sub(" ", str(text or ""))
-    return {k for k in (normalize_entity(e) for e in entities(spaced)) if len(k) >= 2}
+    # the graph's extractor (it inserts a space where Latin meets CJK itself, so "チームはRobotics Labです" names
+    # "Robotics Lab"): the same keys the graph seeds from
+    return {k for k in (normalize_entity(e) for e in entities(str(text or ""))) if len(k) >= 2}
 
 
 def dates(text: str) -> set[tuple[int, int, int]]:
@@ -156,8 +161,8 @@ def _cos(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _risk_cues(query: str) -> dict[str, float]:
-    q = str(query).casefold()
-    return {k: float(any(c in q for c in cues)) for k, cues in RISK_CUES.items()}
+    """q_risk_* of a query: 1.0 when any cue of the group matches on token boundaries (see RISK_CUES)."""
+    return {k: float(match_cues(query, cues)) for k, cues in RISK_CUES.items()}
 
 
 class _Texts:
@@ -279,7 +284,9 @@ def describe(view: str) -> dict:
            "graph?: {path_length?, degree?}}"
     common = {"query": "string, the user's request (required)",
               "candidates": f"optional array of retrieved chunks {cand}; plain strings are accepted as {{text}}",
-              "now": "optional reference time (ISO 8601 or epoch seconds) for document age"}
+              "now": "reference time (ISO 8601 or epoch seconds) for document age, normally the time of the request; "
+                     "training rows carry it, so send it (/v1/decide uses the request time when it is missing; "
+                     "without it the other endpoints measure age relative to the newest candidate)"}
     docs = {
         "query": ({**common}, {"query": "What is the warranty of the Velobox 300?", "candidates": []}),
         "query_chunk": ({**common, "chunk": f"the retrieved chunk to judge {cand} (required; or its fields next "

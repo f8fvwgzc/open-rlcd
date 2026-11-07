@@ -2,19 +2,19 @@
  "head": "chunk_relevant",
  "type": "noul",
  "model": "logreg",
- "trained_at": "2026-11-07T13:39:10Z",
+ "trained_at": "2026-11-07T15:10:59Z",
  "metrics": {
-  "n_holdout": 737,
-  "brier": 0.243959,
-  "log_loss": 0.377123,
-  "accuracy": 0.8019,
-  "ece": 0.046662,
-  "brier_skill_score": 0.428431,
-  "baseline_brier": 0.426824,
-  "baseline_log_loss": 0.618559,
-  "baseline_accuracy": 0.694708,
+  "n_holdout": 744,
+  "brier": 0.219525,
+  "log_loss": 0.350774,
+  "accuracy": 0.83871,
+  "ece": 0.020418,
+  "brier_skill_score": 0.483545,
+  "baseline_brier": 0.425061,
+  "baseline_log_loss": 0.616586,
+  "baseline_accuracy": 0.696237,
   "has_skill": true,
-  "brier_gain_lower_95": 0.15996,
+  "brier_gain_lower_95": 0.176645,
   "calibration_method": "sigmoid",
   "verdict": {
    "low": "act",
@@ -26,47 +26,47 @@
   "low": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 562 act-tier rows at low stakes, accuracy 0.898577 (95% Wilson 0.87085-0.920891) against a mean prediction of 0.902064"
+   "reason": "holdout: 580 act-tier rows at low stakes, accuracy 0.917241 (95% Wilson 0.89198-0.937013) against a mean prediction of 0.907682"
   },
   "medium": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 412 act-tier rows at medium stakes, accuracy 0.946602 (95% Wilson 0.920477-0.964475) against a mean prediction of 0.94654"
+   "reason": "holdout: 440 act-tier rows at medium stakes, accuracy 0.938636 (95% Wilson 0.912192-0.957488) against a mean prediction of 0.946326"
   },
   "high": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 226 act-tier rows at high stakes, accuracy 0.986726 (95% Wilson 0.961706-0.995475) against a mean prediction of 0.978351"
+   "reason": "holdout: 240 act-tier rows at high stakes, accuracy 0.983333 (95% Wilson 0.957938-0.9935) against a mean prediction of 0.979171"
   }
  },
  "calibration": {
   "method": "sigmoid",
-  "why": "sigmoid: the smallest class has 130 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "why": "sigmoid: the smallest class has 129 trusted rows in some calibration block (isotonic needs >= 3000)",
   "folds": [
    {
-    "n_train": 2224,
-    "n_train_trusted": 2224,
-    "n_calibration": 670
+    "n_train": 2207,
+    "n_train_trusted": 2207,
+    "n_calibration": 707
    },
    {
-    "n_train": 2276,
-    "n_train_trusted": 2276,
-    "n_calibration": 618
+    "n_train": 2318,
+    "n_train_trusted": 2318,
+    "n_calibration": 596
    },
    {
-    "n_train": 2321,
-    "n_train_trusted": 2321,
-    "n_calibration": 573
+    "n_train": 2344,
+    "n_train_trusted": 2344,
+    "n_calibration": 570
    },
    {
-    "n_train": 2352,
-    "n_train_trusted": 2352,
-    "n_calibration": 542
+    "n_train": 2396,
+    "n_train_trusted": 2396,
+    "n_calibration": 518
    },
    {
-    "n_train": 2403,
-    "n_train_trusted": 2403,
-    "n_calibration": 491
+    "n_train": 2391,
+    "n_train_trusted": 2391,
+    "n_calibration": 523
    }
   ],
   "ensemble_members": 5,
@@ -74,23 +74,25 @@
  },
  "conformal": null,
  "data": {
-  "rows": 3631,
-  "trusted": 3631,
+  "rows": 3658,
+  "trusted": 3658,
   "by_source": {
-   "synthetic": 3631
+   "synthetic": 3658
   },
-  "groups": 263,
-  "time_from": "2025-01-10T00:25:41Z",
-  "time_to": "2025-09-30T22:57:45Z",
-  "development_rows": 2894,
-  "development_trusted": 2894,
-  "holdout_rows": 737,
+  "groups": 262,
+  "time_from": "2025-01-14T20:04:18Z",
+  "time_to": "2030-12-20T00:56:27Z",
+  "development_rows": 2914,
+  "development_trusted": 2914,
+  "holdout_rows": 744,
   "purged_rows": 0,
   "ordering": "group",
   "split": {
    "holdout_groups": 51,
-   "groups": 263
+   "groups": 262
   }
  },
- "notes": []
+ "notes": [
+  "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+ ]
 }

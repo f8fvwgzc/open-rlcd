@@ -1,7 +1,7 @@
 {
  "format": "open-rlcd-bundle/1",
  "version": "rlcd-0.1.1",
- "created_at": "2026-11-07T13:39:11Z",
+ "created_at": "2026-11-07T15:10:59Z",
  "pack": {
   "name": "documents",
   "version": "0.1.0",
@@ -22,7 +22,7 @@
    "version": 1
   }
  },
- "feature_version": "documents-v1:hashing-256-s0:0b1d19ee81e5",
+ "feature_version": "documents-v2:hashing-256-s0:0b1d19ee81e5",
  "encoder": {
   "kind": "hashing",
   "id": "hashing-256-s0",
@@ -68,19 +68,19 @@
    "head": "response_type",
    "type": "choice",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 180,
-    "brier": 0.237133,
-    "log_loss": 0.536379,
-    "accuracy": 0.855556,
-    "ece": 0.075524,
-    "brier_skill_score": 0.711158,
-    "baseline_brier": 0.820981,
-    "baseline_log_loss": 1.904903,
-    "baseline_accuracy": 0.366667,
+    "n_holdout": 182,
+    "brier": 0.232383,
+    "log_loss": 0.520972,
+    "accuracy": 0.862637,
+    "ece": 0.069051,
+    "brier_skill_score": 0.718162,
+    "baseline_brier": 0.824526,
+    "baseline_log_loss": 1.909863,
+    "baseline_accuracy": 0.362637,
     "has_skill": true,
-    "brier_gain_lower_95": 0.459868,
+    "brier_gain_lower_95": 0.461456,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "act",
@@ -92,17 +92,17 @@
     "low": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 138 act-tier rows at low stakes, accuracy 0.927536 (95% Wilson 0.871749-0.960166) against a mean prediction of 0.880986"
+     "reason": "holdout: 144 act-tier rows at low stakes, accuracy 0.930556 (95% Wilson 0.876891-0.961845) against a mean prediction of 0.864257"
     },
     "medium": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 97 act-tier rows at medium stakes, accuracy 0.958763 (95% Wilson 0.898725-0.983849) against a mean prediction of 0.914816"
+     "reason": "holdout: 95 act-tier rows at medium stakes, accuracy 0.989474 (95% Wilson 0.942761-0.998139) against a mean prediction of 0.9093"
     },
     "high": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "only 11 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+     "reason": "only 5 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
     }
    },
    "calibration": {
@@ -110,29 +110,29 @@
     "why": "sigmoid: the smallest class has 0 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 564,
-      "n_train_trusted": 564,
-      "n_calibration": 156
+      "n_train": 561,
+      "n_train_trusted": 561,
+      "n_calibration": 157
      },
      {
-      "n_train": 568,
-      "n_train_trusted": 568,
-      "n_calibration": 152
+      "n_train": 570,
+      "n_train_trusted": 570,
+      "n_calibration": 148
      },
      {
-      "n_train": 571,
-      "n_train_trusted": 571,
-      "n_calibration": 149
+      "n_train": 567,
+      "n_train_trusted": 567,
+      "n_calibration": 151
      },
      {
-      "n_train": 593,
-      "n_train_trusted": 593,
-      "n_calibration": 127
-     },
-     {
-      "n_train": 584,
-      "n_train_trusted": 584,
+      "n_train": 582,
+      "n_train_trusted": 582,
       "n_calibration": 136
+     },
+     {
+      "n_train": 592,
+      "n_train_trusted": 592,
+      "n_calibration": 126
      }
     ],
     "ensemble_members": 5,
@@ -146,19 +146,20 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
    "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`",
     "the holdout's class mix differs strongly from training (clarify_question: training 0.065, holdout 0.011): its metrics describe that mix. Check the group / time split, or add trusted rows of the rare class"
    ],
    "spec": {
@@ -196,34 +197,35 @@
    },
    "dir": "heads/response_type",
    "files": {
-    "member_0.safetensors": "ed2b04958999821ac653f3d358625e4753878387ffa49822b6a11824d1570e4e",
-    "member_1.safetensors": "95dc268fded83abc23c0d3f2517f06969c6f2b1c67b9a9130ec8ea1ca9e33708",
-    "member_2.safetensors": "728503f46632ab0ec89276668623ba748b42cd32f2586228f10fe0730b07ebf3",
-    "member_3.safetensors": "a086126582684a3cc6c904fedb37c86455550506ea71d7961a82fff4d5240a18",
-    "member_4.safetensors": "a63648e099ceb4a55099ef82c67ca26216c13acc7172a6eb2a8a35ca52933bdd",
-    "ensemble.json": "374262d046b110066dc7f5ff30781ed2927e547520e8ef407e856ff8e2405c11",
-    "head.json": "fefdc66e8e2445c692e16fa38fbf3192a7138d47a2967a75c3d8f3167e25c96f",
-    "report.json": "4120dca28bf1cf1f4d747c98793a47bfe3167aae435cda755d33d69f33d5f5bc",
-    "bernoulli.json": "4cd6bd9f596e7ba483e7b3b8ebaeaa5c0b4e06be1b386c98047b364b30c8176c"
-   }
+    "member_0.safetensors": "e71c523930222f27ae2c23199f62525168a351d4f4985962f30c77e32e4740bb",
+    "member_1.safetensors": "561500f4d4ae078852a8b2468a7c20c72bbdc7604d263f8cba7753e2f38cc076",
+    "member_2.safetensors": "d62bd4c566e239fd21a541d2883e0a6c63b3d15024e16cc6ff4811406045b2a6",
+    "member_3.safetensors": "aa4d529805fccccd3be40983083c683d14d6f92c31c7176786452f7e459b2c72",
+    "member_4.safetensors": "3e7d8391826376d19628cb0c82743494cd8d47784f5bfa212a07ae49e84ab537",
+    "ensemble.json": "b97ca65e5bdc1f72caf45958832442316cb027acb929d5a450f19591bc070aee",
+    "head.json": "15ac7b526942f038154034a49960edf1ac699b6be8a817fcb510e77f04d01dd1",
+    "report.json": "a8450495b5e7ec86fc2d5b53828fe986b8861310c4fd29d2a66073eb4ee9a9da",
+    "bernoulli.json": "de2bb6c46aedc2674981c040823b577fbd96dd5413b7ce0c7a25aa43e820f726"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "route": {
    "head": "route",
    "type": "choice",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 180,
-    "brier": 0.256883,
-    "log_loss": 0.451449,
-    "accuracy": 0.822222,
-    "ece": 0.066957,
-    "brier_skill_score": 0.603333,
-    "baseline_brier": 0.647603,
-    "baseline_log_loss": 1.210835,
-    "baseline_accuracy": 0.527778,
+    "n_holdout": 182,
+    "brier": 0.247537,
+    "log_loss": 0.484425,
+    "accuracy": 0.824176,
+    "ece": 0.087293,
+    "brier_skill_score": 0.623629,
+    "baseline_brier": 0.657694,
+    "baseline_log_loss": 1.231349,
+    "baseline_accuracy": 0.516484,
     "has_skill": true,
-    "brier_gain_lower_95": 0.287507,
+    "brier_gain_lower_95": 0.313963,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "act",
@@ -235,17 +237,17 @@
     "low": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 143 act-tier rows at low stakes, accuracy 0.881119 (95% Wilson 0.81786-0.924437) against a mean prediction of 0.882098"
+     "reason": "holdout: 125 act-tier rows at low stakes, accuracy 0.936 (95% Wilson 0.878785-0.967216) against a mean prediction of 0.896674"
     },
     "medium": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 97 act-tier rows at medium stakes, accuracy 0.989691 (95% Wilson 0.943895-0.998178) against a mean prediction of 0.933355"
+     "reason": "holdout: 93 act-tier rows at medium stakes, accuracy 0.989247 (95% Wilson 0.941581-0.998099) against a mean prediction of 0.934199"
     },
     "high": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 36 act-tier rows at high stakes, accuracy 1.0 (95% Wilson 0.903581-1.0) against a mean prediction of 0.97641"
+     "reason": "holdout: 36 act-tier rows at high stakes, accuracy 1.0 (95% Wilson 0.903581-1.0) against a mean prediction of 0.978285"
     }
    },
    "calibration": {
@@ -253,29 +255,29 @@
     "why": "sigmoid: the smallest class has 13 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 564,
-      "n_train_trusted": 564,
-      "n_calibration": 156
+      "n_train": 561,
+      "n_train_trusted": 561,
+      "n_calibration": 157
      },
      {
-      "n_train": 568,
-      "n_train_trusted": 568,
-      "n_calibration": 152
+      "n_train": 570,
+      "n_train_trusted": 570,
+      "n_calibration": 148
      },
      {
-      "n_train": 571,
-      "n_train_trusted": 571,
-      "n_calibration": 149
+      "n_train": 567,
+      "n_train_trusted": 567,
+      "n_calibration": 151
      },
      {
-      "n_train": 593,
-      "n_train_trusted": 593,
-      "n_calibration": 127
-     },
-     {
-      "n_train": 584,
-      "n_train_trusted": 584,
+      "n_train": 582,
+      "n_train_trusted": 582,
       "n_calibration": 136
+     },
+     {
+      "n_train": 592,
+      "n_train_trusted": 592,
+      "n_calibration": 126
      }
     ],
     "ensemble_members": 5,
@@ -289,19 +291,21 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "route",
     "type": "choice",
@@ -329,34 +333,35 @@
    },
    "dir": "heads/route",
    "files": {
-    "member_0.safetensors": "5e5eabcdf6ac9303c85082edffaaf7115feb139cd9f57185d4fc855305b34271",
-    "member_1.safetensors": "0a3ae89b99e9b3dd1a68bd144eb733840890f9d9b770feec53f48db2a78aa78c",
-    "member_2.safetensors": "e154959d8b29ba68f887c0bc7e90a30f67cad586b2273dc1199f20c03d1b7e01",
-    "member_3.safetensors": "254a54708151ec24999117de1f2fb01de45a5fe5a5a2522475c584c27740fd9f",
-    "member_4.safetensors": "2dbf640c27322a8191478bd6582b9a3b618c8b8bb7ae3c3a636aaafc77f26eac",
-    "ensemble.json": "6824f088cd32f59a258a1ada7059fd403c2fbb8b798d1a75cb55abd37038f081",
-    "head.json": "a1f85999ca2f74ccfbdafb9b5e8d2d10e7884e53626944a226dbdd9289dd00b8",
-    "report.json": "d5740f1a88e57b3d6073d7730ee17ff33fa64dc094ce0f715be1fafaa03f8f77",
-    "bernoulli.json": "b24ce4be7cfde50cf639a0089f03606c9c31251fe2d479f77f29a4966979362f"
-   }
+    "member_0.safetensors": "5d677d237d43accf8e3e0339cb4ae2a5941ddc3abf99590c9d0ceeb6b5e55e0f",
+    "member_1.safetensors": "6b3ab9771730ad1df24ba60bb72fcabfd9fd1744e1dd3c5b4045815eb2666de1",
+    "member_2.safetensors": "f7938daf7b3892a96bdf44bc7024a8fa6a0d37fd9f8fb33e2343bfa4ee5dd8af",
+    "member_3.safetensors": "662cd8e9091edc96b7169b04124c6c026b75d7376441b6f18864dd62706bc3e3",
+    "member_4.safetensors": "7d1b1caf5f89b368a7cac81ba2999e1d6d4e9fc95a4479112afe62552972c5b4",
+    "ensemble.json": "99ea8df491825c011ea7a5a2b4f5238a034411b40736a36dbb788b57935880a4",
+    "head.json": "3b0ea293cb24e371de0fe98eb8dc644174ad2ed7d61c679242aac8d42b4cc924",
+    "report.json": "02d3b9a870331ffc3469ea0bb2dd34bee97ad9d6c20ecbd0187b14b42c1146f5",
+    "bernoulli.json": "884cff4ea70f68843a26d1c3687494012b84d1007c0226d6bfcbfc74c4247fe1"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "needs_graph": {
    "head": "needs_graph",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 180,
-    "brier": 0.127543,
-    "log_loss": 0.202561,
-    "accuracy": 0.922222,
-    "ece": 0.031343,
-    "brier_skill_score": 0.515601,
-    "baseline_brier": 0.263302,
-    "baseline_log_loss": 0.43328,
-    "baseline_accuracy": 0.844444,
+    "n_holdout": 182,
+    "brier": 0.113703,
+    "log_loss": 0.183132,
+    "accuracy": 0.923077,
+    "ece": 0.037248,
+    "brier_skill_score": 0.564524,
+    "baseline_brier": 0.261101,
+    "baseline_log_loss": 0.430666,
+    "baseline_accuracy": 0.846154,
     "has_skill": false,
-    "brier_gain_lower_95": 0.011416,
+    "brier_gain_lower_95": 0.013442,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "escalate",
@@ -386,29 +391,29 @@
     "why": "sigmoid: the smallest class has 18 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 564,
-      "n_train_trusted": 564,
-      "n_calibration": 156
+      "n_train": 561,
+      "n_train_trusted": 561,
+      "n_calibration": 157
      },
      {
-      "n_train": 568,
-      "n_train_trusted": 568,
-      "n_calibration": 152
+      "n_train": 570,
+      "n_train_trusted": 570,
+      "n_calibration": 148
      },
      {
-      "n_train": 571,
-      "n_train_trusted": 571,
-      "n_calibration": 149
+      "n_train": 567,
+      "n_train_trusted": 567,
+      "n_calibration": 151
      },
      {
-      "n_train": 593,
-      "n_train_trusted": 593,
-      "n_calibration": 127
-     },
-     {
-      "n_train": 584,
-      "n_train_trusted": 584,
+      "n_train": 582,
+      "n_train_trusted": 582,
       "n_calibration": 136
+     },
+     {
+      "n_train": 592,
+      "n_train_trusted": 592,
+      "n_calibration": 126
      }
     ],
     "ensemble_members": 5,
@@ -422,19 +427,21 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "needs_graph",
     "type": "noul",
@@ -452,34 +459,35 @@
    },
    "dir": "heads/needs_graph",
    "files": {
-    "member_0.safetensors": "ca4b705b832d4721465a5a6833c1de6c2aca0ea24c17d971121c65640b682f5a",
-    "member_1.safetensors": "705662288afadfd6a3a6720f143e10ebf0ba18654cd3c5d12afd6e57eb84ed7b",
-    "member_2.safetensors": "0ddfd86a3e4e60ed434073567998a4e9338a5921b31a8d43109b0c3f2a3d9d40",
-    "member_3.safetensors": "31065f82739d44c3313dea950ac32af5ae81e5eb9fdee93736f6685f25cadc39",
-    "member_4.safetensors": "ae57102a34f715330332f5f427811408b497b08481ef54d443d14463ed6e465a",
-    "ensemble.json": "c03efd398a08d1ad2e504e9e9c76d09509e9d810e7a7a034671bbb8851237797",
-    "head.json": "f516d96a1195197b65d1281936bb8544c86d4cf5d21bc1ffab9dff8ccb34b139",
-    "report.json": "27b06519dd1bf905325e3ea716fb0d3d162ec51b5c23396af2d950bad78c95c0",
-    "bernoulli.json": "af3e048f14e8df9ca8233a34752277ff1b9b851d6a37feaf4f4dfce07c297af4"
-   }
+    "member_0.safetensors": "7eb1662f3c72f12e05a20a527fd043765978add30eee694e9e6025520ca952b0",
+    "member_1.safetensors": "8c0e967f6b648ceab3fbe6afe3288f392e4426651e40a23ae8e39fb10bde92e9",
+    "member_2.safetensors": "77a10c3c81a2ef749c2d50507018d2020777950b827f9d6a3a8a889347dca54d",
+    "member_3.safetensors": "6f82dc2b4bca35daa9e2aece4b2aabc925834bac4d344c2271d634cf45e45c1e",
+    "member_4.safetensors": "b01209f720b7ecb9a63ad43956c01360e9f795d3198cc2aefc8b3748576ea91b",
+    "ensemble.json": "79ebbf9387cfb263847db5c27d7f6f47bf6419155c5a90363be0c0fffa7fce99",
+    "head.json": "740b68b8662c4a1df97f680923a611991ab0cba86af85d0f22337d83d00e31d9",
+    "report.json": "715ab4869e46bc73e943afd669ef5d9fcb33b8770149c32f53f8f901abad63c6",
+    "bernoulli.json": "d8a02fa9a2b8249d9dd6e2696280e6d4a6a3d8007b2cc37eb45f821c4fac3578"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "chunk_relevant": {
    "head": "chunk_relevant",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 737,
-    "brier": 0.243959,
-    "log_loss": 0.377123,
-    "accuracy": 0.8019,
-    "ece": 0.046662,
-    "brier_skill_score": 0.428431,
-    "baseline_brier": 0.426824,
-    "baseline_log_loss": 0.618559,
-    "baseline_accuracy": 0.694708,
+    "n_holdout": 744,
+    "brier": 0.219525,
+    "log_loss": 0.350774,
+    "accuracy": 0.83871,
+    "ece": 0.020418,
+    "brier_skill_score": 0.483545,
+    "baseline_brier": 0.425061,
+    "baseline_log_loss": 0.616586,
+    "baseline_accuracy": 0.696237,
     "has_skill": true,
-    "brier_gain_lower_95": 0.15996,
+    "brier_gain_lower_95": 0.176645,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "act",
@@ -491,47 +499,47 @@
     "low": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 562 act-tier rows at low stakes, accuracy 0.898577 (95% Wilson 0.87085-0.920891) against a mean prediction of 0.902064"
+     "reason": "holdout: 580 act-tier rows at low stakes, accuracy 0.917241 (95% Wilson 0.89198-0.937013) against a mean prediction of 0.907682"
     },
     "medium": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 412 act-tier rows at medium stakes, accuracy 0.946602 (95% Wilson 0.920477-0.964475) against a mean prediction of 0.94654"
+     "reason": "holdout: 440 act-tier rows at medium stakes, accuracy 0.938636 (95% Wilson 0.912192-0.957488) against a mean prediction of 0.946326"
     },
     "high": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 226 act-tier rows at high stakes, accuracy 0.986726 (95% Wilson 0.961706-0.995475) against a mean prediction of 0.978351"
+     "reason": "holdout: 240 act-tier rows at high stakes, accuracy 0.983333 (95% Wilson 0.957938-0.9935) against a mean prediction of 0.979171"
     }
    },
    "calibration": {
     "method": "sigmoid",
-    "why": "sigmoid: the smallest class has 130 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "why": "sigmoid: the smallest class has 129 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 2224,
-      "n_train_trusted": 2224,
-      "n_calibration": 670
+      "n_train": 2207,
+      "n_train_trusted": 2207,
+      "n_calibration": 707
      },
      {
-      "n_train": 2276,
-      "n_train_trusted": 2276,
-      "n_calibration": 618
+      "n_train": 2318,
+      "n_train_trusted": 2318,
+      "n_calibration": 596
      },
      {
-      "n_train": 2321,
-      "n_train_trusted": 2321,
-      "n_calibration": 573
+      "n_train": 2344,
+      "n_train_trusted": 2344,
+      "n_calibration": 570
      },
      {
-      "n_train": 2352,
-      "n_train_trusted": 2352,
-      "n_calibration": 542
+      "n_train": 2396,
+      "n_train_trusted": 2396,
+      "n_calibration": 518
      },
      {
-      "n_train": 2403,
-      "n_train_trusted": 2403,
-      "n_calibration": 491
+      "n_train": 2391,
+      "n_train_trusted": 2391,
+      "n_calibration": 523
      }
     ],
     "ensemble_members": 5,
@@ -539,25 +547,27 @@
    },
    "conformal": null,
    "data": {
-    "rows": 3631,
-    "trusted": 3631,
+    "rows": 3658,
+    "trusted": 3658,
     "by_source": {
-     "synthetic": 3631
+     "synthetic": 3658
     },
-    "groups": 263,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 2894,
-    "development_trusted": 2894,
-    "holdout_rows": 737,
+    "groups": 262,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 2914,
+    "development_trusted": 2914,
+    "holdout_rows": 744,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
      "holdout_groups": 51,
-     "groups": 263
+     "groups": 262
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "chunk_relevant",
     "type": "noul",
@@ -575,34 +585,35 @@
    },
    "dir": "heads/chunk_relevant",
    "files": {
-    "member_0.safetensors": "bd408f5e4a761b3eacab312871a835e318c993dd28bcea11ce0bf94bc21c3b97",
-    "member_1.safetensors": "abcb1c453a7f4b9c1d963f455bcfe2ff2e247920412eb0cadef55a5f0b2009cb",
-    "member_2.safetensors": "6bdeaba1f001f15d6d646e325e150d7aad728129bfb3a34ebf4c9398e79352bf",
-    "member_3.safetensors": "ef768e96cd03bb30f8c818aea03813d238fc4660091a56828510fb4f9a9eefdf",
-    "member_4.safetensors": "b2a8da32807ae98d0288c72e390df9ad3ff2f6f1dca88195ab44664f274a18ed",
-    "ensemble.json": "85ed5ce4e2210acc97667a8155aad263a556a50aff8d670d57e0d08e1a4af4ea",
-    "head.json": "cdb4580786657800ac2249b766cfcb3782fe5435a8e023fa5a1bac3309715593",
-    "report.json": "426e8aab2f312101c322b9d5769ebf71258a4958a0a00f34e019a39c08e65193",
-    "bernoulli.json": "6592b6d11b3b475b3f2a01ab49a9f7f52e1181943ccf5e55c18a1d7d66dc6758"
-   }
+    "member_0.safetensors": "23a908b161ffbad335838a28a7cdf15e90080835e3f160a0c12e244a2aa7f31f",
+    "member_1.safetensors": "365ac38a1893a9d7aa8ab73d03481139925fd491b217a946a9212db15d256ba6",
+    "member_2.safetensors": "a46b9a49074e446f1c5ff1a3918d296e6ecbfe1202b05519406b6c02dcd1aa4f",
+    "member_3.safetensors": "ee105381e92248b4e2e6cc561355bd2bd230d70ca0cb28db2db08477d65c83c4",
+    "member_4.safetensors": "66c5bc150893e233fec3c60d64efacdaffa05cd2b3e8300b49d3d07d0ffac208",
+    "ensemble.json": "74e46d16b29164331f2df3883a455a2dbaed0c59477dedb71095df68a50fa646",
+    "head.json": "4cf6ba525a32434fef38460c21ce69e73b8e4a1f2e52913ef3b2f5b788bf78d2",
+    "report.json": "5479a0ac79e33a2841f50d9a6c69a542c2003d142da9c984a458d09367287726",
+    "bernoulli.json": "fb065ad9681df55e3046342c9e905d5b180cc5f6691f0cc74b8462bc4fc039fe"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "answerable": {
    "head": "answerable",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 249,
-    "brier": 0.428274,
-    "log_loss": 0.615956,
-    "accuracy": 0.638554,
-    "ece": 0.072596,
-    "brier_skill_score": 0.139373,
-    "baseline_brier": 0.49763,
-    "baseline_log_loss": 0.690776,
-    "baseline_accuracy": 0.554217,
+    "n_holdout": 281,
+    "brier": 0.391791,
+    "log_loss": 0.574811,
+    "accuracy": 0.69395,
+    "ece": 0.081168,
+    "brier_skill_score": 0.223206,
+    "baseline_brier": 0.504369,
+    "baseline_log_loss": 0.697531,
+    "baseline_accuracy": 0.494662,
     "has_skill": true,
-    "brier_gain_lower_95": 0.030595,
+    "brier_gain_lower_95": 0.069231,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "confirm",
@@ -615,47 +626,47 @@
     "low": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "act-tier rows at low stakes came true 0.722222 of the time against a mean prediction of 0.824277 (one-sided p = 0.021227): the probabilities overstate; decisions are capped at confirm"
+     "reason": "act-tier rows at low stakes came true 0.725 of the time against a mean prediction of 0.834515 (one-sided p = 0.009333): the probabilities overstate; decisions are capped at confirm"
     },
     "medium": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "only 25 act-tier rows at medium stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1078 calibration rows; decisions are capped at confirm"
     },
     "high": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "only 7 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
+     "reason": "only 10 act-tier rows at high stakes on the holdout (need 30), so acting is not verified; decisions are capped at confirm"
     }
    },
    "calibration": {
     "method": "sigmoid",
-    "why": "sigmoid: the smallest class has 85 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "why": "sigmoid: the smallest class has 81 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 754,
-      "n_train_trusted": 754,
-      "n_calibration": 218
+      "n_train": 827,
+      "n_train_trusted": 827,
+      "n_calibration": 251
      },
      {
-      "n_train": 762,
-      "n_train_trusted": 762,
-      "n_calibration": 210
+      "n_train": 849,
+      "n_train_trusted": 849,
+      "n_calibration": 229
      },
      {
-      "n_train": 774,
-      "n_train_trusted": 774,
-      "n_calibration": 198
+      "n_train": 858,
+      "n_train_trusted": 858,
+      "n_calibration": 220
      },
      {
-      "n_train": 796,
-      "n_train_trusted": 796,
-      "n_calibration": 176
+      "n_train": 879,
+      "n_train_trusted": 879,
+      "n_calibration": 199
      },
      {
-      "n_train": 802,
-      "n_train_trusted": 802,
-      "n_calibration": 170
+      "n_train": 899,
+      "n_train_trusted": 899,
+      "n_calibration": 179
      }
     ],
     "ensemble_members": 5,
@@ -666,34 +677,36 @@
     "threshold": null,
     "coverage_dev": null,
     "holdout": {
-     "n": 249,
+     "n": 281,
      "n_selected": 0,
      "coverage": null,
      "error_rate": null
     },
     "set_quantile": null,
-    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 972 calibration rows"
+    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1078 calibration rows"
    },
    "data": {
-    "rows": 1221,
-    "trusted": 1221,
+    "rows": 1359,
+    "trusted": 1359,
     "by_source": {
-     "synthetic": 1221
+     "synthetic": 1359
     },
-    "groups": 262,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 972,
-    "development_trusted": 972,
-    "holdout_rows": 249,
+    "groups": 264,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1078,
+    "development_trusted": 1078,
+    "holdout_rows": 281,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 53,
-     "groups": 262
+     "holdout_groups": 52,
+     "groups": 264
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "answerable",
     "type": "noul",
@@ -711,34 +724,35 @@
    },
    "dir": "heads/answerable",
    "files": {
-    "member_0.safetensors": "91a6e8128420abc271655d140067bbb2fd298371b318c1501c9f6f1f45a9ab41",
-    "member_1.safetensors": "e7f4b15516ba622bbf76955bfdd73f825bc390614765019de61f021ca4c7d787",
-    "member_2.safetensors": "ca9c1a097c7698ec53ec14eb178708315197ba635bada1229924945929721420",
-    "member_3.safetensors": "ab2609f4753c0ea43b4f4bb2c8cd1559097125367525deec042df6806cff153f",
-    "member_4.safetensors": "051475becb63441545d2e7bd33b42c0fe6d6a3d0aba1c406b5e4e24295b1de9a",
-    "ensemble.json": "88ec4a46b93b781d51ffab2d64ae99e1a1d9992efc9eb2117cbad770038caf70",
-    "head.json": "12663444699060580f86b61d813e69f6d2e2dcaeb633428048119b129b727015",
-    "report.json": "b7f9d0668a0b952e7bb798453026a7531d54e2b6ac11d5bd5224df3e8fb86903",
-    "bernoulli.json": "6155e0f2f9425b109230612514664c3083e71083ff4c84762f7af5a9087adbeb"
-   }
+    "member_0.safetensors": "f80ca3edbe12de96d41e73945c43e0e55d792a9e3b59d6f010af981fa6f09c54",
+    "member_1.safetensors": "c832d1fd52f5193367c91407493ef77e9a87d1a8f6ffa4884ab5dbc7605c8444",
+    "member_2.safetensors": "394e4866ec955ef6fa6a1190ce5a3d228026529aedfffc61aa893dba00f9b047",
+    "member_3.safetensors": "0631e75650ff3ed6dce5459bc328b1e570048c5692f5cf251687ef4248c555b9",
+    "member_4.safetensors": "f2b240cf51de8b43f0aadf30cd779f4e1e9f5e9dd79a849a2294d13953aa3e1f",
+    "ensemble.json": "53a88ea8ca293449a8a3c799c0a645c24df93f6769ef827959cf2ad3980f9bfb",
+    "head.json": "0d575d72e108dc7ba828912c92bc99545bfdd4a82dfce779b08d2727243a6804",
+    "report.json": "035c16c3fb8e99bb29c597836f93a7c46937569cc0652e23f3773ee753289ffe",
+    "bernoulli.json": "d8a87fe422d1027cf43400420822c0704ddd88db6308c040f38e1e4dd67abdae"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "grounded": {
    "head": "grounded",
    "type": "noul",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 318,
-    "brier": 0.109572,
-    "log_loss": 0.196407,
-    "accuracy": 0.927673,
-    "ece": 0.053001,
-    "brier_skill_score": 0.780653,
-    "baseline_brier": 0.499538,
-    "baseline_log_loss": 0.69269,
-    "baseline_accuracy": 0.525157,
+    "n_holdout": 316,
+    "brier": 0.10832,
+    "log_loss": 0.198115,
+    "accuracy": 0.927215,
+    "ece": 0.055412,
+    "brier_skill_score": 0.780527,
+    "baseline_brier": 0.493544,
+    "baseline_log_loss": 0.686681,
+    "baseline_accuracy": 0.560127,
     "has_skill": true,
-    "brier_gain_lower_95": 0.354464,
+    "brier_gain_lower_95": 0.358929,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "confirm",
@@ -751,47 +765,47 @@
     "low": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1260 calibration rows; decisions are capped at confirm"
     },
     "medium": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1260 calibration rows; decisions are capped at confirm"
     },
     "high": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows; decisions are capped at confirm"
+     "reason": "conformal: no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1260 calibration rows; decisions are capped at confirm"
     }
    },
    "calibration": {
     "method": "sigmoid",
-    "why": "sigmoid: the smallest class has 100 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "why": "sigmoid: the smallest class has 101 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 987,
-      "n_train_trusted": 987,
-      "n_calibration": 284
-     },
-     {
-      "n_train": 999,
-      "n_train_trusted": 999,
-      "n_calibration": 272
-     },
-     {
-      "n_train": 1005,
-      "n_train_trusted": 1005,
+      "n_train": 994,
+      "n_train_trusted": 994,
       "n_calibration": 266
      },
      {
-      "n_train": 1037,
-      "n_train_trusted": 1037,
-      "n_calibration": 234
+      "n_train": 998,
+      "n_train_trusted": 998,
+      "n_calibration": 262
      },
      {
-      "n_train": 1056,
-      "n_train_trusted": 1056,
-      "n_calibration": 215
+      "n_train": 983,
+      "n_train_trusted": 983,
+      "n_calibration": 277
+     },
+     {
+      "n_train": 1042,
+      "n_train_trusted": 1042,
+      "n_calibration": 218
+     },
+     {
+      "n_train": 1023,
+      "n_train_trusted": 1023,
+      "n_calibration": 237
      }
     ],
     "ensemble_members": 5,
@@ -802,34 +816,36 @@
     "threshold": null,
     "coverage_dev": null,
     "holdout": {
-     "n": 318,
+     "n": 316,
      "n_selected": 0,
      "coverage": null,
      "error_rate": null
     },
     "set_quantile": null,
-    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1271 calibration rows"
+    "reason": "no threshold keeps the error rate <= 0.05 at confidence 0.9 on 1260 calibration rows"
    },
    "data": {
-    "rows": 1589,
-    "trusted": 1589,
+    "rows": 1576,
+    "trusted": 1576,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1576
     },
     "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 43,
      "groups": 208
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "grounded",
     "type": "noul",
@@ -847,34 +863,35 @@
    },
    "dir": "heads/grounded",
    "files": {
-    "member_0.safetensors": "10c734e5d107097f67b20de2f66490f88e7fcda78777187e617d842cacf81898",
-    "member_1.safetensors": "7f53ea54dc56216afbc898ac6a9516f6f1ae70084dab5c68746136904d85e1af",
-    "member_2.safetensors": "992fa859babb2f5387c03f0935e8416f67ef74309afd8595838252ab49f99955",
-    "member_3.safetensors": "f5d38efb3a0cc7b412323b94918c8b8c148971c0c4fdedd5cae56e4e3b868e42",
-    "member_4.safetensors": "92100fe4c8d58414d4c0b5f2e6b3f28a3c4b75c1c139716ebe971ee93cfd105a",
-    "ensemble.json": "58ed66a2f9ca9d205e899c1fec5ea9bd4e76515fbd5b26560f6ff6c35cebdf92",
-    "head.json": "6359c52b60efaa6052a450bf53be125819423fc3ec75ae281e4e442ad9cf38bb",
-    "report.json": "f2cca78af0c46ea8087a95c5ec16bbe0d4c57ae68fa672b2d678aec2a22bbfc1",
-    "bernoulli.json": "da8703db94f7ccad43253d26a91af6756c13de7bcc24ffb95b98e34fe0ec7703"
-   }
+    "member_0.safetensors": "0ffe28f56bf1ab4caec8a11b3a5df9fddbc7b394d64cf23d9d5bccdb2476bb74",
+    "member_1.safetensors": "ec1b497738c26f77a498b90dec60fe1f95f1784ca1e4694ff35e0d4a24406d0c",
+    "member_2.safetensors": "e65bbef47d57364434a9152ab5f40b31c4665435f6d4a1e2334ee59fef333387",
+    "member_3.safetensors": "7bedc4a078c5dc0ac0a26c1f1ee6b53aaafc03d9528859026c08c00a2532445a",
+    "member_4.safetensors": "a7746829712dd5fbc826210b25dd7be775b53b8464f89b724288e13b0dc96660",
+    "ensemble.json": "b074162c6733e654ccd67fa655d15180f941d3b122142bb902838513d98192a2",
+    "head.json": "51ddbb3c65dfd1eb3101e1e7fb3b9e366892961eeb1dc377d4719187cd315624",
+    "report.json": "92a70bc16865478099213692ed027638ae9b169a8109c1bcb84c8fb302d86c16",
+    "bernoulli.json": "b66aaab0a2962069d5c61c1d4a1b9471ace0906d28b8a6a0a02ea033ef3efc0c"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "complete": {
    "head": "complete",
    "type": "score",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:10Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 318,
-    "brier": 0.195936,
-    "log_loss": 0.381588,
-    "accuracy": 0.880503,
-    "ece": 0.035744,
-    "brier_skill_score": 0.567036,
-    "baseline_brier": 0.452547,
-    "baseline_log_loss": 0.884163,
-    "baseline_accuracy": 0.720126,
+    "n_holdout": 316,
+    "brier": 0.281566,
+    "log_loss": 0.53306,
+    "accuracy": 0.841772,
+    "ece": 0.086898,
+    "brier_skill_score": 0.312867,
+    "baseline_brier": 0.409769,
+    "baseline_log_loss": 0.831899,
+    "baseline_accuracy": 0.756329,
     "has_skill": true,
-    "brier_gain_lower_95": 0.223613,
+    "brier_gain_lower_95": 0.100904,
     "calibration_method": "sigmoid",
     "verdict": {
      "low": "act",
@@ -886,47 +903,47 @@
     "low": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 279 act-tier rows at low stakes, accuracy 0.913978 (95% Wilson 0.875198-0.941514) against a mean prediction of 0.907306"
+     "reason": "holdout: 267 act-tier rows at low stakes, accuracy 0.857678 (95% Wilson 0.810688-0.894522) against a mean prediction of 0.891442"
     },
     "medium": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 224 act-tier rows at medium stakes, accuracy 0.928571 (95% Wilson 0.887133-0.955558) against a mean prediction of 0.935388"
+     "reason": "holdout: 214 act-tier rows at medium stakes, accuracy 0.897196 (95% Wilson 0.849259-0.931126) against a mean prediction of 0.916262"
     },
     "high": {
      "max_tier": "act",
      "tier": 2,
-     "reason": "holdout: 92 act-tier rows at high stakes, accuracy 0.956522 (95% Wilson 0.893483-0.982964) against a mean prediction of 0.96597"
+     "reason": "holdout: 32 act-tier rows at high stakes, accuracy 0.96875 (95% Wilson 0.842557-0.994462) against a mean prediction of 0.96292"
     }
    },
    "calibration": {
     "method": "sigmoid",
-    "why": "sigmoid: the smallest class has 5 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "why": "sigmoid: the smallest class has 7 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 987,
-      "n_train_trusted": 987,
-      "n_calibration": 284
-     },
-     {
-      "n_train": 999,
-      "n_train_trusted": 999,
-      "n_calibration": 272
-     },
-     {
-      "n_train": 1005,
-      "n_train_trusted": 1005,
+      "n_train": 994,
+      "n_train_trusted": 994,
       "n_calibration": 266
      },
      {
-      "n_train": 1037,
-      "n_train_trusted": 1037,
-      "n_calibration": 234
+      "n_train": 998,
+      "n_train_trusted": 998,
+      "n_calibration": 262
      },
      {
-      "n_train": 1056,
-      "n_train_trusted": 1056,
-      "n_calibration": 215
+      "n_train": 983,
+      "n_train_trusted": 983,
+      "n_calibration": 277
+     },
+     {
+      "n_train": 1042,
+      "n_train_trusted": 1042,
+      "n_calibration": 218
+     },
+     {
+      "n_train": 1023,
+      "n_train_trusted": 1023,
+      "n_calibration": 237
      }
     ],
     "ensemble_members": 5,
@@ -934,25 +951,27 @@
    },
    "conformal": null,
    "data": {
-    "rows": 1589,
-    "trusted": 1589,
+    "rows": 1576,
+    "trusted": 1576,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1576
     },
     "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 43,
      "groups": 208
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "complete",
     "type": "score",
@@ -967,7 +986,7 @@
     "decision": "argmax",
     "stakes": "medium",
     "conformal": null,
-    "description": "How much of the request does the drafted answer address? Judge coverage of what was asked, not correctness (a wrong number that answers the question still counts as answering it; `grounded` judges correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3.",
+    "description": "How much of the request does the drafted answer address? Judge coverage of what was asked, not correctness (a wrong number that answers the question still counts as answering it; `grounded` judges correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3. For a multi-hop question (\"who leads the team that owns X?\") the intermediate link alone (the owning team) misses the question -> 0, while the asked fact (the lead) answers it -> 3.",
     "input": {},
     "params": {},
     "levels": [
@@ -980,86 +999,87 @@
    },
    "dir": "heads/complete",
    "files": {
-    "member_0.safetensors": "09428ee8c135eef42ed2f9dc875fea879454a686883b3565ff5a03ea9d7d7620",
-    "member_1.safetensors": "35966c981134e9214204349ae0c2834a2b62d652493e22d74235123ac7b73816",
-    "member_2.safetensors": "ef01f77b45f9919278376f81a34148dcd22436d40d91f786cf3a48ce7bbd7f02",
-    "member_3.safetensors": "2353baac839d19cc2ec973162641d6866ac42746a571199aa06ae2c28a767c5b",
-    "member_4.safetensors": "290ab76cb6f2423a892ee5fe4244d7aaea40c4c688d3522750c93f016f54bfdc",
-    "ensemble.json": "a51cd2f73c8dc7739dacf4cbcb8ad30511173246df940cec0183a59b6186a7be",
-    "head.json": "10fa2dd65727214a77bb034c1ba8e519f341032594054442623ebe38af1de022",
-    "report.json": "5b3edbf37a5bec4fd85583e89acd6d8ed52f3be360f2c91d289e111be0c50990",
-    "bernoulli.json": "ed145220561ec7c3dcedf562a2c44da246f6728256ab6be5f8ee4cee3fdb26c9"
-   }
+    "member_0.safetensors": "0ac919834feeb5b0f49ba16d28848b10ea96104e72874e94505d226c6750fd0c",
+    "member_1.safetensors": "c75615eae12dfa4840d0701ac6b553d63bb4b670f05d2eb3074af85e534be532",
+    "member_2.safetensors": "3d3b858d3a9dea6641bfaa9392ac09c4ef2bbb169bfe68db91728086aa9e67d2",
+    "member_3.safetensors": "4c7cd4237285f2c64ef70918f468f66f43840a2d900f5694901f3c924482aaeb",
+    "member_4.safetensors": "5f9826fb864a192804ba340ea39a8b275af178065a248942a817c59b21890346",
+    "ensemble.json": "b8c7884e01dfc8e9d3da6a0c60b8803d8f2dc2166f43742d8cbc33516210fe75",
+    "head.json": "7860cc13f09535cf5dc9fb5bf32cc4247332ee389415f32eecea49197ffcd742",
+    "report.json": "a12864b35a37322108bba27976de7a2f787ea6e31b71ab0ed6369dfbecec1dda",
+    "bernoulli.json": "ab10f8a0374eb53f48403ee872c771f01010c10a3aad899d983b3ea254c4640e"
+   },
+   "trained_in": "rlcd-0.1.1"
   },
   "risk_tier": {
    "head": "risk_tier",
    "type": "score",
    "model": "logreg",
-   "trained_at": "2026-11-07T13:39:11Z",
+   "trained_at": "2026-11-07T15:10:59Z",
    "metrics": {
-    "n_holdout": 318,
-    "brier": 0.239996,
-    "log_loss": 0.483563,
-    "accuracy": 0.842767,
-    "ece": 0.064419,
-    "brier_skill_score": 0.640759,
-    "baseline_brier": 0.668065,
-    "baseline_log_loss": 1.220483,
-    "baseline_accuracy": 0.5,
+    "n_holdout": 316,
+    "brier": 0.212105,
+    "log_loss": 0.440965,
+    "accuracy": 0.85443,
+    "ece": 0.049821,
+    "brier_skill_score": 0.683993,
+    "baseline_brier": 0.671202,
+    "baseline_log_loss": 1.230168,
+    "baseline_accuracy": 0.474684,
     "has_skill": true,
-    "brier_gain_lower_95": 0.334226,
+    "brier_gain_lower_95": 0.357162,
     "calibration_method": "sigmoid",
     "verdict": {
-     "low": "act",
+     "low": "confirm",
      "medium": "confirm",
      "high": "confirm"
     }
    },
    "verdict": {
     "low": {
-     "max_tier": "act",
-     "tier": 2,
-     "reason": "holdout: 243 act-tier rows at low stakes, accuracy 0.91358 (95% Wilson 0.871505-0.942782) against a mean prediction of 0.928469"
+     "max_tier": "confirm",
+     "tier": 1,
+     "reason": "act-tier rows at low stakes came true 0.902527 of the time against a mean prediction of 0.948354 (one-sided p = 0.001296): the probabilities overstate; decisions are capped at confirm"
     },
     "medium": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "act-tier rows at medium stakes came true 0.926471 of the time against a mean prediction of 0.957074 (one-sided p = 0.030941): the probabilities overstate; decisions are capped at confirm"
+     "reason": "act-tier rows at medium stakes came true 0.937759 of the time against a mean prediction of 0.973057 (one-sided p = 0.002527): the probabilities overstate; decisions are capped at confirm"
     },
     "high": {
      "max_tier": "confirm",
      "tier": 1,
-     "reason": "act-tier rows at high stakes came true 0.939394 of the time against a mean prediction of 0.986668 (one-sided p = 0.000425): the probabilities overstate; decisions are capped at confirm"
+     "reason": "act-tier rows at high stakes came true 0.969231 of the time against a mean prediction of 0.989536 (one-sided p = 0.017478): the probabilities overstate; decisions are capped at confirm"
     }
    },
    "calibration": {
     "method": "sigmoid",
-    "why": "sigmoid: the smallest class has 7 trusted rows in some calibration block (isotonic needs >= 3000)",
+    "why": "sigmoid: the smallest class has 6 trusted rows in some calibration block (isotonic needs >= 3000)",
     "folds": [
      {
-      "n_train": 987,
-      "n_train_trusted": 987,
-      "n_calibration": 284
-     },
-     {
-      "n_train": 999,
-      "n_train_trusted": 999,
-      "n_calibration": 272
-     },
-     {
-      "n_train": 1005,
-      "n_train_trusted": 1005,
+      "n_train": 994,
+      "n_train_trusted": 994,
       "n_calibration": 266
      },
      {
-      "n_train": 1037,
-      "n_train_trusted": 1037,
-      "n_calibration": 234
+      "n_train": 998,
+      "n_train_trusted": 998,
+      "n_calibration": 262
      },
      {
-      "n_train": 1056,
-      "n_train_trusted": 1056,
-      "n_calibration": 215
+      "n_train": 983,
+      "n_train_trusted": 983,
+      "n_calibration": 277
+     },
+     {
+      "n_train": 1042,
+      "n_train_trusted": 1042,
+      "n_calibration": 218
+     },
+     {
+      "n_train": 1023,
+      "n_train_trusted": 1023,
+      "n_calibration": 237
      }
     ],
     "ensemble_members": 5,
@@ -1067,25 +1087,27 @@
    },
    "conformal": null,
    "data": {
-    "rows": 1589,
-    "trusted": 1589,
+    "rows": 1576,
+    "trusted": 1576,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1576
     },
     "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 43,
      "groups": 208
     }
    },
-   "notes": [],
+   "notes": [
+    "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+   ],
    "spec": {
     "name": "risk_tier",
     "type": "score",
@@ -1113,22 +1135,23 @@
    },
    "dir": "heads/risk_tier",
    "files": {
-    "member_0.safetensors": "6c6efe172aa8db88a34c762a959b9d019fd33ca04a654adb6fdd835d6837d4dd",
-    "member_1.safetensors": "190bc3aac052e1f8a4edf9d772fb1348e0971ab196e71f78e4a567a388b7c6c7",
-    "member_2.safetensors": "f99e8ade866d0611b57f4493a4a2071b451183e1b54e9210b2e679178752cda0",
-    "member_3.safetensors": "e0533d2d4f9e6ea111558b4598e0f2843121b4b4a1bc652d8cf7512d3aa6e6d6",
-    "member_4.safetensors": "553fa6afee8366114f2303c1e8447e1674c86ab58587554332cf5b6c72e9d956",
-    "ensemble.json": "cd8a5100364ee0a64312bb24d3f099492e1b6b769167adffa4e0aec854a4676d",
-    "head.json": "17e2a8ea879191b0634fc79daa5b0b7984c2e47ff99f1b242363138e220f9082",
-    "report.json": "370ca234b303154516389517fa668513d11378501e626955ef21efc8e8da6701",
-    "bernoulli.json": "d6ec7477cc68c2387afc1cd720a19c5119d5820c826592d42b00f1b368b7fcae"
-   }
+    "member_0.safetensors": "fcb7aad7affdf859d1cee5cd6fbb944c78a0d65f5892837cdc74088b2d4e09c0",
+    "member_1.safetensors": "f6f4bcbba2ad4622db8be0938540eba9a06691fea6ab830bf3c8feb68821095b",
+    "member_2.safetensors": "b9774cc016ae03fb3fe05be0d28c26cf036ca59462be6f1dce1ae7e4495515fa",
+    "member_3.safetensors": "f4041ca26022656c216a723414195536c10a0d60b8aa57df6cf4c51bd032c543",
+    "member_4.safetensors": "b74fe458c849065c6213b950f32f1d3e895af68889bda2b0eae00b283573a08c",
+    "ensemble.json": "c01a9ca176c85c1b7271c299cae2564f80b91397f59f9adf08fff559e0d4f50c",
+    "head.json": "42ab73baab9b2ecde58f3daa22229b8e53cef5edd6ca3c6a3048110e5e46427e",
+    "report.json": "db9ff4b1c4f9d0aeca86ab11e18f4ef12c94229523079ceaaca5b2fc94777314",
+    "bernoulli.json": "b9b7bd7cd75773e7d6fd753b06cea23ebfd94300279c87e7cf3bbe022e25e1e8"
+   },
+   "trained_in": "rlcd-0.1.1"
   }
  },
  "data_card": {
   "pack": "documents",
   "label_sources": {
-   "synthetic": 12319
+   "synthetic": 12445
   },
   "synthetic_only": true,
   "heads": {
@@ -1139,15 +1162,15 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
@@ -1158,15 +1181,15 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
@@ -1177,110 +1200,110 @@
      "synthetic": 900
     },
     "groups": 285,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 720,
-    "development_trusted": 720,
-    "holdout_rows": 180,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 718,
+    "development_trusted": 718,
+    "holdout_rows": 182,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 58,
+     "holdout_groups": 56,
      "groups": 285
     }
    },
    "chunk_relevant": {
-    "rows": 3631,
-    "trusted": 3631,
+    "rows": 3658,
+    "trusted": 3658,
     "by_source": {
-     "synthetic": 3631
+     "synthetic": 3658
     },
-    "groups": 263,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 2894,
-    "development_trusted": 2894,
-    "holdout_rows": 737,
+    "groups": 262,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 2914,
+    "development_trusted": 2914,
+    "holdout_rows": 744,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
      "holdout_groups": 51,
-     "groups": 263
-    }
-   },
-   "answerable": {
-    "rows": 1221,
-    "trusted": 1221,
-    "by_source": {
-     "synthetic": 1221
-    },
-    "groups": 262,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 972,
-    "development_trusted": 972,
-    "holdout_rows": 249,
-    "purged_rows": 0,
-    "ordering": "group",
-    "split": {
-     "holdout_groups": 53,
      "groups": 262
     }
    },
-   "grounded": {
-    "rows": 1589,
-    "trusted": 1589,
+   "answerable": {
+    "rows": 1359,
+    "trusted": 1359,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1359
     },
-    "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "groups": 264,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1078,
+    "development_trusted": 1078,
+    "holdout_rows": 281,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 52,
+     "groups": 264
+    }
+   },
+   "grounded": {
+    "rows": 1576,
+    "trusted": 1576,
+    "by_source": {
+     "synthetic": 1576
+    },
+    "groups": 208,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
+    "purged_rows": 0,
+    "ordering": "group",
+    "split": {
+     "holdout_groups": 43,
      "groups": 208
     }
    },
    "complete": {
-    "rows": 1589,
-    "trusted": 1589,
+    "rows": 1576,
+    "trusted": 1576,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1576
     },
     "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 43,
      "groups": 208
     }
    },
    "risk_tier": {
-    "rows": 1589,
-    "trusted": 1589,
+    "rows": 1576,
+    "trusted": 1576,
     "by_source": {
-     "synthetic": 1589
+     "synthetic": 1576
     },
     "groups": 208,
-    "time_from": "2025-01-10T00:25:41Z",
-    "time_to": "2025-09-30T22:57:45Z",
-    "development_rows": 1271,
-    "development_trusted": 1271,
-    "holdout_rows": 318,
+    "time_from": "2025-01-14T20:04:18Z",
+    "time_to": "2030-12-20T00:56:27Z",
+    "development_rows": 1260,
+    "development_trusted": 1260,
+    "holdout_rows": 316,
     "purged_rows": 0,
     "ordering": "group",
     "split": {
-     "holdout_groups": 40,
+     "holdout_groups": 43,
      "groups": 208
     }
    }
@@ -1298,9 +1321,9 @@
    "query_evidence": 288,
    "query_evidence_answer": 279
   },
-  "feature_version": "documents-v1:hashing-256-s0:0b1d19ee81e5"
+  "feature_version": "documents-v2:hashing-256-s0:0b1d19ee81e5"
  },
  "notes": [
-  "job 4143faeda148"
+  "job de79856f263d"
  ]
 }

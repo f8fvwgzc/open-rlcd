@@ -19,6 +19,7 @@ heads judge relations between texts with features, not by reading them like an L
 """
 from __future__ import annotations
 
+import hashlib
 import threading
 from pathlib import Path
 from typing import Any
@@ -103,7 +104,8 @@ class DocumentsPack(BasePack):
             reserve(sum(len(v) for v in labelled.values()) + len(feedback or []))
         out = {}
         for h in heads:
-            out[h] = dataset_from_labels(specs[h], provider, labelled[h], feedback, feedback_weight)
+            out[h] = dataset_from_labels(specs[h], provider, labelled[h], feedback, feedback_weight,
+                                         group_of=_query_group)
         return out
 
     # ------------------------------------------------------------------ corpus
@@ -184,3 +186,11 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
 
 
 __all__ = ["DEFAULT_ENCODER", "VIEWS", "DocumentsPack", "DocumentsProvider", "write_synth"]
+
+
+def _query_group(state: object) -> str | None:
+    """The group a feedback state belongs to when its labelled twin used the default query group (tasks.py): the
+    same question is one group, so its feedback never trains while its labelled row is scored in the holdout."""
+    if isinstance(state, dict) and isinstance(state.get("query"), str):
+        return f"query:{hashlib.sha256(state['query'].encode()).hexdigest()[:12]}"
+    return None

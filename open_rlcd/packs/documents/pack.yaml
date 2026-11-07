@@ -110,7 +110,9 @@ heads:
     description: >-
       How much of the request does the drafted answer address? Judge coverage of what was asked, not
       correctness (a wrong number that answers the question still counts as answering it; `grounded` judges
-      correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3.
+      correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3. For a multi-hop question ("who leads
+      the team that owns X?") the intermediate link alone (the owning team) misses the question -> 0, while the
+      asked fact (the lead) answers it -> 3.
 
   risk_tier:
     type: score

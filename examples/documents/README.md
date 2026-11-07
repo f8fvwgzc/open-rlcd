@@ -42,38 +42,66 @@ attribute (battery life, country of manufacture). The candidates come from the r
 BM25, plus documents the top hits link to). From each query the generator labels:
 
 - **chunk_relevant**: gold chunks are true. The strongest look-alikes are false: other products' sheets, news
-  naming the product, the wrong team page.
+  naming the product, the wrong team page. A real product's sheet stays true when the question also asks for a
+  field no document states, or compares it with a product that does not exist: it holds part of the answer.
 - **answerable**: gold evidence is true. Evidence missing one gold chunk is false, and so is any evidence for an
-  unanswerable question.
+  unanswerable question. About 15 % of the queries also get a row with empty evidence (false): `decide` builds
+  that state when no candidate reaches `min_relevance`, so the head is calibrated on it.
 - **grounded / complete / risk_tier**: on drafted answers in several wordings:
   - correct (grounded, complete 3);
   - one number, date, name or value changed (not grounded, still complete 3);
-  - partial (grounded, complete 1-2);
+  - partial (grounded, complete 1-2 by the share of facts kept; a multi-hop answer that states only the
+    owning team misses the question, complete 0, and one that states the asked lead / office / department is
+    complete 3);
   - about another entity (not grounded, complete 0).
 
-  Risk follows the topic: specs 0, internal facts 1, money 2, legal / safety / medical 3.
+  Risk follows the topic: specs 0, internal organisation facts 1, money 2, legal / safety / medical 3.
+
+Query times (and the `now` every state carries) spread over six years from January 2025, while the documents are
+dated before 2025. `decide` measures document age from the time of the request, so a request made today falls
+inside the range the heads were trained on.
 
 Every label has source `synthetic` (trusted). The split group is the surface template, so the holdout contains
 only phrasings the heads never saw. It does not contain unseen documents: entities recur across templates.
 
 ## What to expect
 
-With the default seed and the hashing encoder, every head shows skill over the base rate on its holdout.
-Typical values:
+The script prints each head's holdout summary. With the default seed (7), 900 queries and the hashing encoder it
+reads:
 
-- response_type: accuracy about 0.77 against 0.50;
-- chunk_relevant: about 0.90 against 0.79;
-- grounded: about 0.92 against 0.52, and it keeps its 5 % conformal promise.
+```
+head            status   skill    acc   base    ECE  verdict (low/medium/high)
+response_type   trained  yes    0.863  0.363  0.069  act/act/confirm
+route           trained  yes    0.824  0.516  0.087  act/act/act
+needs_graph     trained  NO     0.923  0.846  0.037  escalate/escalate/escalate
+chunk_relevant  trained  yes    0.839  0.696  0.020  act/act/act
+answerable      trained  yes    0.694  0.495  0.081  confirm/confirm/confirm
+grounded        trained  yes    0.927  0.560  0.055  confirm/confirm/confirm
+complete        trained  yes    0.842  0.756  0.087  act/act/act
+risk_tier       trained  yes    0.854  0.475  0.050  confirm/confirm/confirm
+```
 
-`answerable` has skill, but no threshold keeps its error rate under 5 % with 90 % confidence. Its verdict is
-therefore capped at `confirm`, and the report says why. On some seeds `needs_graph` shows no skill, because
-only a few graph templates land in the holdout; it then abstains (`escalate`) and says so. Both are the intended
-behaviour: a head that has not shown evidence never acts.
+`acc` is holdout accuracy and `base` the accuracy of the base-rate forecaster. The exact numbers move a little
+with the code version; rerun the script for yours.
 
-Some decide plans end in `next: retrieve_more`: the gate saw that the evidence lacks the second document of a
-multi-hop chain. Out-of-scope and ambiguous requests get `refuse_out_of_scope` and `ask_clarifying_question`
-without calling an LLM. `evaluate` rejects the answer with the changed number and sends the faithful one to
-review: price questions are risk tier 2, which means high stakes.
+- `needs_graph` shows **no skill** at this seed: its accuracy beats the base rate, but the block-bootstrap skill
+  test over whole holdout templates does not establish a gain (few graph templates land in the holdout). It
+  abstains (`escalate`) on every decision and every plan says so in its warnings.
+- `answerable` and `grounded` have skill, but no threshold keeps their error rate under 5 % with 90 %
+  confidence, so neither keeps a conformal promise: both are capped at `confirm` and the report says why. An
+  answer is therefore never shipped automatically on this data (`evaluate` gives at most `review`).
+- `risk_tier` is capped at `confirm` by its holdout verification: its act-tier rows came true less often than
+  their mean predicted probability.
+
+These are the intended behaviours: a head that has not shown evidence never acts.
+
+The three example plans: the warranty question and the multi-hop question both end in `next: answer` with
+action `confirm` (the multi-hop plan keeps only the product sheet as evidence: the team page is retrieved and ranked
+second, but chunk_relevant gives it less than 0.5); the weather question is refused (`refuse_out_of_scope`) without calling an
+LLM. A plan ends in `next: retrieve_more` when no candidate reaches `min_relevance` or the answerable gate says
+the evidence is not sufficient, and in `escalate_to_human` when response_type itself abstains. `evaluate` sends the
+faithful price answer to review and rejects the one with the changed number: price questions are risk tier 2,
+which means high stakes.
 
 **These are sanity checks of the pipeline, not accuracy.** The heads learned a synthetic world. With `--docs` your
 documents join the corpus for retrieval only; nothing is labelled for you. To get calibrated probabilities for your

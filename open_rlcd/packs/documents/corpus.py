@@ -15,7 +15,14 @@ and lexical hits have a comparable `score` too), its BM25 score, and graph dista
 
 Ingestion is idempotent: a document whose content hash (text + title + metadata + chunking settings) did not
 change is skipped; a changed one replaces its old chunks everywhere. Ingestion is additive: documents that
-disappeared from the folder stay until `remove()` is called.
+disappeared from the folder stay until `remove()` is called. The exception is a JSON / JSONL file that is read
+again: its records that are no longer in it are removed (the file is still there, so it says what it holds).
+A JSON record without an `id` gets `<file doc id>:<hash of its title and text>`, so removing or reordering other
+records does not shift its id (records with ids keep them).
+
+The entity graph records the version of the entity extractor that built it; a corpus opened with a newer
+extractor re-extracts the graph from its chunks in memory (vectors and BM25 are untouched) and writes it at the
+next save.
 
 What this is not: a database. One writer at a time, everything is loaded into memory, BM25 is rebuilt on every
 ingest. It is meant for a laptop-sized corpus (up to some hundred thousand chunks); remote connectors (Qdrant,
@@ -35,7 +42,7 @@ from urllib.parse import unquote, urlparse
 
 import numpy as np
 
-from ...connectors.local_graph import LocalGraphStore
+from ...connectors.local_graph import ENTITY_VERSION, HUB_MIN, HUB_SHARE, LocalGraphStore
 from ...connectors.local_vector import LocalVectorStore
 from ...core.contract import ContractError
 from ...features.lexical import BM25, tokens
@@ -235,7 +242,8 @@ def _links(v: Any) -> list[str]:
 
 
 def record_to_doc(rec: dict, default_id: str, source: str = "") -> dict | None:
-    """A JSON record -> a document dict, or None when it has no text. Text from `text` / `content` / `body`."""
+    """A JSON record -> a document dict, or None when it has no text. Text from `text` / `content` / `body`; the
+    id from `id` / `doc_id` / `_id`, else `default_id`."""
     text = _first(rec, ("text", "content", "body"))
     if isinstance(text, list):
         text = "\n\n".join(str(t) for t in text if t)
@@ -247,6 +255,10 @@ def record_to_doc(rec: dict, default_id: str, source: str = "") -> dict | None:
     return {"id": str(rid) if rid is not None else default_id, "title": str(title) if title else "",
             "text": text, "updated_at": int(ts) if ts is not None else None,
             "authority": _authority(rec.get("authority")), "links": _links(rec.get("links")), "source": source}
+
+
+def _digest(title: str, text: str) -> str:
+    return hashlib.sha256(json.dumps([title or "", text], ensure_ascii=False).encode()).hexdigest()[:16]
 
 
 def _json_records(raw: str, suffix: str) -> tuple[list[dict], int]:
@@ -319,11 +331,18 @@ def read_file(path: Path, root: Path, root_name: str) -> tuple[list[dict], list[
         if suffix in (".json", ".jsonl"):
             recs, bad = _json_records(path.read_text(encoding="utf-8", errors="replace"), suffix)
             docs, notes = [], []
-            for i, r in enumerate(recs):
-                d = record_to_doc(r, default_id=f"{doc_id}:{i}", source=str(path))
+            used: dict[str, int] = {}
+            for r in recs:
+                d = record_to_doc(r, default_id="", source=str(path))
                 if d is None:
                     bad += 1
                     continue
+                if not d["id"]:
+                    # no id of its own: derived from its content, so it does not shift when other records come and
+                    # go (a position would); identical records in one file are told apart by their order
+                    base_id = f"{doc_id}:{_digest(d['title'], d['text'])}"
+                    used[base_id] = used.get(base_id, 0) + 1
+                    d["id"] = base_id if used[base_id] == 1 else f"{base_id}~{used[base_id]}"
                 if d["updated_at"] is None:
                     d["updated_at"] = mtime
                 docs.append(d)
@@ -331,7 +350,7 @@ def read_file(path: Path, root: Path, root_name: str) -> tuple[list[dict], list[
                 notes.append({"path": rel, "reason": f"{bad} records without text or not objects"})
             return docs, notes
     except Exception as e:  # one unreadable file never stops an ingest
-        return [], [{"path": rel, "reason": f"{type(e).__name__}: {e}"[:300]}]
+        return [], [{"path": rel, "reason": f"{type(e).__name__}: {e}"[:300], "failed": True}]
     return [], [{"path": rel, "reason": "unsupported file type"}]
 
 
@@ -356,6 +375,18 @@ def _walk(root: Path) -> list[Path]:
 def _opens_with_title(rows: list[dict], title: str) -> bool:
     """True when the first chunk already opens with the title (a Markdown heading)."""
     return bool(rows) and rows[0]["text"].lstrip("# ").startswith(title)
+
+
+def _graph_add(graph: LocalGraphStore, doc: dict, rows: list[dict]) -> None:
+    """A document's chunks into the entity graph: the chunk text; the first chunk also gets a real title (a file
+    name is not a name). Older docs.jsonl rows lack `title_is_filename`: a title equal to the file stem is one."""
+    title = str(doc.get("title") or "")
+    is_file = doc.get("title_is_filename")
+    if is_file is None:
+        is_file = bool(doc.get("source")) and title == Path(str(doc["source"])).stem
+    graph_title = "" if is_file or not title or _opens_with_title(rows, title) else f"{title}.\n"
+    graph.add_document(doc["id"], [(r["id"], (graph_title if r["ord"] == 0 else "") + r["text"]) for r in rows],
+                       links=doc.get("links") or [])
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -383,8 +414,8 @@ class Corpus:
     """A local, multilingual document corpus: chunks + vectors + entity graph + BM25 under `<home>/corpus`.
 
     config keys (all optional): `vector: {kind: local, backend: auto|faiss|hnswlib|numpy}`, `graph: {kind:
-    local, terms: [...known entity names...], max_fanout: 200}`, `max_chars`, `overlap`, `rrf_k` (60),
-    `batch_size` (64), `on_encoder_change: error | reembed`."""
+    local, terms: [...known entity names...], max_fanout: 200, hub_share: 0.05, hub_min: 10}`, `max_chars`,
+    `overlap`, `rrf_k` (60), `batch_size` (64), `on_encoder_change: error | reembed`."""
 
     def __init__(self, home: Path, encoder: Encoder, config: dict | None = None):
         self.home = Path(home)
@@ -405,13 +436,17 @@ class Corpus:
         self._backend = str(vcfg.get("backend") or "auto")
         self._terms = [str(t) for t in (gcfg.get("terms") or [])]
         self._fanout = int(gcfg.get("max_fanout") or 200)
+        self._hub = {"max_fanout": self._fanout,
+                     "hub_share": float(gcfg["hub_share"]) if gcfg.get("hub_share") is not None else HUB_SHARE,
+                     "hub_min": int(gcfg["hub_min"]) if gcfg.get("hub_min") is not None else HUB_MIN}
         self.docs: dict[str, dict] = {}
         self.chunks: dict[str, dict] = {}
         self.bm25: BM25 | None = None
         self._bm25_ids: list[str] = []
         self._bm25_pos: dict[str, int] = {}
         self.vectors = LocalVectorStore(self.dir / "vectors", encoder.dim, backend=self._backend)
-        self.graph = LocalGraphStore(self.dir / "graph.json", terms=self._terms, max_fanout=self._fanout)
+        self.graph = LocalGraphStore(self.dir / "graph.json", terms=self._terms, **self._hub)
+        self._graph_dirty = False              # the graph was re-extracted on load and not saved yet
         if self.exists():
             self._load()
 
@@ -436,8 +471,9 @@ class Corpus:
             self.vectors = LocalVectorStore.load(self.dir / "vectors", backend=self._backend)
         if (self.dir / "graph.json").is_file():
             # configured terms win; without any, the terms the graph was built with are kept
-            self.graph = LocalGraphStore.load(self.dir / "graph.json", terms=self._terms or None,
-                                              max_fanout=self._fanout)
+            self.graph = LocalGraphStore.load(self.dir / "graph.json", terms=self._terms or None, **self._hub)
+            if self.graph.entity_version != ENTITY_VERSION:
+                self._rebuild_graph()
         bm = self.dir / "bm25.json"
         if bm.is_file():
             d = json.loads(bm.read_text(encoding="utf-8"))
@@ -457,6 +493,17 @@ class Corpus:
                     f"(sha256 {self.encoder.sha256[:16]}...): its vectors would be meaningless. Re-embed it "
                     f"(config on_encoder_change: reembed) or use the original encoder.", kind="encoder_mismatch")
 
+    def _rebuild_graph(self) -> None:
+        """Re-extract the entity graph from the stored chunks with the current extractor (in memory; the next save
+        writes it). Vectors, BM25 and chunk ids stay as they are."""
+        g = LocalGraphStore(self.dir / "graph.json", terms=self._terms or self.graph.terms, **self._hub)
+        for d in self.docs.values():
+            rows = sorted((self.chunks[c] for c in d.get("chunk_ids") or [] if c in self.chunks),
+                          key=lambda r: r.get("ord", 0))
+            _graph_add(g, d, rows)
+        self.graph = g
+        self._graph_dirty = True
+
     def stats(self) -> dict:
         return {"docs": len(self.docs), "chunks": len(self.chunks), "vectors": self.vectors.count(),
                 "vector_backend": self.vectors.backend, "graph": self.graph.stats(), "encoder": self.encoder.id}
@@ -474,19 +521,23 @@ class Corpus:
     def ingest_folder(self, path: Path, max_chars: int = 1200, overlap: int = 150) -> dict:
         """Ingest every supported file under `path` (.txt .md .markdown .html .htm .pdf .json .jsonl).
 
-        Document ids are `<folder name>/<relative path>` (`:<n>` appended per record of a JSON file without
-        ids), so re-ingesting the same folder updates in place. Returns counts and up to 50 skip notes."""
+        Document ids are `<folder name>/<relative path>` (`:<content hash>` appended per record of a JSON file
+        without ids), so re-ingesting the same folder updates in place. Records that left a JSON / JSONL file that
+        was read again are removed (`docs_removed`). Returns counts and up to 50 skip notes."""
         root = Path(path).expanduser().resolve()
         if not root.exists():
             raise ContractError(f"nothing to ingest: {root} does not exist", kind="not_found")
         files = _walk(root)
         root_name = root.name if root.is_dir() else ""
         docs, notes = [], []
+        reread: dict[str, set[str]] = {}       # JSON file read without error -> the record ids it holds now
         for f in files:
             d, n = read_file(f, root, root_name)
             docs.extend(d)
             notes.extend(n)
-        out = self._ingest(docs, max_chars, overlap, notes)
+            if f.suffix.lower() in (".json", ".jsonl") and not any(x.get("failed") for x in n):
+                reread[str(f)] = {x["id"] for x in d}
+        out = self._ingest(docs, max_chars, overlap, notes, reread)
         out["files"] = len(files)
         return out
 
@@ -519,10 +570,16 @@ class Corpus:
         self.vectors.delete(ids)
         self.graph.remove_document(doc_id)
 
-    def _ingest(self, docs: list[dict], max_chars: int, overlap: int, notes: list[dict] | None = None) -> dict:
+    def _ingest(self, docs: list[dict], max_chars: int, overlap: int, notes: list[dict] | None = None,
+                reread: dict[str, set[str]] | None = None) -> dict:
+        """`reread`: source path -> ids a multi-record file holds now; its other documents are removed."""
         notes = list(notes or [])
         self.max_chars, self.overlap = int(max_chars), int(overlap)
         added = updated = unchanged = 0
+        stale = [i for i, d in self.docs.items() if reread and d.get("source") in reread
+                 and i not in reread[d["source"]]]
+        for i in stale:
+            self._drop_doc(i)
         new_chunks: list[dict] = []
         for d in docs:
             if not str(d.get("text") or "").strip():
@@ -546,20 +603,18 @@ class Corpus:
                 self.chunks[r["id"]] = r
             self.docs[d["id"]] = {"id": d["id"], "title": title, "source": d.get("source") or "", "sha256": h,
                                   "updated_at": d.get("updated_at"), "authority": d.get("authority"),
-                                  "links": list(d.get("links") or []), "chunk_ids": [r["id"] for r in rows]}
-            # entities: the chunk text; the first chunk also gets a real title (a file name is not a name)
-            graph_title = "" if d.get("title_is_filename") or not title or _opens_with_title(rows, title) else f"{title}.\n"
-            self.graph.add_document(d["id"], [(r["id"], (graph_title if r["ord"] == 0 else "") + r["text"])
-                                              for r in rows], links=d.get("links") or [])
+                                  "links": list(d.get("links") or []), "chunk_ids": [r["id"] for r in rows],
+                                  "title_is_filename": bool(d.get("title_is_filename"))}
+            _graph_add(self.graph, self.docs[d["id"]], rows)
             new_chunks.extend(rows)
         for s in range(0, len(new_chunks), self.batch_size):
             batch = new_chunks[s:s + self.batch_size]
             vecs = self.encoder.encode([self._passage(r["title"], r["text"]) for r in batch], kind="passage")
             self.vectors.upsert([r["id"] for r in batch], vecs, [{"doc_id": r["doc_id"]} for r in batch])
-        if added or updated or not self.exists():
+        if added or updated or stale or self._graph_dirty or not self.exists():
             self._rebuild_bm25()
             self.save()
-        return {"docs_added": added, "docs_updated": updated, "docs_unchanged": unchanged,
+        return {"docs_added": added, "docs_updated": updated, "docs_unchanged": unchanged, "docs_removed": len(stale),
                 "docs_skipped": len(notes), "chunks_added": len(new_chunks), "docs_total": len(self.docs),
                 "chunks_total": len(self.chunks), "skipped": notes[:MAX_REPORTED_SKIPS], "encoder": self.encoder.id}
 
@@ -592,6 +647,7 @@ class Corpus:
         self._bm25_pos = {cid: i for i, cid in enumerate(self._bm25_ids)}
 
     def save(self) -> None:
+        self._graph_dirty = False
         self.dir.mkdir(parents=True, exist_ok=True)
         _write_jsonl(self.dir / "docs.jsonl", list(self.docs.values()))
         _write_jsonl(self.dir / "chunks.jsonl", list(self.chunks.values()))

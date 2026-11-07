@@ -68,7 +68,7 @@ def test_protocol_names_and_groups(provider):
     assert provider.names("query")[:2] == ["emb_0", "emb_1"]
     assert provider.groups("query_evidence_answer")["a_num_share"] == "answer_support"
     assert provider.groups("query_chunk")["c_rank"] == "retrieval"
-    assert provider.feature_version.startswith("documents-v1:hashing-64-s0:")
+    assert provider.feature_version.startswith("documents-v2:hashing-64-s0:")
     cfg = provider.to_config()
     assert cfg["version"] == 1 and cfg["encoder"]["kind"] == "hashing" and cfg["encoder"]["dim"] == DIM
     assert cfg["views"] == {v: len(provider.names(v)) for v in VIEWS}

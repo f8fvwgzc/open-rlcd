@@ -2,19 +2,19 @@
  "head": "route",
  "type": "choice",
  "model": "logreg",
- "trained_at": "2026-11-07T13:39:10Z",
+ "trained_at": "2026-11-07T15:10:59Z",
  "metrics": {
-  "n_holdout": 180,
-  "brier": 0.256883,
-  "log_loss": 0.451449,
-  "accuracy": 0.822222,
-  "ece": 0.066957,
-  "brier_skill_score": 0.603333,
-  "baseline_brier": 0.647603,
-  "baseline_log_loss": 1.210835,
-  "baseline_accuracy": 0.527778,
+  "n_holdout": 182,
+  "brier": 0.247537,
+  "log_loss": 0.484425,
+  "accuracy": 0.824176,
+  "ece": 0.087293,
+  "brier_skill_score": 0.623629,
+  "baseline_brier": 0.657694,
+  "baseline_log_loss": 1.231349,
+  "baseline_accuracy": 0.516484,
   "has_skill": true,
-  "brier_gain_lower_95": 0.287507,
+  "brier_gain_lower_95": 0.313963,
   "calibration_method": "sigmoid",
   "verdict": {
    "low": "act",
@@ -26,17 +26,17 @@
   "low": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 143 act-tier rows at low stakes, accuracy 0.881119 (95% Wilson 0.81786-0.924437) against a mean prediction of 0.882098"
+   "reason": "holdout: 125 act-tier rows at low stakes, accuracy 0.936 (95% Wilson 0.878785-0.967216) against a mean prediction of 0.896674"
   },
   "medium": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 97 act-tier rows at medium stakes, accuracy 0.989691 (95% Wilson 0.943895-0.998178) against a mean prediction of 0.933355"
+   "reason": "holdout: 93 act-tier rows at medium stakes, accuracy 0.989247 (95% Wilson 0.941581-0.998099) against a mean prediction of 0.934199"
   },
   "high": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 36 act-tier rows at high stakes, accuracy 1.0 (95% Wilson 0.903581-1.0) against a mean prediction of 0.97641"
+   "reason": "holdout: 36 act-tier rows at high stakes, accuracy 1.0 (95% Wilson 0.903581-1.0) against a mean prediction of 0.978285"
   }
  },
  "calibration": {
@@ -44,29 +44,29 @@
   "why": "sigmoid: the smallest class has 13 trusted rows in some calibration block (isotonic needs >= 3000)",
   "folds": [
    {
-    "n_train": 564,
-    "n_train_trusted": 564,
-    "n_calibration": 156
+    "n_train": 561,
+    "n_train_trusted": 561,
+    "n_calibration": 157
    },
    {
-    "n_train": 568,
-    "n_train_trusted": 568,
-    "n_calibration": 152
+    "n_train": 570,
+    "n_train_trusted": 570,
+    "n_calibration": 148
    },
    {
-    "n_train": 571,
-    "n_train_trusted": 571,
-    "n_calibration": 149
+    "n_train": 567,
+    "n_train_trusted": 567,
+    "n_calibration": 151
    },
    {
-    "n_train": 593,
-    "n_train_trusted": 593,
-    "n_calibration": 127
-   },
-   {
-    "n_train": 584,
-    "n_train_trusted": 584,
+    "n_train": 582,
+    "n_train_trusted": 582,
     "n_calibration": 136
+   },
+   {
+    "n_train": 592,
+    "n_train_trusted": 592,
+    "n_calibration": 126
    }
   ],
   "ensemble_members": 5,
@@ -80,17 +80,19 @@
    "synthetic": 900
   },
   "groups": 285,
-  "time_from": "2025-01-10T00:25:41Z",
-  "time_to": "2025-09-30T22:57:45Z",
-  "development_rows": 720,
-  "development_trusted": 720,
-  "holdout_rows": 180,
+  "time_from": "2025-01-14T20:04:18Z",
+  "time_to": "2030-12-20T00:56:27Z",
+  "development_rows": 718,
+  "development_trusted": 718,
+  "holdout_rows": 182,
   "purged_rows": 0,
   "ordering": "group",
   "split": {
-   "holdout_groups": 58,
+   "holdout_groups": 56,
    "groups": 285
   }
  },
- "notes": []
+ "notes": [
+  "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+ ]
 }

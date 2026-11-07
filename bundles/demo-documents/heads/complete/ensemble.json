@@ -13,7 +13,7 @@
   "decision": "argmax",
   "stakes": "medium",
   "conformal": null,
-  "description": "How much of the request does the drafted answer address? Judge coverage of what was asked, not correctness (a wrong number that answers the question still counts as answering it; `grounded` judges correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3.",
+  "description": "How much of the request does the drafted answer address? Judge coverage of what was asked, not correctness (a wrong number that answers the question still counts as answering it; `grounded` judges correctness). Example: 1 of 3 requested fields -> 1, all of them -> 3. For a multi-hop question (\"who leads the team that owns X?\") the intermediate link alone (the owning team) misses the question -> 0, while the asked fact (the lead) answers it -> 3.",
   "input": {},
   "params": {},
   "levels": [
@@ -306,7 +306,7 @@
   "q_risk_safety",
   "q_risk_medical"
  ],
- "feature_version": "documents-v1:hashing-256-s0:0b1d19ee81e5",
+ "feature_version": "documents-v2:hashing-256-s0:0b1d19ee81e5",
  "members": [
   {
    "file": "member_0.safetensors",
@@ -321,23 +321,23 @@
     "params": [
      {
       "method": "sigmoid",
-      "a": 1.048125542444513,
-      "b": 2.2607612459587236
+      "a": 0.6802307771482989,
+      "b": 0.48973104743117307
      },
      {
       "method": "sigmoid",
-      "a": 0.3393038041603773,
-      "b": -0.1826648443896937
+      "a": 0.12318441101695317,
+      "b": -1.6008241328719015
      },
      {
       "method": "sigmoid",
-      "a": 0.08845664274529041,
-      "b": -1.9882605396397721
+      "a": 0.12612017177066875,
+      "b": -1.8973081495349904
      },
      {
       "method": "sigmoid",
-      "a": 1.1050595021889649,
-      "b": 2.0125458884907212
+      "a": 0.3719688922204246,
+      "b": 1.646037941963193
      }
     ]
    }
@@ -355,23 +355,23 @@
     "params": [
      {
       "method": "sigmoid",
-      "a": 0.7690212755911452,
-      "b": 2.5502821062623293
+      "a": 0.5766680374585729,
+      "b": 1.238223368360718
      },
      {
       "method": "sigmoid",
-      "a": 0.3709043094294998,
-      "b": 0.20609704001181525
+      "a": 0.1872736899585757,
+      "b": -1.1432153748000535
      },
      {
       "method": "sigmoid",
-      "a": 0.12796603764413775,
-      "b": -1.6375173428929697
+      "a": 0.0960477049597982,
+      "b": -2.260019563939067
      },
      {
       "method": "sigmoid",
-      "a": 0.7119450947134475,
-      "b": 1.7022155665754883
+      "a": 0.5698171038403109,
+      "b": 1.8827773994764785
      }
     ]
    }
@@ -389,23 +389,23 @@
     "params": [
      {
       "method": "sigmoid",
-      "a": 1.008908987259193,
-      "b": 2.3123331761990413
+      "a": 0.6746409411385363,
+      "b": 1.2778398931401074
      },
      {
       "method": "sigmoid",
-      "a": 0.4579839792204397,
-      "b": -0.7194153358202224
+      "a": 0.28287877810421624,
+      "b": -1.6177779183240122
      },
      {
       "method": "sigmoid",
-      "a": 0.1039556021044499,
-      "b": -2.511499504767518
+      "a": 0.012209488757569668,
+      "b": -3.053643100408359
      },
      {
       "method": "sigmoid",
-      "a": 0.5859375585809791,
-      "b": 2.5820787480932768
+      "a": 0.4839170909672969,
+      "b": 2.062405902777428
      }
     ]
    }
@@ -423,23 +423,23 @@
     "params": [
      {
       "method": "sigmoid",
-      "a": 1.0087237923610788,
-      "b": 1.3910423307031297
+      "a": 0.825201907451477,
+      "b": 0.5926957333980027
      },
      {
       "method": "sigmoid",
-      "a": 0.23894898839490541,
-      "b": -0.8098915759743398
+      "a": 0.13241935608334277,
+      "b": -1.9795462357070288
      },
      {
       "method": "sigmoid",
-      "a": 0.02105116493721736,
-      "b": -3.3644321689279004
+      "a": 0.014551586480850117,
+      "b": -3.0967850118426528
      },
      {
       "method": "sigmoid",
-      "a": 0.6618804578363268,
-      "b": 2.092621250985167
+      "a": 0.42898729156759335,
+      "b": 2.3695554388629536
      }
     ]
    }
@@ -457,23 +457,23 @@
     "params": [
      {
       "method": "sigmoid",
-      "a": 0.8731569935457179,
-      "b": 1.4217437668327044
+      "a": 0.9967121785843857,
+      "b": 1.4451998188232962
      },
      {
       "method": "sigmoid",
-      "a": 0.381814986007181,
-      "b": -0.39303787011944524
+      "a": 0.1389752195642441,
+      "b": -1.3745114759127406
      },
      {
       "method": "sigmoid",
-      "a": 0.07756125367887885,
-      "b": -3.0172783282025097
+      "a": 0.0820541946827234,
+      "b": -2.756522491452988
      },
      {
       "method": "sigmoid",
-      "a": 0.43543759064869353,
-      "b": 2.1775757709539842
+      "a": 0.22821364887136494,
+      "b": 1.6267853314858078
      }
     ]
    }
@@ -745,10 +745,10 @@
   0.0,
   0.0,
   0.0,
-  0.3517,
-  0.9496,
+  0.3492,
+  0.9476,
   0.0,
-  0.0921,
+  0.1111,
   0.0,
   0.0,
   0.0,

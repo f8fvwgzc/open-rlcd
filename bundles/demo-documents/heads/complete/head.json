@@ -2,19 +2,19 @@
  "head": "complete",
  "type": "score",
  "model": "logreg",
- "trained_at": "2026-11-07T13:39:10Z",
+ "trained_at": "2026-11-07T15:10:59Z",
  "metrics": {
-  "n_holdout": 318,
-  "brier": 0.195936,
-  "log_loss": 0.381588,
-  "accuracy": 0.880503,
-  "ece": 0.035744,
-  "brier_skill_score": 0.567036,
-  "baseline_brier": 0.452547,
-  "baseline_log_loss": 0.884163,
-  "baseline_accuracy": 0.720126,
+  "n_holdout": 316,
+  "brier": 0.281566,
+  "log_loss": 0.53306,
+  "accuracy": 0.841772,
+  "ece": 0.086898,
+  "brier_skill_score": 0.312867,
+  "baseline_brier": 0.409769,
+  "baseline_log_loss": 0.831899,
+  "baseline_accuracy": 0.756329,
   "has_skill": true,
-  "brier_gain_lower_95": 0.223613,
+  "brier_gain_lower_95": 0.100904,
   "calibration_method": "sigmoid",
   "verdict": {
    "low": "act",
@@ -26,47 +26,47 @@
   "low": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 279 act-tier rows at low stakes, accuracy 0.913978 (95% Wilson 0.875198-0.941514) against a mean prediction of 0.907306"
+   "reason": "holdout: 267 act-tier rows at low stakes, accuracy 0.857678 (95% Wilson 0.810688-0.894522) against a mean prediction of 0.891442"
   },
   "medium": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 224 act-tier rows at medium stakes, accuracy 0.928571 (95% Wilson 0.887133-0.955558) against a mean prediction of 0.935388"
+   "reason": "holdout: 214 act-tier rows at medium stakes, accuracy 0.897196 (95% Wilson 0.849259-0.931126) against a mean prediction of 0.916262"
   },
   "high": {
    "max_tier": "act",
    "tier": 2,
-   "reason": "holdout: 92 act-tier rows at high stakes, accuracy 0.956522 (95% Wilson 0.893483-0.982964) against a mean prediction of 0.96597"
+   "reason": "holdout: 32 act-tier rows at high stakes, accuracy 0.96875 (95% Wilson 0.842557-0.994462) against a mean prediction of 0.96292"
   }
  },
  "calibration": {
   "method": "sigmoid",
-  "why": "sigmoid: the smallest class has 5 trusted rows in some calibration block (isotonic needs >= 3000)",
+  "why": "sigmoid: the smallest class has 7 trusted rows in some calibration block (isotonic needs >= 3000)",
   "folds": [
    {
-    "n_train": 987,
-    "n_train_trusted": 987,
-    "n_calibration": 284
-   },
-   {
-    "n_train": 999,
-    "n_train_trusted": 999,
-    "n_calibration": 272
-   },
-   {
-    "n_train": 1005,
-    "n_train_trusted": 1005,
+    "n_train": 994,
+    "n_train_trusted": 994,
     "n_calibration": 266
    },
    {
-    "n_train": 1037,
-    "n_train_trusted": 1037,
-    "n_calibration": 234
+    "n_train": 998,
+    "n_train_trusted": 998,
+    "n_calibration": 262
    },
    {
-    "n_train": 1056,
-    "n_train_trusted": 1056,
-    "n_calibration": 215
+    "n_train": 983,
+    "n_train_trusted": 983,
+    "n_calibration": 277
+   },
+   {
+    "n_train": 1042,
+    "n_train_trusted": 1042,
+    "n_calibration": 218
+   },
+   {
+    "n_train": 1023,
+    "n_train_trusted": 1023,
+    "n_calibration": 237
    }
   ],
   "ensemble_members": 5,
@@ -74,23 +74,25 @@
  },
  "conformal": null,
  "data": {
-  "rows": 1589,
-  "trusted": 1589,
+  "rows": 1576,
+  "trusted": 1576,
   "by_source": {
-   "synthetic": 1589
+   "synthetic": 1576
   },
   "groups": 208,
-  "time_from": "2025-01-10T00:25:41Z",
-  "time_to": "2025-09-30T22:57:45Z",
-  "development_rows": 1271,
-  "development_trusted": 1271,
-  "holdout_rows": 318,
+  "time_from": "2025-01-14T20:04:18Z",
+  "time_to": "2030-12-20T00:56:27Z",
+  "development_rows": 1260,
+  "development_trusted": 1260,
+  "holdout_rows": 316,
   "purged_rows": 0,
   "ordering": "group",
   "split": {
-   "holdout_groups": 40,
+   "holdout_groups": 43,
    "groups": 208
   }
  },
- "notes": []
+ "notes": [
+  "groups are ordered by their first timestamp and the holdout is the latest groups; development keeps every row of the earlier groups (also rows dated inside the holdout period) and no label-window purge applies between groups. If rows of different groups share time context (a market, a season, a policy change), set `train.ordering: time`"
+ ]
 }

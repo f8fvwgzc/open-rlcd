@@ -3,7 +3,9 @@
     pack_config.queries: ./queries.jsonl      (or .csv with a `query` column, or a .json array)
 
 A JSONL row: `{"query": "...", "time": ISO | epoch, "group": "...", "answer": "...", "evidence": [...]}`; only
-`query` is required. `evidence` (what the production system actually showed the LLM) is a list of chunk objects
+`query` is required. `time` is also each state's `now`, the reference time of the document-age features; log it:
+/v1/decide measures age from the time of the request, and a row without `time` measures it relative to the newest
+candidate (another distribution) or not at all. `evidence` (what the production system actually showed the LLM) is a list of chunk objects
 `{id, text, title?, ...}`, chunk ids of the local corpus, or plain strings.
 
 For every query, retrieval runs against the local corpus (top `label_top_k`, default 5) and yields:

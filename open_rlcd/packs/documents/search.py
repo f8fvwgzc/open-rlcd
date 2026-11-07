@@ -4,10 +4,11 @@
 generator, so the candidates the heads learn from look exactly like the ones they judge at serve time.
 
 Why the link step: a multi-hop question ("who leads the team that owns X?") needs the document X's page links
-to. The entity graph finds it in principle, but its hop-2 neighbourhood is crowded by every chunk that shares a
-common token with X's page (codes like SKU or USD), and only `k` graph hits are kept. Explicit links (Markdown /
-HTML hyperlinks, `links` of JSON records) are a far more specific signal, so the documents linked from the top
-`LINK_FROM` candidates are added (at most `MAX_LINKED` chunks), scored by the same cosine as every candidate and
+to. The entity graph ranks such pages first among its 2-hop rows, but all 1-hop rows (every chunk that names X,
+news items included) come before them and only `k` graph hits are kept. Explicit links (Markdown / HTML
+hyperlinks, `links` of JSON records) are a far more specific signal, so the documents linked from the top
+`LINK_FROM` candidates and from every 1-hop graph hit (a chunk that names a query entity, wherever fusion ranked
+it) are added (at most `MAX_LINKED` chunks, in candidate order), scored by the same cosine as every candidate and
 marked as graph hits at path length 2. It adds candidates, never removes or reorders the retriever's.
 
 What this does not do: it does not follow links transitively, and it does not read links out of chunk text (only
@@ -32,7 +33,8 @@ def candidates(corpus: Any, query: str, k: int) -> list[dict]:
         return cands
     have = {c["id"] for c in cands}
     linked: list[str] = []
-    for c in cands[:LINK_FROM]:
+    sources = [c for i, c in enumerate(cands) if i < LINK_FROM or (c.get("graph") or {}).get("path_length") == 1]
+    for c in sources:
         doc = corpus.doc(c.get("doc_id")) if c.get("doc_id") is not None else None
         for target in (doc or {}).get("links") or []:
             for cid in (corpus.doc(target) or {}).get("chunk_ids") or []:

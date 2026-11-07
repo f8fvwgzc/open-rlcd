@@ -471,6 +471,10 @@ def build_world(seed: int = 7) -> World:
     people = [*leads.values(), *(n for v in STAFF.values() for n in v)]
     entity_names = {"team": [t[0] for t in TEAMS], "person": people, "office": list(OFFICES),
                     "department": list(DEPARTMENTS), "product": names}
-    terms = [n for n in people if any("一" <= ch <= "鿿" for ch in n)]
+    # graph terms: names surface patterns cannot find. Kanji names have no capitals, and Mongolian capitalises only
+    # the first word of a multi-word name ("Үйл ажиллагааны хэлтэс" would otherwise be the fragment "Үйл").
+    kanji = [n for n in people if any("一" <= ch <= "鿿" for ch in n)]
+    terms = [*kanji, *(d[lang] for d in DEPARTMENTS.values() for lang in ("ja", "mn")),
+             *(o["ja"] for o in OFFICES.values() if any("一" <= ch <= "鿿" for ch in o["ja"]))]
     return World(docs=docs, products=products, teams=teams, fact_docs=fact_docs, names=entity_names, leads=leads,
                  team_products=team_products, departments=departments, terms=terms)

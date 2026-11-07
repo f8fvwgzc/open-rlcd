@@ -17,18 +17,27 @@ retriever still missed is appended (counted in the result as `gold_injected`).
 Labels:
   * response_type / route / needs_graph from the query family;
   * chunk_relevant: gold chunks true, the other retrieved chunks (similar products, news naming the product)
-    false;
+    false. A real product's sheet is gold (relevant) even when the question also asks for a field no document
+    states, or compares it with a product that does not exist: the sheet holds part of what is needed;
   * answerable: gold evidence (+ distractors) true; evidence missing a gold chunk, or any evidence for a question
-    about something the corpus does not contain, false;
+    about something the corpus does not contain (or a field no document states), false; an empty evidence set
+    false (decide() keeps no evidence when no candidate reaches min_relevance, so the head must be calibrated on
+    that state too: `EMPTY_EVIDENCE_SHARE` of the queries get such a row);
   * grounded / complete / risk_tier on drafted answers: correct answers composed from the gold facts (grounded,
     complete 3), the same answer with one number / name / value changed (not grounded, still complete 3),
-    partial answers (grounded, complete 1-2), answers about another entity (not grounded, complete 0); risk tier
-    from the topic (specs 0, internal 1, money 2, legal / safety / medical 3).
+    partial answers (grounded, complete 1-2 by the share of facts kept; for a multi-hop question, whose facts are
+    the link and the asked fact, 3 when the asked fact is kept and 0 when only the link is), answers about another
+    entity (not grounded, complete 0); risk tier from the topic (specs 0, internal organisation facts 1, money 2,
+    legal / safety / medical 3).
 
 Splits: `group` = the surface template (family, language, paraphrase, slot pattern), so the holdout is made of
-phrasings the heads never saw; `t` = synthetic timestamps over nine months. Entities recur across templates: the
-holdout measures generalisation to new phrasings of known documents, not to a new corpus. Metrics on this data
-are a sanity check of the pipeline, not accuracy on anyone's real traffic.
+phrasings the heads never saw; `t` = synthetic timestamps over six years from 2025-01-06 (`SPAN_DAYS`), and every
+state that carries document timestamps also carries `now` = `t`. The corpus itself is dated before 2025, so
+document ages run from weeks to about seven years; decide() measures age from the time of the request, which then
+falls inside the range the heads were trained on (a nine-month window made every request after it look like an
+unseen, older corpus, and test outcomes depend on the calendar date). The labels never depend on age. Entities
+recur across templates: the holdout measures generalisation to new phrasings of known documents, not to a new
+corpus. Metrics on this data are a sanity check of the pipeline, not accuracy on anyone's real traffic.
 """
 from __future__ import annotations
 
@@ -61,7 +70,8 @@ from .world import (
     fake_product_name,
 )
 
-SPAN_DAYS = 270
+SPAN_DAYS = 6 * 365            # query times (and `now`) spread over six years; template births keep their order
+EMPTY_EVIDENCE_SHARE = 0.15     # queries that also get an answerable=false row with empty evidence
 
 # ----------------------------------------------------------------------------- templates
 
@@ -264,6 +274,9 @@ class Generator:
         if not (fake or missing):
             d = self.by_name[p]
             q.gold, q.answerable, q.facts = [d.chunk_id], True, [(p, d.facts[f]) for f in fields]
+        elif missing:
+            # the sheet holds two of the three fields: relevant (chunk_relevant), not sufficient (answerable false)
+            q.gold = [self.by_name[p].chunk_id]
         return q
 
     def _fact_doc(self) -> Doc:
@@ -332,6 +345,8 @@ class Generator:
         if not fake:
             q.gold, q.answerable = [a.chunk_id, b.chunk_id], True
             q.facts = [(a.subject, a.facts[x]) for x in attrs] + [(b.subject, b.facts[x]) for x in attrs]
+        else:
+            q.gold = [a.chunk_id]          # one side of the comparison: relevant, not sufficient
         return q
 
     def _list(self) -> Q:
@@ -363,7 +378,7 @@ class Generator:
         d = None if fake else r.choice(self.w.products)
         p = fake_product_name(r, self.taken) if fake else d.subject
         q = Q(_fill(r, lang, MULTIHOP[rel][lang][pi], P=p), lang, "multihop", f"multihop:{lang}:{pi}:{rel}",
-              "direct_answer", "graph", 0 if rel == "office" else 1)
+              "direct_answer", "graph", 1)
         if d is not None:
             t = self.team_doc[d.meta["team"]]
             q.gold, q.answerable = [d.chunk_id, t.chunk_id], True
@@ -493,6 +508,15 @@ def complete_level(k: int, n: int) -> int:
     return 2 if k / n >= 2 / 3 else 1
 
 
+def partial_level(q: Q, keep: list[int], n: int) -> int:
+    """`complete` of an answer that states only the facts / items `keep` of `n`. A multi-hop question's facts are
+    [the link (owning team), the asked fact (lead / office / department)]: the asked fact alone answers it (3), the
+    link alone misses the question (0)."""
+    if q.family == "multihop" and q.facts:
+        return 3 if len(q.facts) - 1 in keep else 0
+    return complete_level(len(keep), n)
+
+
 # ----------------------------------------------------------------------------- candidates and evidence
 
 
@@ -554,6 +578,7 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
     t_rng = random.Random(f"time:{seed}")
     births: dict[str, float] = {}
     m_rng = random.Random(f"minimal:{seed}")
+    e_rng = random.Random(f"empty:{seed}")
     items: list[LabelItem] = []
     labels: list[tuple[str, str, Any]] = []
     langs: dict[str, int] = {}
@@ -623,6 +648,11 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
             ev = cands[: rng.randint(1, 5)]
             add("e:none", "query_evidence", {"query": q.text, "evidence": ev, "candidates": cands, "now": now},
                 {"answerable": False})
+        # an empty evidence set, as decide() builds it when no candidate reaches min_relevance (with the candidates
+        # the retriever returned): never sufficient
+        if e_rng.random() < EMPTY_EVIDENCE_SHARE and q.family != "escalate":
+            add("e:empty", "query_evidence", {"query": q.text, "evidence": [], "candidates": raw, "now": now},
+                {"answerable": False})
         # ---- evaluator rows on drafted answers
         if q.answerable and good_ev:
             ev_text = " ".join(c.get("text") or "" for c in good_ev)
@@ -635,7 +665,7 @@ def write_synth(home: Path, encoder_config: dict | None = None, seed: int = 7, n
                 k = rng.randint(1, n - 1)
                 keep = sorted(rng.sample(range(n), k))
                 drafts.append(("partial", compose(q, q.lang, keep=keep, style=rng.randrange(4)), True,
-                               complete_level(k, n)))
+                               partial_level(q, keep, n)))
             if rng.random() < 0.3:
                 off = _off_topic(world, q, good_ev, rng)
                 if off:
