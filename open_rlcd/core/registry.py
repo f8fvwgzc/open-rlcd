@@ -9,6 +9,10 @@
 `rlcd-latest` is an alias of the newest version; old versions stay addressable through `model`. A retrain that
 touches some heads carries the others over unchanged, so a version always describes the whole model. Bundles
 are only ever loaded from inside RLCD_HOME (registry.json is data: a path in it that escapes the home is refused).
+
+A weight-edit candidate (core/patch.py, `commit_edit`) is a version like any other, plus an `edit` record. It
+becomes rlcd-latest only when its holdout gate passed and its base is still rlcd-latest; one whose gate failed is
+kept for inspection and never served (`servable`).
 """
 from __future__ import annotations
 
@@ -79,6 +83,21 @@ class Registry:
     def entry(self, version: str) -> dict | None:
         return self.registry()["versions"].get(version)
 
+    def servable(self, version: str) -> bool:
+        """False only for a weight-edit candidate whose holdout gate failed: it stays addressable for reports and
+        exports, but no request is ever answered with it."""
+        e = self.entry(version) or {}
+        return (e.get("edit") or {}).get("servable", True) is not False
+
+    def edit_attempts(self, head: str, holdout_sha256: str) -> int:
+        """How many edit candidates of `head` this home has already scored on the holdout with this id hash. Each
+        scoring spends some of the holdout's credibility (core/patch.py tightens the bound accordingly)."""
+        n = 0
+        for e in self.registry()["versions"].values():
+            if ((e.get("edit") or {}).get("holdouts") or {}).get(head) == holdout_sha256:
+                n += 1
+        return n
+
     # ------------------------------------------------------------------ bundles
     def _dir(self, version: str) -> Path:
         e = self.entry(version)
@@ -144,27 +163,81 @@ class Registry:
                 reg.setdefault("history", []).append({"at": now_iso(), "from": prev_vid, "to": vid, "reason": None,
                                                       "by": None, "kind": "train"})
             self._write(reg)
-            for name, th in trained.items():   # the Bernoulli ledger restarts from the new holdout
-                self.ledger.reset(name, {**th.ledger, "model_version": vid, "valid_for": [vid]})
-            # A carried-over head is the very same model, so its evidence (holdout counts plus the outcomes scored
-            # since) carries over too, and the table stays valid for every version that served this head: the
-            # Bernoulli gate keeps its evidence for the new version, and an outcome posted now for a decision made
-            # before the retrain still updates it (`valid_for`, which feedback and the gate check).
-            # read and reset under one hold of the ledger: an outcome another process scores meanwhile is not lost
-            with self.ledger.exclusive():
-                for name, (old_dir, entry) in carried.items():
-                    table = self.ledger.table(name)
-                    if table and (table.get("model_version") == prev_vid or prev_vid in (table.get("valid_for") or [])):
-                        # live for the version being replaced (also through valid_for, e.g. after a rollback): its
-                        # outcomes scored since the holdout carry over with the very same head
-                        valid = list(dict.fromkeys([*(table.get("valid_for") or []), table.get("model_version"), prev_vid]))
-                        valid = [v for v in valid if v]
-                    else:
-                        table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
-                        valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
-                    valid = list(dict.fromkeys([*valid, vid]))
-                    self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
+            self._restart_ledger(vid, prev_vid, trained, carried)
             return vid
+
+    def _restart_ledger(self, vid: str, prev_vid: str | None, trained: dict[str, Any],
+                        carried: dict[str, tuple[Path, dict]]) -> None:
+        """`vid` just became rlcd-latest: the Bernoulli ledger of each new head restarts from its new holdout."""
+        for name, th in trained.items():
+            self.ledger.reset(name, {**th.ledger, "model_version": vid, "valid_for": [vid]})
+        # A carried-over head is the very same model, so its evidence (holdout counts plus the outcomes scored
+        # since) carries over too, and the table stays valid for every version that served this head: the
+        # Bernoulli gate keeps its evidence for the new version, and an outcome posted now for a decision made
+        # before the retrain still updates it (`valid_for`, which feedback and the gate check).
+        # read and reset under one hold of the ledger: an outcome another process scores meanwhile is not lost
+        with self.ledger.exclusive():
+            for name, (old_dir, entry) in carried.items():
+                table = self.ledger.table(name)
+                if table and (table.get("model_version") == prev_vid or prev_vid in (table.get("valid_for") or [])):
+                    # live for the version being replaced (also through valid_for, e.g. after a rollback): its
+                    # outcomes scored since the holdout carry over with the very same head
+                    valid = list(dict.fromkeys([*(table.get("valid_for") or []), table.get("model_version"), prev_vid]))
+                    valid = [v for v in valid if v]
+                else:
+                    table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
+                    valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
+                valid = list(dict.fromkeys([*valid, vid]))
+                self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
+
+    def commit_edit(self, base_version: str, trained: dict[str, Any], *, edit: dict, carry: bool = True,
+                    pack: dict | None = None, feature_version: str | None = None, encoder: dict | None = None,
+                    data_card: dict | None = None, notes: list[str] | None = None) -> dict:
+        """Save a weight-edit candidate as a new version and decide, under the lock, whether it serves.
+
+        `trained`: the edited (head edit) or retrained (encoder edit) heads, already scored on the base's holdout;
+        `carry`: copy the base version's other heads unchanged (a head edit; an encoder edit changes every head's
+        features, so nothing is carried); `edit["passed"]` / `edit["reasons"]`: the gate's result (core/patch.py).
+        The candidate becomes rlcd-latest only if the gate passed AND `base_version` is still rlcd-latest (an edit
+        is judged against its base, not against whatever is newer). Otherwise it is kept as a non-latest version
+        with the reason; a candidate whose gate failed is never served. Returns the final edit record + version."""
+        with self._lock:
+            reg = self.registry()
+            base = self.bundle(base_version)
+            if base is None:
+                raise UnknownModel(base_version)
+            vid = f"{MODEL_PREFIX}{int(reg['next'])}"
+            carried: dict[str, tuple[Path, dict]] = {}
+            if carry:
+                for name in base.names():
+                    if name not in trained:
+                        h = base.head(name)
+                        carried[name] = (h.dir, {**h.entry, "trained_in": h.entry.get("trained_in") or base_version})
+            latest_before = reg["latest"]
+            passed = bool(edit.get("passed"))
+            promoted = passed and latest_before == base_version
+            if promoted:
+                reason = "the paired holdout test shows a reliable gain over the base and no verdict is weaker"
+            elif passed:
+                reason = (f"the gate passed, but the base {base_version} is no longer rlcd-latest ({latest_before}): "
+                          f"an edit is only promoted over the version it was judged against; edit {latest_before}")
+            else:
+                reason = "; ".join(edit.get("reasons") or ["the gate did not pass"])
+            edit = {**edit, "promoted": promoted, "servable": passed, "reason": reason}
+            meta = BD.write_bundle(self.home / "models" / vid, version=vid, created_at=now_iso(),
+                                   pack=pack or base.meta.get("pack") or {},
+                                   feature_version=feature_version or base.meta.get("feature_version"),
+                                   encoder=encoder if encoder is not None else base.meta.get("encoder"),
+                                   policy=base.meta.get("policy") or {}, trained=trained, carried=carried,
+                                   data_card=data_card if data_card is not None else base.meta.get("data_card"),
+                                   notes=notes, extra={"edit": edit})
+            self._register(reg, vid, meta, {"edit": edit_summary(edit)})
+            if not promoted:
+                reg["latest"] = latest_before
+            self._write(reg)
+            if promoted:
+                self._restart_ledger(vid, base_version, trained, carried)
+            return {"version": vid, **edit}
 
     def set_latest(self, version: str, *, reason: str | None = None, by: str | None = None,
                    kind: str = "promote") -> dict:
@@ -262,7 +335,12 @@ class Registry:
             meta = {**meta, "version": vid, "imported_from": meta.get("version"), "heads": heads}
             (dest / "model.json").write_text(json.dumps(meta, indent=1, ensure_ascii=False), encoding="utf-8")
             latest_before = reg["latest"]
-            self._register(reg, vid, meta, {"imported_from": meta["imported_from"], "imported_at": now_iso()})
+            extra = {"imported_from": meta["imported_from"], "imported_at": now_iso()}
+            if isinstance(meta.get("edit"), dict):   # a weight-edit candidate keeps its status across export / import
+                extra["edit"] = edit_summary(meta["edit"])
+                if meta["edit"].get("servable") is False:
+                    make_latest = False
+            self._register(reg, vid, meta, extra)
             if not make_latest:
                 reg["latest"] = latest_before
             if reg["latest"] == vid and latest_before != vid:
@@ -278,6 +356,17 @@ class Registry:
                 if make_latest:
                     self.ledger.reset(name, {**table, "model_version": vid, "valid_for": [vid]})
             return vid
+
+
+def edit_summary(edit: dict) -> dict:
+    """The registry's copy of a weight edit's record: enough to list it, serve it or not, and count how often a
+    holdout has judged an edit (`holdouts`: head -> sha256 of the holdout row ids)."""
+    keep = ("kind", "base_version", "sha256", "author", "parameters_touched", "passed", "promoted", "servable",
+            "reason", "holdouts")
+    out = {k: edit.get(k) for k in keep if k in edit}
+    if "author" not in out and isinstance(edit.get("provenance"), dict):
+        out["author"] = edit["provenance"].get("author")
+    return out
 
 
 def _vkey(vid: str) -> int:

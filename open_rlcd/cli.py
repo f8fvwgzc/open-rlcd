@@ -13,6 +13,8 @@
     rlcd serve --port 8095                     the HTTP API
     rlcd bench                                 p50 / p95 / p99 per stage on this machine
     rlcd export ./bundle | rlcd import ./bundle | rlcd push --hf user/repo
+    rlcd patch --head h --delta edit.safetensors --author "LLM: x" --tuned-on development
+                                               EXPERIMENTAL weight edit: serves only if the holdout supports it
     rlcd demo                                  synthetic documents project, trained, in ./rlcd-demo
 
   the control layer (docs/control-layer.md)
@@ -76,7 +78,7 @@ HEADER = """# Open RLCD project configuration. Every key: docs/configuration.md.
 # Commands that work on a project's own files (its data, its labels, the heads rlcd.yaml configures): without an
 # rlcd.yaml they used to fall back to a default documents project in the current folder, create ./var there and
 # download an encoder before failing. They stop before anything is read, written or downloaded.
-NEEDS_PROJECT = frozenset({"ingest", "label", "train"})
+NEEDS_PROJECT = frozenset({"ingest", "label", "train", "patch"})
 # Commands that read or write a model home (registry, logs, ledger). They run in a project, or against a home
 # that was named (--home, RLCD_HOME) or already exists in ./var (what `rlcd serve` leaves after a clone); they
 # no longer invent an empty ./var in whatever folder they are started from.
@@ -408,7 +410,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     from .report.model_card import write_model_card
 
     svc = _service(args)
-    version = svc.resolve(args.model)
+    version = svc.resolve(args.model, serve=False)
     b = svc.bundle(version)
     if b is None:
         print("no trained model yet: run `rlcd train` first", file=sys.stderr)
@@ -525,7 +527,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     from .report.model_card import write_model_card
 
     svc = _service(args)
-    version = svc.resolve(args.model)
+    version = svc.resolve(args.model, serve=False)
     if svc.bundle(version) is None:
         print("no trained model to export", file=sys.stderr)
         return 1
@@ -554,7 +556,7 @@ def cmd_push(args: argparse.Namespace) -> int:
     from .core.bundle import validate
 
     svc = _service(args)
-    version = svc.resolve(args.model)
+    version = svc.resolve(args.model, serve=False)
     b = svc.bundle(version)
     if b is None:
         print("no trained model to push", file=sys.stderr)
@@ -881,6 +883,63 @@ def cmd_config(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_ids(path: str | None) -> list[str] | None:
+    if not path:
+        return None
+    return [ln.strip() for ln in Path(path).expanduser().read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _patch_table(res: dict) -> str:
+    def f(x, nd=4):
+        return "–" if x is None else f"{x:+.{nd}f}" if isinstance(x, float) else str(x)
+
+    rows = [f"{'head':<18}{'Brier gain':>11}{'lower':>9}{'logloss gain':>13}{'lower':>9}  {'verdicts (base -> edit)':<34}"
+            f"gate"]
+    for name, j in (res.get("heads") or {}).items():
+        t = j.get("paired_test") or {}
+        b, ll = t.get("brier") or {}, t.get("log_loss") or {}
+        vb, vc = j.get("verdict_base") or {}, j.get("verdict_candidate") or {}
+        verdicts = ", ".join(f"{s} {vb.get(s)}->{vc.get(s)}" for s in vb) or "–"
+        rows.append(f"{name:<18}{f(b.get('mean_gain')):>11}{f(b.get('lower')):>9}{f(ll.get('mean_gain')):>13}"
+                    f"{f(ll.get('lower')):>9}  {verdicts[:33]:<34}{'pass' if j.get('passed') else 'FAIL'}")
+    return "\n".join(rows)
+
+
+def cmd_patch(args: argparse.Namespace) -> int:
+    """EXPERIMENTAL. Exit status: 0 = promoted to rlcd-latest, 3 = kept as a non-latest version, 1 = refused."""
+    from .core import patch as PT
+
+    svc = _service(args)
+    common = {"base": args.base, "author": args.author, "tuned_on": args.tuned_on,
+              "tuned_on_ids": _read_ids(args.tuned_on_ids), "description": args.description}
+    try:
+        if args.delta:
+            if not args.head:
+                print("--head is required with --delta (the head whose arrays the deltas edit)", file=sys.stderr)
+                return 2
+            res = PT.edit_head(svc, head=args.head, delta_path=Path(args.delta), **common)
+        else:
+            res = PT.edit_encoder(svc, onnx_path=Path(args.encoder), **common)
+    except PT.EditRefused as e:
+        print(f"rlcd patch: edit refused, nothing was scored or saved: {e}", file=sys.stderr)
+        return 1
+    if args.json:
+        _print(res)
+    else:
+        touched = res.get("parameters_touched")
+        print(f"{res['kind']} edit {res['sha256'][:12]} of {res['base_version']} by {res.get('author')} "
+              f"({'?' if touched is None else touched} parameters touched) -> {res['version']}")
+        print(_patch_table(res))
+        for n in res.get("notes") or []:
+            print(f"note: {n}")
+        if res.get("promoted"):
+            print(f"\n{res['version']} is now rlcd-latest: {res['reason']}.")
+        else:
+            served = "it can be served by name" if res.get("servable") else "it is never served"
+            print(f"\n{res['version']} is kept, NOT promoted ({served}): {res['reason']}.")
+    return 0 if res.get("promoted") else 3
+
+
 # ----------------------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -993,6 +1052,25 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--private", action="store_true")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_push)
+
+    s = sub.add_parser("patch", help="EXPERIMENTAL: try a weight edit as a candidate version; it becomes rlcd-latest "
+                                     "only if a paired holdout test shows a reliable gain and no verdict is weaker")
+    s.add_argument("--base", help="version to edit (default: rlcd-latest)")
+    what = s.add_mutually_exclusive_group(required=True)
+    what.add_argument("--delta", help="safetensors file of additive deltas to one head's logistic-regression arrays: "
+                                      "member_<k>.coef | .intercept | .mean | .scale | .fill")
+    what.add_argument("--encoder", help="replacement ONNX text encoder (documents pack): a new feature version, so "
+                                        "every head is retrained on it")
+    s.add_argument("--head", help="the head --delta edits")
+    s.add_argument("--author", help="who or what produced the edit: manual | script:<name> | 'LLM: <model>'")
+    s.add_argument("--tuned-on", dest="tuned_on", choices=["none", "development", "holdout"],
+                   help="what the edit was chosen or tuned on; the holdout only judges, so 'holdout' is refused")
+    s.add_argument("--tuned-on-ids", dest="tuned_on_ids",
+                   help="file with the row ids the edit was chosen or tuned on, one per line (refused if any is a "
+                        "holdout row)")
+    s.add_argument("--description", help="what the edit is meant to do")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_patch)
 
     s = sub.add_parser("demo", help="build and train a synthetic documents project")
     s.add_argument("--dir", default="rlcd-demo")

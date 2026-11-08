@@ -229,6 +229,14 @@ vector database and index settings — measure it with your own store.
 `/v1/calibration`, `/v1/bernoulli`, `/v1/receipts/{id}`, `/v1/metrics`, `/v1/review`. Full contract and the
 extensions table: [docs/contract.md](docs/contract.md).
 
+## Weight edits (experimental)
+
+`rlcd patch` takes a direct edit of the weights (safetensors deltas to a head, or a replacement ONNX encoder),
+made by hand, by a script or by an LLM, and treats it as a claim. The edit is recalibrated on trusted rows and
+scored once on the base version's untouched holdout. It becomes `rlcd-latest` only if a paired block-bootstrap
+test shows a reliable gain over the base and no verdict gets weaker; otherwise it is kept, with the reason, and a
+failed edit never serves. See [docs/weight-edits.md](docs/weight-edits.md), including what edits cannot do.
+
 ## Open-weight bundles
 
 A trained model is a directory: `model.json` (version, heads, classes, feature version, encoder id + sha256,

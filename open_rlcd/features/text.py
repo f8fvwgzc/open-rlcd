@@ -191,22 +191,31 @@ class OnnxEncoder:
     `quantize_locally=True` downloads the fp32 `onnx/model.onnx` and writes an int8 copy with
     `onnxruntime.quantization.quantize_dynamic` (that needs the `onnx` package too). e5 models get their
     "query: " / "passage: " prefixes; other models get none.
+
+    `path` loads a local ONNX file instead of the Hub's (an edited encoder registered by `rlcd patch --encoder`):
+    a path relative to `home`, which must stay inside it (a bundle's config is data and never points outside the
+    home). The tokenizer is `tokenizer` (also inside `home`) or the Hub's `tokenizer.json` of `model_id`.
     """
 
     def __init__(self, model_id: str = DEFAULT_MODEL_ID, file: str = DEFAULT_ONNX_FILE, home: Path | None = None,
                  max_length: int = 512, batch_size: int = 32, quantize_locally: bool = False,
-                 expected_sha256: str | None = None):
+                 expected_sha256: str | None = None, path: str | None = None, tokenizer: str | None = None):
         self.model_id, self.max_length, self.batch_size = model_id, int(max_length), max(1, int(batch_size))
-        self.quantize_locally = bool(quantize_locally)
+        self.quantize_locally = bool(quantize_locally) and not path
         self.file = "onnx/model.onnx" if self.quantize_locally else file
         self.cache_dir = (Path(home).expanduser() / "encoders") if home is not None else None
         self.prefixes = ("query: ", "passage: ") if "e5" in model_id.lower() else ("", "")
+        self.path, self.tokenizer_path = (str(path) if path else None), (str(tokenizer) if tokenizer else None)
         ort = _lazy("onnxruntime")
         tokenizers = _lazy("tokenizers")
-        model_path = self._download(self.file)
-        if self.quantize_locally:
-            model_path = self._quantize(model_path)
-        tok_path = self._download("tokenizer.json")
+        if self.path:
+            model_path = self._local(home, self.path, "encoder")
+        else:
+            model_path = self._download(self.file)
+            if self.quantize_locally:
+                model_path = self._quantize(model_path)
+        tok_path = self._local(home, self.tokenizer_path, "tokenizer") if self.tokenizer_path else \
+            self._download("tokenizer.json")
         self.model_path = model_path
         self.sha256 = file_sha256(model_path)
         if expected_sha256 and expected_sha256 != self.sha256:
@@ -228,7 +237,21 @@ class OnnxEncoder:
         dim = self.session.get_outputs()[0].shape[-1]
         self.dim = int(dim) if isinstance(dim, int) else int(self._run(["dimension probe"]).shape[1])
         suffix = "#int8-local" if self.quantize_locally else ""
-        self.id = f"onnx:{model_id}/{self.file}{suffix}"
+        self.id = f"onnx:{model_id}/{self.path}" if self.path else f"onnx:{model_id}/{self.file}{suffix}"
+
+    @staticmethod
+    def _local(home: Path | None, rel: str, what: str) -> Path:
+        """A file named by a config (bundle data): relative to `home`, inside it, a regular file, not a symlink."""
+        if home is None:
+            raise EncoderError(f"a local {what} file ({rel!r}) needs the home directory it lives in")
+        root = Path(home).expanduser().resolve()
+        p = Path(rel)
+        if p.is_absolute() or ".." in p.parts:
+            raise EncoderError(f"the {what} path {rel!r} must be relative to the home directory and stay inside it")
+        full = root / p
+        if full.is_symlink() or not full.is_file() or not full.resolve().is_relative_to(root):
+            raise EncoderUnavailable(f"the {what} file {rel!r} is not a regular file inside {root}")
+        return full
 
     def _download(self, filename: str) -> Path:
         hub = _lazy("huggingface_hub")
@@ -384,9 +407,14 @@ def encoder_config(enc: Encoder) -> dict:
     if isinstance(base, HashingEncoder):
         return {"kind": "hashing", **out, "seed": base.seed}
     if isinstance(base, OnnxEncoder):
-        return {"kind": "onnx", **out, "model_id": base.model_id,
-                "file": DEFAULT_ONNX_FILE if base.quantize_locally else base.file,
-                "quantize_locally": base.quantize_locally, "max_length": base.max_length}
+        cfg = {"kind": "onnx", **out, "model_id": base.model_id,
+               "file": DEFAULT_ONNX_FILE if base.quantize_locally else base.file,
+               "quantize_locally": base.quantize_locally, "max_length": base.max_length}
+        if base.path:   # a local (edited) model file inside the home, and its tokenizer when it has its own
+            cfg["path"] = base.path
+        if base.tokenizer_path:
+            cfg["tokenizer"] = base.tokenizer_path
+        return cfg
     return {"kind": "custom", **out}
 
 
@@ -394,7 +422,8 @@ def make_encoder(config: dict | None, home: Path) -> Encoder:
     """Build an encoder from config and wrap it in a `CachedEncoder` under `<home>/cache/embeddings`.
 
     `{"kind": "hashing", "dim": 384, "seed": 0}` or `{"kind": "onnx", "model_id", "file", "quantize_locally",
-    "sha256": expected or None, "max_length", "batch_size"}`. None means the default ONNX e5-small encoder
+    "sha256": expected or None, "max_length", "batch_size", "path": local ONNX file inside home (optional),
+    "tokenizer": local tokenizer.json inside home (optional)}`. None means the default ONNX e5-small encoder
     (downloads once). `"cache": false` skips the cache. A `sha256` that does not match the rebuilt encoder
     raises `EncoderMismatch`."""
     cfg = dict(config or {"kind": "onnx"})
@@ -412,7 +441,8 @@ def make_encoder(config: dict | None, home: Path) -> Encoder:
                           file=str(cfg.get("file") or DEFAULT_ONNX_FILE), home=home,
                           max_length=int(cfg.get("max_length") or 512), batch_size=int(cfg.get("batch_size") or 32),
                           quantize_locally=bool(cfg.get("quantize_locally", False)),
-                          expected_sha256=cfg.get("sha256") or None)
+                          expected_sha256=cfg.get("sha256") or None, path=cfg.get("path") or None,
+                          tokenizer=cfg.get("tokenizer") or None)
     else:
         raise ValueError(f"unknown encoder kind {kind!r}; use 'hashing' (offline) or 'onnx'")
     if cfg.get("cache", True) is False:

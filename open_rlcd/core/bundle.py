@@ -97,9 +97,10 @@ def write_head(head_dir: Path, trained: Any) -> dict:
 def write_bundle(dest: Path, *, version: str, created_at: str, pack: dict, feature_version: str,
                  encoder: dict | None, policy: dict, trained: dict[str, Any],
                  carried: dict[str, tuple[Path, dict]] | None = None, data_card: dict | None = None,
-                 notes: list[str] | None = None) -> dict:
+                 notes: list[str] | None = None, extra: dict | None = None) -> dict:
     """Write a bundle directory. `trained`: name -> TrainedHead; `carried`: name -> (old head dir, old entry)
-    for heads copied unchanged from the previous version."""
+    for heads copied unchanged from the previous version; `extra`: more top-level model.json keys (a weight edit's
+    provenance: core/patch.py)."""
     dest = Path(dest)
     if dest.exists():
         raise BundleError(f"{dest} already exists")
@@ -113,7 +114,8 @@ def write_bundle(dest: Path, *, version: str, created_at: str, pack: dict, featu
         heads[name] = {**write_head(dest / "heads" / safe_dir(name), th), "trained_in": version}
     meta = {"format": FORMAT, "version": version, "created_at": created_at, "pack": pack,
             "feature_version": feature_version, "encoder": encoder, "policy": policy,
-            "retrained": sorted(trained), "heads": heads, "data_card": data_card or {}, "notes": notes or []}
+            "retrained": sorted(trained), "heads": heads, "data_card": data_card or {}, "notes": notes or [],
+            **(extra or {})}
     _dump(dest / "model.json", meta)
     return meta
 

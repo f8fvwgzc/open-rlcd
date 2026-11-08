@@ -91,6 +91,53 @@ def _reliability(rep: dict, cls: str | None = None) -> list[str]:
     return out
 
 
+def _gain(t: dict, key: str) -> str:
+    g = (t or {}).get(key) or {}
+    return f"{_fmt(g.get('mean_gain'), 4)} (one-sided lower bound {_fmt(g.get('lower'), 4)})"
+
+
+def edit_section(meta: dict) -> list[str]:
+    """The weight edit a candidate version carries: what, by whom, how much, against what, and the verdict."""
+    e = meta.get("edit")
+    if not isinstance(e, dict):
+        return []
+    prov = e.get("provenance") or {}
+    ids = prov.get("tuned_on_ids") or {}
+    touched, total = e.get("parameters_touched"), e.get("parameters_total")
+    status = ("promoted to rlcd-latest" if e.get("promoted") else
+              "kept, not promoted (servable by name)" if e.get("servable") else "kept, not promoted, never served")
+    lines = ["## Weight edit (experimental)", "",
+             "> This version is a weight edit of another version. An edit is a claim: it was recalibrated on trusted "
+             "rows and scored once on the base version's untouched holdout, and it serves only if that holdout "
+             "supports it (docs/weight-edits.md).", "",
+             f"* kind: **{e.get('kind')}** edit of `{e.get('base_version')}`; file `{e.get('file')}`, sha256 "
+             f"`{e.get('sha256')}`",
+             f"* produced by: {prov.get('author') or e.get('author')}; chosen / tuned on: {prov.get('tuned_on')}"
+             + (f" ({ids.get('n')} listed rows, sha256 `{str(ids.get('sha256'))[:16]}…`, none in the holdout)"
+                if ids else ""),
+             f"* parameters touched: {_fmt(touched)}" + (f" of {total}" if total else ""),
+             f"* result: **{status}** — {e.get('reason')}"]
+    if prov.get("description"):
+        lines.append(f"* description: {prov['description']}")
+    lines.append("")
+    heads = e.get("heads") or {}
+    if heads:
+        lines += ["| head | paired Brier gain | paired log-loss gain | attempt | verdicts (base -> edit) | gate |",
+                  "|---|---|---|---|---|---|"]
+        for name, j in heads.items():
+            t = j.get("paired_test") or {}
+            vb, vc = j.get("verdict_base") or {}, j.get("verdict_candidate") or {}
+            lines.append(f"| `{name}` | {_gain(t, 'brier')} | {_gain(t, 'log_loss')} | {_fmt(j.get('attempt'))} | "
+                         + ", ".join(f"{s}: {vb.get(s)} -> {vc.get(s)}" for s in vb) + " | "
+                         + ("pass" if j.get("passed") else "fail: " + "; ".join(j.get("reasons") or [])) + " |")
+        lines.append("")
+    for n in e.get("notes") or []:
+        lines.append(f"* note: {n}")
+    if e.get("notes"):
+        lines.append("")
+    return lines
+
+
 def model_card(bundle: Bundle) -> str:
     meta = bundle.meta
     pack = (meta.get("pack") or {}).get("name", "?")
@@ -99,6 +146,7 @@ def model_card(bundle: Bundle) -> str:
     lines = [f"# Model card — {meta['version']} ({pack} pack)", "",
              f"Created {meta.get('created_at')}. Format `{meta.get('format')}`. Feature version "
              f"`{meta.get('feature_version')}`.", ""]
+    lines += edit_section(meta)
     if card.get("synthetic_only"):
         lines += ["> **Trained on synthetic data only.** These numbers show that the pipeline works and that the "
                   "metrics are computed honestly; they say nothing about accuracy on real traffic.", ""]
@@ -148,6 +196,14 @@ def model_card(bundle: Bundle) -> str:
         for stakes, v in (h.verdict or {}).items():
             lines.append(f"* {stakes} stakes: **{v.get('max_tier')}** — {v.get('reason')}")
         lines.append("")
+        he = h.summary.get("edit")
+        if isinstance(he, dict):   # from the hash-checked head.json
+            t = he.get("paired_test") or {}
+            lines.append(f"Weight edit ({he.get('kind')}, sha256 `{str(he.get('sha256'))[:16]}…`, base "
+                         f"`{he.get('base_version')}`, by {(he.get('provenance') or {}).get('author')}): paired "
+                         f"Brier gain {_gain(t, 'brier')}, log-loss gain {_gain(t, 'log_loss')} on {t.get('n')} "
+                         f"holdout rows -> gate **{'passed' if he.get('passed') else 'failed'}**.")
+            lines.append("")
         cls = spec.get("classes") or []
         rel = _reliability(rep, "true") if spec.get("type") == "noul" else _reliability(rep)
         if rel:

@@ -208,12 +208,22 @@ class Service:
         """The project's pack (what `rlcd train` trains)."""
         return self.load_pack(self._default_pack)
 
-    def resolve(self, model: str | None) -> str:
+    def resolve(self, model: str | None, serve: bool = True) -> str:
+        """The versioned id of `model`. With `serve` (every path that answers a request), a weight-edit candidate
+        whose holdout gate failed is refused: it is kept for inspection (`serve=False`: reports, exports, the
+        calibration view), never used to answer."""
         try:
-            return self.registry.resolve(model)
+            version = self.registry.resolve(model)
         except UnknownModel:
             raise ContractError(f"unknown model {model!r}", kind="unknown_model",
                                 available=self.registry.available()) from None
+        if serve and not self.registry.servable(version):
+            reason = ((self.registry.entry(version) or {}).get("edit") or {}).get("reason")
+            raise ContractError(f"model {version} is a weight-edit candidate that did not pass its holdout gate "
+                                f"({reason}); it is kept for inspection and never serves", kind="unknown_model",
+                                available=[v for v in self.registry.available()
+                                           if v == LATEST or self.registry.servable(v)])
+        return version
 
     def bundle(self, version: str) -> Bundle | None:
         return self.registry.bundle(version)
@@ -1144,7 +1154,7 @@ class Service:
             return {}
 
     def heads_view(self, model: str | None) -> dict:
-        version = self.resolve(model)
+        version = self.resolve(model, serve=False)
         pending = self.logs.feedback_counts()
         return {"model": version, "heads": [self.head_view(version, s, pending) for s in self.specs(version).values()]}
 
@@ -1157,9 +1167,12 @@ class Service:
                          "note": "untrained: every answer is the uninformed prior until `rlcd train`"})
         for vid in sorted(reg["versions"], key=lambda v: int(v.rsplit(".", 1)[1]), reverse=True):
             v = reg["versions"][vid]
-            data.append({"id": vid, "trained_at": v.get("created_at"), "pack": v.get("pack"),
-                         "retrained": v.get("retrained", []), "imported_from": v.get("imported_from"),
-                         "heads": self._version_heads(vid, v.get("heads", {}))})
+            row = {"id": vid, "trained_at": v.get("created_at"), "pack": v.get("pack"),
+                   "retrained": v.get("retrained", []), "imported_from": v.get("imported_from"),
+                   "heads": self._version_heads(vid, v.get("heads", {}))}
+            if v.get("edit"):   # a weight-edit candidate (additive field): whether it serves, and why
+                row["edit"] = v["edit"]
+            data.append(row)
         return {"data": data}
 
     def _version_heads(self, vid: str, trained: dict) -> dict:
@@ -1191,7 +1204,7 @@ class Service:
         return out
 
     def trained(self, head: str, model: str | None) -> tuple[str, HeadSpec, LoadedHead]:
-        version = self.resolve(model)
+        version = self.resolve(model, serve=False)
         spec = self.spec(head, version)
         h = self.loaded(version, head)
         if h is None:

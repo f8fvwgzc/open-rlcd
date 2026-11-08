@@ -93,6 +93,46 @@ class Trainer:
             self._thread.start()
         return job
 
+    def train_heads(self, provider: Any, names: list[str], cfg: TrainConfig, feedback_weight: float, *,
+                    specs: dict | None = None, configs: dict[str, TrainConfig] | None = None,
+                    on_head: Any = None) -> tuple[dict[str, Any], dict[str, dict], dict[str, Any]]:
+        """Build every head's rows with `provider` and train each head independently: a failure of one head never
+        costs the others. `specs` / `configs` override the pack's head specs and the shared config per head (a
+        weight edit retrains with its base version's specs and splits). `on_head(name, None)` is called before each
+        head trains and `on_head(name, status)` after. Returns (trained heads, status per head, datasets)."""
+        pack, project = self.svc.pack, self.svc.project
+        specs = {**pack.heads(project), **(specs or {})}
+        datasets = pack.datasets(project, provider, names, self.svc.logs.feedback(), feedback_weight)
+        trained: dict[str, Any] = {}
+        status: dict[str, dict] = {}
+        for name in names:
+            ds = datasets.get(name)
+            hcfg = (configs or {}).get(name) or cfg
+            if on_head is not None:
+                on_head(name, None)
+            try:
+                # a head's stakes must be a level the policy defines: a typo in rlcd.yaml fails this head at
+                # train time instead of every request it would serve
+                if specs[name].stakes not in hcfg.policy.stakes:
+                    raise TrainError(f"{name}: stakes {specs[name].stakes!r} is not a level the policy defines; "
+                                     f"configured: {list(hcfg.policy.stakes)} (fix `heads.{name}.stakes` or "
+                                     f"`policy.stakes` in rlcd.yaml)")
+                if ds is None or len(ds) == 0:
+                    raise TrainError(f"{name}: no labelled rows (label some first: `rlcd label bootstrap` / "
+                                     f"`rlcd label audit`)")
+                th = train_head(specs[name], ds, hcfg)
+                trained[name] = th
+                status[name] = {"status": "trained", "metrics": th.metrics, "verdict": th.verdict,
+                                "data": th.data, "notes": th.notes}
+            except TrainError as e:
+                status[name] = {"status": "failed", "error": str(e)}
+            except Exception as e:  # keep the other heads going; the trace goes to the job
+                status[name] = {"status": "failed", "error": f"{type(e).__name__}: {e}",
+                                "trace": traceback.format_exc()[-2000:]}
+            if on_head is not None:
+                on_head(name, status[name])
+        return trained, status, datasets
+
     def _run(self, job: dict, req: TrainRequest, names: list[str]) -> None:
         job["status"], job["started_at"] = "running", now_iso()
         svc = self.svc
@@ -100,38 +140,20 @@ class Trainer:
         def say(msg: str) -> None:
             job["progress"]["message"] = msg
 
+        def progress(name: str, status: dict | None) -> None:
+            if status is None:
+                say(f"training {name}")
+                return
+            job["heads"][name] = status
+            job["progress"]["done"] += 1
+
         trained: dict[str, Any] = {}
         try:
             pack, project = svc.pack, svc.project
             cfg = self.config(req)
             say("building features")
             provider = pack.provider(project, None)
-            specs = pack.heads(project)
-            feedback = svc.logs.feedback()
-            datasets = pack.datasets(project, provider, names, feedback, self.feedback_weight(req))
-            for name in names:
-                say(f"training {name}")
-                ds = datasets.get(name)
-                try:
-                    # a head's stakes must be a level the policy defines: a typo in rlcd.yaml fails this head at
-                    # train time instead of every request it would serve
-                    if specs[name].stakes not in cfg.policy.stakes:
-                        raise TrainError(f"{name}: stakes {specs[name].stakes!r} is not a level the policy defines; "
-                                         f"configured: {list(cfg.policy.stakes)} (fix `heads.{name}.stakes` or "
-                                         f"`policy.stakes` in rlcd.yaml)")
-                    if ds is None or len(ds) == 0:
-                        raise TrainError(f"{name}: no labelled rows (label some first: `rlcd label bootstrap` / "
-                                         f"`rlcd label audit`)")
-                    th = train_head(specs[name], ds, cfg)
-                    trained[name] = th
-                    job["heads"][name] = {"status": "trained", "metrics": th.metrics, "verdict": th.verdict,
-                                          "data": th.data, "notes": th.notes}
-                except TrainError as e:
-                    job["heads"][name] = {"status": "failed", "error": str(e)}
-                except Exception as e:  # keep the other heads going; the trace goes to the job
-                    job["heads"][name] = {"status": "failed", "error": f"{type(e).__name__}: {e}",
-                                          "trace": traceback.format_exc()[-2000:]}
-                job["progress"]["done"] += 1
+            trained, _, _ = self.train_heads(provider, names, cfg, self.feedback_weight(req), on_head=progress)
             if trained:
                 say("saving the new version")
                 sources: dict[str, int] = {}
