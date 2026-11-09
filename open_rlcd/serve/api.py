@@ -2,21 +2,26 @@
 
     rlcd serve --port 8095                     (or: uvicorn open_rlcd.serve.api:app --port 8095)
 
-Errors are `{"error": "...", "kind": "..."}`: 401 (only when RLCD_API_KEY is set), 413 a request body larger than
-RLCD_MAX_BODY_BYTES (default 16 MiB), 422 validation / unknown head / unknown model / feature version mismatch,
-409 a training job is already running, 503 a connector is unreachable (`connector_unavailable`), 500 `internal`.
-A 500 or 503 body never carries exception text (it can hold absolute paths or a DSN): the details go to the
-server log, the client gets the exception type and a generic message.
+Errors are `{"error": "...", "kind": "...", "retryable": bool}`: 401 (only when RLCD_API_KEY is set; with
+RLCD_ADMIN_KEY set, POST /v1/train and POST /v1/automation need that key instead), 404 an
+unknown receipt, 413 a request body larger than RLCD_MAX_BODY_BYTES (default 16 MiB), 422 validation / unknown
+head / unknown model / feature version mismatch / missing evidence, 409 a training job is already running or the
+kill switch is locked by the environment, 503 a connector or the encoder is unreachable, 500 `internal`.
+`retryable` says whether the same request may succeed later unchanged (409 busy, 503): a client retries those
+with backoff (a `Retry-After` header gives the delay) and never retries the others — a 422 needs a different
+request, not another attempt. A 500 or 503 body never carries exception text (it can hold absolute paths or a
+DSN): the details go to the server log, the client gets the exception type and a generic message.
 """
 from __future__ import annotations
 
 import hmac
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -25,11 +30,15 @@ from .. import VERSION
 from ..connectors.base import ConnectorError, unavailable
 from ..core.config import Project
 from ..core.contract import (
+    AutomationRequest,
+    ConfirmRequest,
     ContractError,
     DecideRequest,
     EvaluateRequest,
     FeedbackRequest,
+    OutcomeRequest,
     RankRequest,
+    ReceiptCheckRequest,
     SystemOneRequest,
     TrainRequest,
 )
@@ -48,8 +57,77 @@ def max_body_bytes() -> int:
         return DEFAULT_MAX_BODY_BYTES
 
 
+RETRYABLE = {409: 5, 429: 1, 503: 2}     # status -> Retry-After seconds
+ADMIN_PATHS = {"/v1/train", "/v1/automation"}   # write routes that need RLCD_ADMIN_KEY when it is set
+# a person's confirmation of a confirm decision: a caller holding only the decision key must not confirm its own
+_CONFIRM = re.compile(r"/v1/receipts/[^/]+/confirm")
+
+
+def retryable(status: int, kind: str | None = None) -> bool:
+    return status in RETRYABLE and kind != "automation_locked"
+
+
+def _headers(status: int, kind: str | None = None) -> dict | None:
+    return {"Retry-After": str(RETRYABLE[status])} if retryable(status, kind) else None
+
+
+def route_path(request: Request) -> str:
+    """The path the router matches, without the ASGI root_path (`uvicorn --root-path /rlcd`, a proxy prefix):
+    `request.url.path` includes the prefix, so comparing it with "/v1/train" would let every prefixed admin call
+    through."""
+    path = request.scope.get("path") or ""
+    root = request.scope.get("root_path") or ""
+    if root and path.startswith(root):
+        path = path[len(root):] or "/"
+    return path
+
+
+class BodyLimit:
+    """Refuse request bodies larger than RLCD_MAX_BODY_BYTES whatever their headers say: the body is read here, up to
+    the limit, before the app sees it, and answered 413 as soon as it passes the limit (a Content-Length above the
+    limit is refused earlier, from the header, by the auth middleware)."""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        # every body is counted as it arrives, whatever the headers declare (a Content-Length next to a chunked
+        # body, or a length the server did not enforce): what is read is what is limited
+        limit = max_body_bytes()
+        chunks: list[bytes] = []
+        seen = 0
+        while True:
+            message = await receive()
+            if message.get("type") != "http.request":      # a disconnect: let the app see it as it would
+                break
+            body = message.get("body") or b""
+            seen += len(body)
+            if seen > limit:
+                resp = error(413, f"request body larger than the {limit} bytes allowed (RLCD_MAX_BODY_BYTES)",
+                             "too_large", limit=limit)
+                await resp(scope, receive, send)
+                return
+            chunks.append(body)
+            if not message.get("more_body"):
+                break
+        done = False
+
+        async def replay() -> dict:
+            nonlocal done
+            if not done:
+                done = True
+                return {"type": "http.request", "body": b"".join(chunks), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay, send)
+
+
 def error(status: int, message: str, kind: str, **extra: Any) -> JSONResponse:
-    return JSONResponse({"error": message, "kind": kind, **extra}, status_code=status)
+    return JSONResponse({"error": message, "kind": kind, "retryable": retryable(status, kind), **extra},
+                        status_code=status, headers=_headers(status, kind))
 
 
 def create_app(service: Service | None = None, project: Project | None = None, home: Path | None = None,
@@ -59,11 +137,13 @@ def create_app(service: Service | None = None, project: Project | None = None, h
                   description="Typed decisions with calibrated probabilities. A decision model, not a language "
                               "model: it never writes prose.")
     app.state.svc = svc
+    app.add_middleware(BodyLimit)
 
     # ------------------------------------------------------------------ errors and auth
     @app.exception_handler(ContractError)
     async def _contract(_: Request, e: ContractError):
-        return JSONResponse(e.body(), status_code=e.status)
+        body = {**e.body(), "retryable": retryable(e.status, e.kind)}
+        return JSONResponse(body, status_code=e.status, headers=_headers(e.status, e.kind))
 
     @app.exception_handler(RequestValidationError)
     async def _invalid(_: Request, e: RequestValidationError):
@@ -77,7 +157,8 @@ def create_app(service: Service | None = None, project: Project | None = None, h
         log.error("connector unavailable: %s", e)
         err = unavailable(f"a configured vector or graph store is unavailable ({type(e).__name__}; details are in "
                           f"the server log)")
-        return JSONResponse(err.body(), status_code=err.status)
+        return JSONResponse({**err.body(), "retryable": True}, status_code=err.status,
+                            headers=_headers(err.status, err.kind))
 
     @app.exception_handler(StarletteHTTPException)
     async def _http(_: Request, e: StarletteHTTPException):
@@ -92,11 +173,19 @@ def create_app(service: Service | None = None, project: Project | None = None, h
     @app.middleware("http")
     async def _auth(request: Request, call_next):
         key = os.environ.get("RLCD_API_KEY")
-        if key and request.url.path != "/health":
-            auth = request.headers.get("authorization", "")
-            got = request.headers.get("x-api-key") or (auth[7:] if auth.lower().startswith("bearer ") else "")
-            if not hmac.compare_digest(got.encode(), key.encode()):
-                return error(401, "missing or wrong API key (send `Authorization: Bearer <key>`)", "unauthorized")
+        admin = os.environ.get("RLCD_ADMIN_KEY")
+        auth = request.headers.get("authorization", "")
+        got = request.headers.get("x-api-key") or (auth[7:] if auth.lower().startswith("bearer ") else "")
+        path = route_path(request)
+        if admin and request.method != "GET" and (path in ADMIN_PATHS or _CONFIRM.fullmatch(path)):
+            # the operator's controls (training, the kill switch) need the admin key when one is set, so a decision
+            # caller's key can neither retrain nor switch automation back on
+            if not hmac.compare_digest(got.encode(), admin.encode()):
+                return error(401, f"{request.url.path} needs the admin key (RLCD_ADMIN_KEY)", "unauthorized")
+        elif key and path != "/health" and not (
+                hmac.compare_digest(got.encode(), key.encode())
+                or (admin and hmac.compare_digest(got.encode(), admin.encode()))):
+            return error(401, "missing or wrong API key (send `Authorization: Bearer <key>`)", "unauthorized")
         limit = max_body_bytes()
         try:
             size = int(request.headers.get("content-length") or 0)
@@ -110,7 +199,10 @@ def create_app(service: Service | None = None, project: Project | None = None, h
     # ------------------------------------------------------------------ meta
     @app.get("/health")
     def health():
-        return svc.health()
+        h = svc.health()
+        if os.environ.get("RLCD_API_KEY"):   # /health is open: with a key set it does not reveal the server's paths
+            h.pop("home", None)
+        return h
 
     @app.get("/v1/models")
     def models():
@@ -142,6 +234,10 @@ def create_app(service: Service | None = None, project: Project | None = None, h
     def feedback(req: FeedbackRequest):
         return svc.feedback(req)
 
+    @app.post("/v1/outcome")
+    def outcome(req: OutcomeRequest):
+        return svc.outcome(req)
+
     @app.post("/v1/train")
     def train(req: TrainRequest | None = None):
         try:
@@ -169,6 +265,51 @@ def create_app(service: Service | None = None, project: Project | None = None, h
     @app.get("/v1/bernoulli")
     def bernoulli(head: str, model: str | None = None, stakes: str | None = None):
         return svc.bernoulli_view(head, model, stakes)
+
+    # ------------------------------------------------------------------ the control layer
+    @app.get("/v1/batteries")
+    def batteries(model: str | None = None):
+        return svc.batteries_view(model)
+
+    @app.get("/v1/receipts/{decision_id}")
+    def receipt(decision_id: str):
+        return svc.receipt_view(decision_id)
+
+    @app.post("/v1/receipts/{decision_id}/check")
+    def check_receipt(decision_id: str, req: ReceiptCheckRequest):
+        kw: dict[str, Any] = {"state_digest": req.state_digest, "max_age_s": req.max_age_s}
+        if "state" in req.model_fields_set:
+            kw["state"] = req.state
+        return svc.check_receipt(decision_id, **kw)
+
+    @app.post("/v1/receipts/{decision_id}/confirm")
+    def confirm_receipt(decision_id: str, req: ConfirmRequest):
+        return svc.confirm_receipt(decision_id, by=req.by, note=req.note, state_digest=req.state_digest)
+
+    @app.get("/v1/metrics")
+    def metrics(since: str | None = None, until: str | None = None, model: str | None = None,
+                kind: str | None = None, head: str | None = None):
+        return svc.metrics_view(since=since, until=until, model=model, kind=kind, head=head)
+
+    @app.get("/v1/review")
+    def review(limit: int = Query(50, ge=1, le=1000), head: str | None = None, kind: str | None = None,
+               include_abstain: bool = True, oldest_first: bool = True):
+        return svc.review_view(limit=limit, head=head, kind=kind, include_abstain=include_abstain,
+                               oldest_first=oldest_first)
+
+    @app.get("/v1/check")
+    def check(model: str | None = None):
+        from ..core.checklist import run as run_checklist
+
+        return run_checklist(svc, model=model, error_text=False)
+
+    @app.get("/v1/automation")
+    def automation():
+        return svc.automation_view()
+
+    @app.post("/v1/automation")
+    def set_automation(req: AutomationRequest):
+        return svc.set_automation(req.enabled, reason=req.reason, by=req.by)
 
     return app
 

@@ -64,6 +64,26 @@ model on your own documents in one page.
 * **Synthetic numbers are a sanity check.** The demo bundle and the test suite run on synthetic data; their
   metrics show that the pipeline is honest, not how good a model will be on your traffic.
 
+## Around an LLM: the control layer
+
+open-rlcd follows the architecture of the field guide *How to use Jev with LLMs* (TypeSafe's System One): code
+owns authority, the decision model answers narrow typed questions, the LLM generates, and measured outcomes earn
+autonomy. [docs/control-layer.md](docs/control-layer.md) maps its ten-step playbook to open-rlcd:
+
+* **named state, fail closed** — questions read paths of one shared state (`inputs`); a missing field is a 422,
+  never a guess (`strict` also refuses missing training inputs); logged states are redacted;
+* **versioned batteries** — `{"battery": "preflight@1"}` instead of a question list, with owner, changelog, digest;
+* **route before generation** — `allowed` options and route contracts (`routes:` in rlcd.yaml, filtered by the
+  request's `capabilities`, `sensitivity`, `latency_budget_ms`) run before the semantic choice; a choice returns a
+  contract and its fallback;
+* **verify after generation** — evaluate's decision table: your deterministic `checks` and the `artifact` status
+  win over any head, `citations` and the plan's evidence are bound, and a revision loop stops after a budget;
+* **receipts** — every decision is a hash-chained receipt (state, question and policy digests, distributions,
+  route, action); `POST /v1/receipts/{id}/check` says whether an approval still holds right before a side effect;
+* **earn autonomy** — rollout modes shadow / assist / limited / full, a run-time kill switch, `rlcd rollback`,
+  replay and regression cases, `/v1/metrics` (false automation, online reliability, review load), a review queue,
+  `rlcd check` for the pre-launch checklist, and a Python client (`open_rlcd.client`).
+
 ## The enterprise-documents pack
 
 For each incoming request in front of a document store (today: the local corpus `rlcd ingest` builds, with a
@@ -163,9 +183,10 @@ vector database and index settings — measure it with your own store.
 ## API
 
 `POST /v1/systemone` (System One-compatible: a View Engine RLCD client works unchanged), `/v1/rank`,
-`/v1/decide`, `/v1/evaluate`, `/v1/feedback`, `/v1/train` (+ `GET /v1/train/{job}`); `GET /health`,
-`/v1/models`, `/v1/heads`, `/v1/calibration`, `/v1/bernoulli`. Full contract and the extensions table:
-[docs/contract.md](docs/contract.md).
+`/v1/decide`, `/v1/evaluate`, `/v1/feedback`, `/v1/outcome`, `/v1/train` (+ `GET /v1/train/{job}`),
+`/v1/receipts/{id}/check`, `/v1/automation`; `GET /health`, `/v1/models`, `/v1/heads`, `/v1/batteries`,
+`/v1/calibration`, `/v1/bernoulli`, `/v1/receipts/{id}`, `/v1/metrics`, `/v1/review`. Full contract and the
+extensions table: [docs/contract.md](docs/contract.md).
 
 ## Open-weight bundles
 
@@ -177,7 +198,9 @@ stay on your machine unless you choose to `rlcd export` or `rlcd push --hf` them
 
 ## Security
 
-`RLCD_API_KEY` protects every route but `/health`. Bundles load only from `RLCD_HOME` and contain no code.
+`RLCD_API_KEY` protects every route but `/health`; with `RLCD_ADMIN_KEY` set, training and the kill switch need
+that key instead. Bundles load only from `RLCD_HOME` and contain no code. Logged states are redacted of secrets
+(`serve.redact`), and `rlcd receipts prune` drops old states while keeping the receipt chain verifiable.
 Connectors and LLM judges refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or
 `RLCD_ALLOW_REMOTE=1`). Secrets come from environment variables only.
 
@@ -187,6 +210,8 @@ Connectors and LLM judges refuse non-loopback hosts unless you allow them (`secu
   (optionally retrieve from your own folder of documents).
 * [examples/tabular](examples/tabular): the UCI Bank Marketing dataset (CC BY 4.0, downloaded at run time),
   trained and reported.
+* [examples/control-layer](examples/control-layer/run.py): one request through the whole control layer, offline,
+  with the demo bundle, the Python client and a stand-in LLM (`uv run python examples/control-layer/run.py`).
 
 ## Design and provenance
 

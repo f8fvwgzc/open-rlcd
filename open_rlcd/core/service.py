@@ -1,19 +1,32 @@
 """The service: everything the HTTP endpoints (and the CLI) need, without HTTP.
 
 Answers questions bound to heads (System One contract), ranks candidates, makes decisions through the policy,
-records decisions, and takes feedback (immediate Bernoulli update + a training row for the next train).
+records decisions as receipts, and takes feedback (immediate Bernoulli update + a training row for the next train).
+
+The control layer around the heads (docs/control-layer.md): versioned question batteries, question inputs read from
+one shared state (fail closed on a missing field), options removed by deterministic code before the semantic
+choice, uncertainty sources on every decision, the operator's rollout mode and kill switch (they only ever take
+automation away), and a hash-chained receipt for every decision that a caller can check for staleness before it
+acts.
 """
 from __future__ import annotations
 
 import contextlib
+import threading
 import time
+from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .. import LATEST, MODEL_PREFIX, VERSION
+from . import battery as BT
+from . import ops as OPS
 from . import policy as PL
+from . import receipts as R
+from . import uncertainty as U
 from .bernoulli import Ledger
 from .bundle import Bundle, LoadedHead
 from .config import Project, load_project
@@ -23,16 +36,27 @@ from .contract import (
     DecideRequest,
     EvaluateRequest,
     FeedbackRequest,
+    OutcomeRequest,
     Question,
     RankRequest,
     SystemOneRequest,
     build_answer,
     parse_questions,
     positive_probability,
+    questions_digest,
+    restrict,
 )
+from .digest import digest
 from .feedback import FeedbackLog
 from .head import HeadSpec
+from .redact import kinds_from_config, redact
 from .registry import Registry, UnknownModel
+from .rollout import AutomationSwitch, Rollout, effective_cap
+from .routes import Constraints, RouteBook
+from .training import now_iso
+
+RECEIPT_MODES = ("decisions", "all")
+_MISSING = object()
 
 
 def _merge(a: dict, b: dict) -> dict:
@@ -56,6 +80,86 @@ def table_is_live(table: dict | None, version: str | None) -> bool:
     return table.get("model_version") == version or version in (table.get("valid_for") or [])
 
 
+def _committed(spec: HeadSpec, a: dict) -> tuple[str, float]:
+    """(class, probability) an answer commits to by the policy's rule (`policy.chosen`: a gate head commits to
+    `true`, every other head to its most probable allowed class), so an outcome posted for a /v1/systemone receipt
+    scores the Bernoulli ledger exactly as one posted for a /v1/decide decision."""
+    if a["type"] == "choice":   # the answer's own choice (among the allowed options), never a rounded re-argmax
+        return a["choice"], round(float(a["probabilities"].get(a["choice"], 0.0)), 6)
+    if a["type"] == "noul":
+        p = float(a["noul"])
+        vec = [1.0 - p, p]
+    else:
+        vec = [float(a["probabilities"][str(i)]) for i in range(len(spec.labels))]
+    c, p = PL.chosen(spec, np.asarray(vec, float))
+    return spec.labels[int(c[0])], round(float(p[0]), 6)
+
+
+def restrict_questions(questions: list[Question], allowed: dict) -> list[Question]:
+    """Apply a request's `allowed: {question id: [options]}` (deterministic filters of this request) to its choice
+    questions, intersected with a question's own `allowed` (a battery question keeps its fixed contract; the request
+    can only narrow it)."""
+    by_id = {q.id: q for q in questions}
+    unknown = [k for k in allowed if k not in by_id]
+    if unknown:
+        raise ContractError(f"allowed names questions this request does not ask: {unknown}", field="allowed",
+                            questions=list(by_id))
+    for qid, opts in allowed.items():
+        q = by_id[qid]
+        if q.type != "choice":
+            raise ContractError(f"allowed.{qid}: a {q.type} question has no options to remove", field="allowed",
+                                question=qid)
+        if not isinstance(opts, list) or not opts or not all(isinstance(o, str) for o in opts):
+            raise ContractError(f"allowed.{qid} must be a non-empty array of option names", field="allowed",
+                                question=qid)
+        keep = [o for o in dict.fromkeys(opts) if q.allowed is None or o in q.allowed]
+        if not keep:
+            raise ContractError(f"allowed.{qid}: none of {opts} is among the question's own allowed options "
+                                f"{list(q.allowed or ())}", field="allowed", question=qid)
+        q.allowed = tuple(keep)
+    return questions
+
+
+def json_safe(obj: Any) -> Any:
+    """A copy with NaN / Infinity as null: a logged state may hold them (JSON parsers accept them), a JSON response
+    must not."""
+    import math
+
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return obj
+
+
+AUDIT_FIELDS = ("baseline", "artifact", "checks", "revision", "tags")
+
+
+def request_audit(extra: dict | None) -> dict | None:
+    """What a decide / evaluate caller asks to keep with the decision in its receipt: `baseline` (the route or
+    action its existing path would take without open-rlcd: the counterfactual), `artifact` (provenance of the LLM
+    output: serving model, provider, finish reason, request digest), `checks` (its deterministic validation
+    results), `revision` (the decision this one revises) and `tags` (free-form labels for metrics)."""
+    out = {k: (extra or {}).get(k) for k in AUDIT_FIELDS if (extra or {}).get(k) is not None}
+    return out or None
+
+
+def request_allowed(raw: Any, names: Sequence[str]) -> dict[str, list[str]]:
+    """A decide request's `allowed`: {choice head: [options deterministic code kept]}."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ContractError("allowed must be an object mapping a choice head to the options it may choose",
+                            field="allowed")
+    unknown = [h for h in raw if h not in names]
+    if unknown:
+        raise ContractError(f"allowed names heads that take no part in this decision: {unknown}", field="allowed",
+                            heads=list(names))
+    return {str(k): v for k, v in raw.items()}
+
+
 class Service:
     def __init__(self, project: Project | None = None, home: Any = None, pack: Any = None):
         self.project = project or load_project()
@@ -71,6 +175,9 @@ class Service:
             self._default_pack = self.project.pack
         self._providers: dict[str, Any] = {}
         self.rng = np.random.default_rng()
+        self.switch = AutomationSwitch(self.registry.home)
+        self._local = threading.local()      # dry runs (replay, regression cases) record nothing
+        self._verified_cache: dict[tuple[str, str], PL.PolicyConfig | None] = {}
         from .jobs import Trainer
 
         self.trainer = Trainer(self)
@@ -140,12 +247,16 @@ class Service:
                             f"with", kind="bad_bundle", status=422, version=version)
 
     def specs(self, version: str) -> dict[str, HeadSpec]:
-        """The pack's current heads, overlaid by the heads this version was trained with."""
+        """The pack's current heads, overlaid by the heads this version was trained with. A head rlcd.yaml disables
+        (`heads.<name>.enabled: false`) is not served even when the version has it trained: disabling a question is a
+        switch, not a retrain (the trained head stays in the bundle, so enabling it again needs no retrain)."""
         out = dict(self.pack_for(version).heads(self.project))
         b = self.bundle(version)
+        disabled = {n for n, o in self.project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
         if b is not None:
             for name in b.names():
-                out[name] = b.head(name).spec
+                if name not in disabled:
+                    out[name] = b.head(name).spec
         return out
 
     def spec(self, head: str, version: str, question: str | None = None) -> HeadSpec:
@@ -181,7 +292,139 @@ class Service:
         return self.policy_config()
 
     def policy_config(self) -> PL.PolicyConfig:
-        return PL.PolicyConfig.from_dict(_merge(self.pack.policy_defaults(), self.project.section("policy")))
+        try:
+            return PL.PolicyConfig.from_dict(_merge(self.pack.policy_defaults(), self.project.section("policy")))
+        except (ValueError, TypeError) as e:
+            raise ContractError(f"rlcd.yaml policy: {e}", kind="bad_config", status=500) from None
+
+    def policy_digest(self, version: str) -> str:
+        return digest(self.policy(version).to_dict())
+
+    # ------------------------------------------------------------------ control-layer configuration
+    def rollout(self) -> Rollout:
+        try:
+            return Rollout.from_config(self.project.data.get("rollout"))
+        except (ValueError, TypeError) as e:
+            raise ContractError(f"rlcd.yaml rollout: {e}", kind="bad_config", status=500) from None
+
+    def batteries(self, version: str) -> dict[str, BT.Battery]:
+        """The batteries of the pack `version` was trained with, overlaid by rlcd.yaml `batteries:`."""
+        pack = self.pack_for(version)
+        defaults = pack.defaults() if callable(getattr(pack, "defaults", None)) else {}
+        try:
+            return BT.load((defaults or {}).get("batteries"), self.project.data.get("batteries"))
+        except (ValueError, TypeError) as e:
+            raise ContractError(f"batteries: {e}", kind="bad_config", status=500) from None
+
+    def routes(self) -> RouteBook:
+        try:
+            return RouteBook.from_config(self.project.data.get("routes"))
+        except (ValueError, TypeError) as e:
+            raise ContractError(f"rlcd.yaml {e}", kind="bad_config", status=500) from None
+
+    def filter_options(self, specs: dict[str, HeadSpec], request: dict | None,
+                       heads: Sequence[str] | None = None) -> tuple[dict[str, tuple[str, ...]], dict[str, list]]:
+        """Deterministic filters before the semantic choices: the request's `allowed` options intersected with the
+        route contracts that survive its `capabilities` / `sensitivity` / `latency_budget_ms`.
+        Returns ({head: options kept}, {head: [{option, kept, reason}]}); a head absent from the first map is
+        unrestricted. An empty tuple means every option was removed."""
+        request = request or {}
+        names = list(heads) if heads is not None else list(specs)
+        names = [n for n in names if n in specs]
+        raw = request_allowed(request.get("allowed"), names)
+        book = self.routes()
+        cons = Constraints.from_request(request)
+        allowed: dict[str, tuple[str, ...]] = {}
+        considered: dict[str, list] = {}
+        for name in names:
+            spec = specs[name]
+            keep: list[str] | None = None
+            if name in raw:
+                keep = list(self.check_allowed(spec, raw[name]))
+            if book.has(name):
+                book.check_head(name, spec)
+                kept, cons_list = book.filter(name, spec.classes, cons)
+                if keep is not None:   # options the request removed itself are reported as such
+                    cons_list = [c if c["option"] in keep or not c["kept"]
+                                 else {**c, "kept": False, "reason": "not in the request's allowed options"}
+                                 for c in cons_list]
+                    kept = [o for o in kept if o in keep]
+                considered[name] = cons_list
+                keep = kept
+            if keep is not None:
+                allowed[name] = tuple(keep)
+        return allowed, considered
+
+    def no_option_decision(self, version: str, spec: HeadSpec, state: Any, *, stakes: str | None,
+                           warnings: list[str], considered: list | None = None) -> dict:
+        """A choice head whose every option deterministic filters removed: it commits to nothing and abstains, so
+        the caller escalates. The head's distribution is still reported (what it would have preferred)."""
+        cfg = self.policy(version)
+        stakes_name = stakes or spec.stakes
+        level = cfg.level(stakes_name)
+        P, calibrated = self.probabilities(version, spec, [state], warnings)
+        ans = build_answer(None, spec, P[0], bool(calibrated), self.has_skill(version, spec.name), allowed=None)
+        abstain = cfg.tier_name(0)
+        why = "; ".join(f"{c['option']}: {c['reason']}" for c in (considered or []) if not c["kept"])
+        msg = (f"head '{spec.name}': deterministic filters removed every option ({why or 'allowed is empty'}): "
+               f"nothing to choose from, the decision abstains")
+        if msg not in warnings:
+            warnings.append(msg)
+        d = {"head": spec.name, "decision": spec.decision, "stakes": stakes_name, "class": None, "commit": None,
+             "p": 0.0, "tier": abstain, "uncapped_tier": abstain, "max_tier": abstain,
+             "thresholds": {**asdict(level), "conformal": None}, "bernoulli": None, "gate": None,
+             "calibrated": bool(calibrated), "warnings": [msg],
+             "rollout": {"mode": self.rollout().mode_for(spec.name), "automation": self.switch.state().enabled,
+                         "cap": cfg.tier_name(effective_cap(self.rollout(), self.switch, stakes=stakes_name,
+                                                            head=spec.name)[0]), "capped": False}}
+        return {"answer": {**ans, "allowed": [], "excluded_mass": 1.0}, "decision": d,
+                "uncertainty": {"sources": ["options_removed"], "margin": None, "entropy": None, "top2": []}}
+
+    def decision_contract(self, kind: str, heads: Sequence[str], request: dict | None, **params: Any) -> dict:
+        """The question contract of a decide / evaluate call for its receipt: which heads, the route contracts they
+        consult, and every request parameter other than the state that can change the outcome."""
+        request = request or {}
+        book = self.routes()
+        keys = ("allowed", "capabilities", "sensitivity", "latency_budget_ms", "strict")
+        body = {"kind": kind, "heads": list(heads), "routes": {h: book.routes[h] for h in heads if book.has(h)},
+                "params": {**{k: request.get(k) for k in keys if request.get(k) is not None}, **params}}
+        return {"digest": digest(body), "battery": None}
+
+    def attach_contract(self, result: dict, head: str, allowed: tuple[str, ...] | None,
+                        considered: list | None) -> None:
+        """Put the chosen option's route contract (and its usable fallback) on a head result."""
+        if considered is None:
+            return
+        book = self.routes()
+        result["considered"] = considered
+        result["contract"] = book.resolve(head, result["decision"]["class"], list(allowed or ()))
+
+    def receipts_mode(self) -> str:
+        mode = str(self.project.get("serve.receipts", "decisions") or "decisions")
+        if mode not in RECEIPT_MODES:
+            raise ContractError(f"rlcd.yaml serve.receipts must be one of {list(RECEIPT_MODES)}, got {mode!r}",
+                                kind="bad_config", status=500)
+        return mode
+
+    def redact_kinds(self) -> tuple[str, ...]:
+        try:
+            return kinds_from_config(self.project.get("serve.redact", True))
+        except (ValueError, TypeError) as e:
+            raise ContractError(f"rlcd.yaml {e}", kind="bad_config", status=500) from None
+
+    @contextlib.contextmanager
+    def dry_run(self):
+        """Within this block decisions are made but not logged (replay, regression cases, previews)."""
+        prev = getattr(self._local, "dry", False)
+        self._local.dry = True
+        try:
+            yield
+        finally:
+            self._local.dry = prev
+
+    @property
+    def is_dry(self) -> bool:
+        return bool(getattr(self._local, "dry", False))
 
     # ------------------------------------------------------------------ features and probabilities
     def features(self, version: str, spec: HeadSpec, states: list[Any], head: LoadedHead | None) -> np.ndarray:
@@ -280,26 +523,75 @@ class Service:
         if msg not in warnings:
             warnings.append(msg)
 
+    def missing_evidence(self, version: str, spec: HeadSpec, missing: Sequence[str],
+                         question: str | None = None) -> ContractError:
+        """The 422 of a strict request whose state lacks inputs almost every training row had."""
+        try:
+            groups = self.provider(version).groups(spec.view)
+        except Exception:
+            groups = {}
+        shown = sorted({groups.get(f, f) for f in missing})
+        return ContractError(f"head '{spec.name}': the state lacks {len(missing)} input(s) that almost every "
+                             f"training row had ({', '.join(shown[:6])}); a strict request is not answered from "
+                             f"incomplete evidence. Send the same fields as in training (GET /v1/heads describes "
+                             f"them)", kind="missing_evidence", head=spec.name, question=question,
+                             missing=list(missing)[:50], missing_groups=shown)
+
+    @staticmethod
+    def _removed_warning(name: str, answer: dict, warnings: list[str]) -> None:
+        m = answer.get("excluded_mass")
+        if m is not None and m >= U.LARGE_REMOVED_MASS:
+            w = (f"{name}: the head put {m:.2f} of its probability on options the request removed (allowed): the "
+                 f"right answer is likely not among the allowed options")
+            if w not in warnings:
+                warnings.append(w)
+
     # ------------------------------------------------------------------ the evaluation endpoint
-    def answer(self, version: str, q: Question, state: Any, warnings: list[str]) -> dict:
+    def answer(self, version: str, q: Question, state: Any, warnings: list[str], *, strict: bool = False) -> dict:
         spec = self.spec(q.head, version, q.id)
-        q.bind(spec)
-        P, calibrated = self.probabilities(version, spec, [state], warnings)
+        for note in q.bind(spec):
+            if note not in warnings:
+                warnings.append(note)
+        s = q.inputs.project(state)
+        missing: list[str] = []
+        P, calibrated = self.probabilities(version, spec, [s], warnings, missing_out=missing)
+        if strict and missing and calibrated:
+            raise self.missing_evidence(version, spec, missing, q.id)
         self._warn_head(version, spec, calibrated, warnings)
-        return build_answer(q, spec, P[0], calibrated, self.has_skill(version, spec.name))
+        ans = build_answer(q, spec, P[0], calibrated, self.has_skill(version, spec.name))
+        self._removed_warning(f"question '{q.id}'", ans, warnings)
+        return ans
 
     def systemone(self, req: SystemOneRequest) -> dict:
         t0 = time.perf_counter()
         version = self.resolve(req.model)
-        questions = parse_questions(req.questions)
+        bat = BT.resolve(req.battery, self.batteries(version)) if req.battery is not None else None
+        questions = bat.questions() if bat is not None else parse_questions(req.questions)
+        if req.allowed:
+            questions = restrict_questions(questions, req.allowed)
         warnings: list[str] = []
         # speculative fan-out: one state, every question answered independently by its own head
-        answers = {q.id: self.answer(version, q, req.state, warnings) for q in questions}
-        out = {"model": version, "answers": answers,
-               "usage": {"input_tokens": 0, "output_tokens": 0, "questions": len(questions),
-                         "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}}
+        answers = {q.id: self.answer(version, q, req.state, warnings, strict=req.strict) for q in questions}
+        latency = round((time.perf_counter() - t0) * 1000, 2)
+        out: dict[str, Any] = {"model": version, "answers": answers,
+                               "usage": {"input_tokens": 0, "output_tokens": 0, "questions": len(questions),
+                                         "latency_ms": latency}}
         if warnings:
             out["warnings"] = warnings
+        if bat is not None:
+            out["battery"] = bat.ref()
+        if req.receipt or self.receipts_mode() == "all":
+            heads = {}
+            for q in questions:
+                a = answers[q.id]
+                cls, p = _committed(self.spec(q.head, version, q.id), a)
+                heads[q.id] = {"head": q.head, "class": cls, "p": p, "tier": None,
+                               "probabilities": a.get("probabilities"), "state": q.inputs.project(req.state)}
+            row = self.log_decision(
+                version, "systemone", heads, None, request_state=req.state, requested_model=req.model,
+                questions={"digest": questions_digest(questions), "battery": bat.ref() if bat else None},
+                latency_ms=latency, warnings=warnings)
+            out["receipt"] = R.summary(row)
         return out
 
     def rank(self, req: RankRequest) -> dict:
@@ -326,7 +618,7 @@ class Service:
                 state = {**req.state, **c.state}   # shared state, overridden per candidate
             elif c.state is None:
                 state = req.state
-            states.append(state)
+            states.append(q.inputs.project(state))
         warnings: list[str] = []
         P, calibrated = self.probabilities(version, spec, states, warnings)   # one batch: the encoder runs once
         self._warn_head(version, spec, calibrated, warnings)
@@ -339,40 +631,101 @@ class Service:
         ranked.sort(key=lambda r: -1.0 if r["probability"] is None else r["probability"], reverse=True)
         for i, r in enumerate(ranked):
             r["rank"] = i + 1
+        latency = round((time.perf_counter() - t0) * 1000, 2)
         out = {"model": version, "head": q.head, "option": option if q.type == "choice" else None,
                "candidates": ranked,
                "usage": {"input_tokens": 0, "output_tokens": 0, "questions": len(ranked),
-                         "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}}
+                         "latency_ms": latency}}
         if warnings:
             out["warnings"] = warnings
+        if req.receipt or self.receipts_mode() == "all":
+            row = self.log_decision(
+                version, "rank", {}, {"head": q.head, "option": out["option"],
+                                      "ranking": [{"id": r["id"], "probability": r["probability"]} for r in ranked]},
+                request_state={"state": req.state, "candidates": [c.model_dump() for c in req.candidates]},
+                requested_model=req.model, questions={"digest": questions_digest([q]), "battery": None},
+                latency_ms=latency, warnings=warnings)
+            out["receipt"] = R.summary(row)
         return out
 
     # ------------------------------------------------------------------ decisions
+    def gate_table(self, version: str, head_name: str, head: LoadedHead | None) -> dict | None:
+        """The Bernoulli evidence a decision of `version` is gated on: the live table when it belongs to that
+        version (holdout + outcomes scored since), else the version's own holdout table — a client that pins an
+        older version keeps the evidence that version was verified with instead of losing its act tier."""
+        if head is None:
+            return None
+        table = self.ledger.table(head_name)
+        if table_is_live(table, version):
+            return table
+        archived = self.ledger.archived(head_name, version)   # the outcomes it collected while it was live
+        if archived is not None:
+            return archived
+        try:
+            return head.holdout_ledger()
+        except Exception:   # an old bundle without its table: no evidence, the gate stays closed
+            return None
+
+    def check_allowed(self, spec: HeadSpec, allowed: Any) -> tuple[str, ...]:
+        """Validate the options a decide request kept for a choice head (422 naming the problem)."""
+        if spec.type != "choice":
+            raise ContractError(f"allowed: head '{spec.name}' is a {spec.type} head; only a choice head has options "
+                                f"to remove", field="allowed", head=spec.name)
+        if not isinstance(allowed, (list, tuple)) or not allowed or not all(isinstance(o, str) for o in allowed):
+            raise ContractError(f"allowed.{spec.name} must be a non-empty array of option names", field="allowed",
+                                head=spec.name)
+        unknown = [o for o in allowed if o not in spec.classes]
+        if unknown:
+            raise ContractError(f"allowed.{spec.name} names options {unknown} that head '{spec.name}' does not have; "
+                                f"its options are {list(spec.classes)}", field="allowed", head=spec.name,
+                                classes=list(spec.classes))
+        return tuple(dict.fromkeys(allowed))
+
     def head_decision(self, version: str, spec: HeadSpec, state: Any, *, stakes: str | None = None,
                       explore: bool = False, warnings: list[str] | None = None, probs: np.ndarray | None = None,
                       calibrated: bool | None = None, explain: bool = True,
-                      missing_inputs: list[str] | None = None) -> dict:
-        """Answer one head on one state and run it through the policy. Returns {answer, decision, reasons}.
+                      missing_inputs: list[str] | None = None, allowed: Sequence[str] | None = None,
+                      strict: bool = False) -> dict:
+        """Answer one head on one state and run it through the policy. Returns {answer, decision, reasons,
+        uncertainty}.
 
         A request that lacks inputs almost every training row had (the input guard) is capped at confirm: its
         probabilities were calibrated on inputs that had them. The answer still says calibrated=true (the head is
-        trained; the wire contract keeps that meaning) and the warning says why. When `probs` are passed in, pass
-        `missing_inputs` too (from `probabilities(..., missing_out=...)`), or the guard cannot cap."""
+        trained; the wire contract keeps that meaning) and the warning says why; with `strict` it is refused
+        instead (422 missing_evidence). When `probs` are passed in, pass `missing_inputs` too (from
+        `probabilities(..., missing_out=...)`), or the guard cannot cap.
+
+        `allowed` (choice heads): the options deterministic code kept. The decision commits to the most probable
+        allowed option with its calibrated, unrenormalised probability, so thresholds keep meaning error rates.
+        Then the operator's rollout mode and kill switch cap the tier (never below confirm; `decision.rollout`)."""
         if probs is None:
             missing: list[str] = []
             P, calibrated = self.probabilities(version, spec, [state], warnings, missing_out=missing)
             probs = P[0]
             if missing_inputs is None:
                 missing_inputs = missing
+        if strict and missing_inputs and calibrated:
+            raise self.missing_evidence(version, spec, missing_inputs)
+        if allowed is not None:
+            allowed = self.check_allowed(spec, allowed)
+        pol, _removed, removed_mass = restrict(spec.labels, probs, allowed)
         head = self.loaded(version, spec.name)
         cfg = self.policy(version)
-        table = self.ledger.table(spec.name) if head is not None else None
-        live = table if table_is_live(table, version) else None
-        d = PL.decide(spec, probs, cfg, stakes=stakes, verdict=head.verdict if head else None,
+        live = self.gate_table(version, spec.name, head)
+        d = PL.decide(spec, np.asarray(pol, float), cfg, stakes=stakes, verdict=head.verdict if head else None,
                       conformal_threshold=head.conformal_threshold if head else None, ledger=live,
                       explore=explore, rng=self.rng, calibrated=bool(calibrated), missing_inputs=missing_inputs)
-        ans = build_answer(None, spec, probs, bool(calibrated), self.has_skill(version, spec.name))
-        out = {"answer": ans, "decision": d}
+        self._apply_verified(d, version, spec, head)
+        self._apply_rollout(d, spec, cfg)
+        ans = build_answer(None, spec, probs, bool(calibrated), self.has_skill(version, spec.name), allowed=allowed)
+        vt = None
+        if head is not None and calibrated:
+            vt = ((head.verdict or {}).get(d["stakes"]) or {}).get("tier")
+        out = {"answer": ans, "decision": d,
+               "uncertainty": U.classify(probs, spec.labels, d, missing_inputs=missing_inputs,
+                                         removed_mass=removed_mass, verdict_tier=vt)}
+        if warnings is not None and allowed is not None:
+            self._removed_warning(f"head '{spec.name}'", ans, warnings)
         if head is not None and head.set_quantile is not None and spec.type != "noul":
             from .calibration import prediction_set
 
@@ -395,16 +748,162 @@ class Service:
                     warnings.append(w)
         return out
 
-    def record(self, version: str, kind: str, heads: dict[str, dict], extra: dict | None = None) -> str:
-        """Log a decision so feedback can refer to it. `heads`: name -> {state, class, p}."""
+    def verified_policy(self, version: str, head: str, loaded: LoadedHead | None) -> PL.PolicyConfig | None:
+        """The policy a head's holdout verdict was computed under (its report.json), cached per version and head;
+        None for an untrained head or a report without one."""
+        key = (version, head)
+        cache = self._verified_cache
+        if key not in cache:
+            cfg = None
+            if loaded is not None:
+                try:
+                    raw = (loaded.report.get("policy") or {}).get("config")
+                    cfg = PL.PolicyConfig.from_dict(raw) if isinstance(raw, dict) else None
+                except Exception:   # an old or damaged report: nothing to compare with, the verdict cap still holds
+                    cfg = None
+            cache[key] = cfg
+        return cache[key]
+
+    def _apply_verified(self, d: dict, version: str, spec: HeadSpec, loaded: LoadedHead | None) -> None:
+        """A head is served under the act threshold its holdout verified, or a stricter one: when the version serves
+        a looser act threshold than the head was verified with (a head carried over into a version whose policy
+        changed), acting is not verified and the decision is capped at confirm."""
+        if d.get("class") is None or not d.get("calibrated") or d["tier"] != "act":
+            return
+        vcfg = self.verified_policy(version, spec.name, loaded)
+        if vcfg is None:
+            return
+        try:
+            vl = vcfg.level_for(spec.name, d["class"], d["stakes"])
+        except ContractError:      # the level is unknown to the verified policy: policy.decide already capped it
+            return
+        served = float((d.get("thresholds") or {}).get("act", 1.0))
+        if served + 1e-12 < vl.act:
+            why = (f"head '{spec.name}' was verified with act >= {vl.act:g} at {d['stakes']} stakes, this version serves "
+                   f"act >= {served:g}: acting below the verified threshold is not verified, so act becomes confirm")
+            d.setdefault("caps", []).append({"from": "act", "to": "confirm", "reason": why})
+            d["tier"] = "confirm"
+            if why not in d["warnings"]:
+                d["warnings"].append(why)
+
+    def _apply_rollout(self, d: dict, spec: HeadSpec, cfg: PL.PolicyConfig) -> None:
+        """Cap one policy decision by the rollout mode and the kill switch (in place). The cap is never below
+        confirm: abstaining stays the model's own statement."""
+        ro = self.rollout()
+        cap, why = effective_cap(ro, self.switch, stakes=d["stakes"], head=spec.name)
+        names = [cfg.tier_name(i) for i in range(3)]
+        t = names.index(d["tier"])
+        info: dict[str, Any] = {"mode": ro.mode_for(spec.name), "automation": self.switch.state().enabled,
+                                "cap": names[cap],
+                                "capped": t > cap}
+        if t > cap:
+            info["proposed_tier"] = d["tier"]
+            info["reason"] = "; ".join(why)
+            d["tier"] = names[cap]
+            msg = f"{'; '.join(why)} (act became {names[cap]})"
+            if msg not in d["warnings"]:
+                d["warnings"].append(msg)
+        d["rollout"] = info
+
+    def head_log(self, state: Any, r: dict, **extra: Any) -> dict:
+        """What a decision record keeps of one head decision (head_decision's output) on `state`."""
+        d = r["decision"]
+        rec = {"state": state, "class": d["class"], "p": d["p"], "tier": d["tier"], "stakes": d.get("stakes"),
+               "probabilities": (r.get("answer") or {}).get("probabilities"),
+               "excluded_mass": (r.get("answer") or {}).get("excluded_mass"),
+               "uncertainty": (r.get("uncertainty") or {}).get("sources")}
+        if (d.get("rollout") or {}).get("capped"):
+            rec["proposed_tier"] = d["rollout"].get("proposed_tier")
+        rec.update(extra)
+        return rec
+
+    @staticmethod
+    def proposed_tier(d: dict, cfg: PL.PolicyConfig) -> str:
+        """The tier a head decision would have without the rollout cap: its tier before the cap, still lowered by
+        every deterministic cap a pack applied after it (`caps`)."""
+        names = [cfg.tier_name(i) for i in range(3)]
+        t = (d.get("rollout") or {}).get("proposed_tier") or d["tier"]
+        for c in d.get("caps") or []:
+            if c.get("to") in names and names.index(c["to"]) < names.index(t):
+                t = c["to"]
+        return t
+
+    def rollout_summary(self, results: list[dict], action: str | None, cfg: PL.PolicyConfig,
+                        proposed_action: str | None = None) -> dict:
+        """The response's `rollout`: mode, kill switch, and the action that would have been taken without the
+        rollout cap. A pack whose action is not simply the weakest head (a plan chain, rules) passes its own
+        `proposed_action`, computed by the same rule from the heads' proposed tiers."""
+        decisions = [r.get("decision", r) for r in results]
+        capped = any((d.get("rollout") or {}).get("capped") for d in decisions)
+        out = {**self.rollout().to_dict(), "automation": self.switch.state().to_dict(), "capped": capped}
+        if action is not None:
+            names = [cfg.tier_name(i) for i in range(3)]
+            if proposed_action is None:
+                proposed_action = (PL.weakest([{"tier": self.proposed_tier(d, cfg)} for d in decisions], cfg)
+                                   if capped and decisions else action)
+            # the rollout cap only lowers act to confirm: an abstained action was not its doing, and what would have
+            # happened without it is never weaker than what happened
+            if action == names[0] or (proposed_action in names and action in names
+                                      and names.index(proposed_action) < names.index(action)):
+                proposed_action = action
+            out["proposed_action"] = proposed_action
+        return out
+
+    def log_decision(self, version: str, kind: str, heads: dict[str, dict], extra: dict | None = None, *,
+                     request_state: Any = _MISSING, questions: dict | None = None, requested_model: str | None = None,
+                     latency_ms: float | None = None, warnings: list[str] | None = None, audit: dict | None = None,
+                     rollout: dict | None = None) -> dict:
+        """Log a decision as a receipt so feedback can refer to it and a caller can check it before acting.
+        `heads`: name -> head_log(...) (or at least {state, class, p, tier}). Returns the record as written (in a
+        dry run: as it would have been, with decision_id "dry-run"). States are logged with serve.log_states
+        (default on), secrets redacted (serve.redact); the receipt keeps the digest of the state as sent."""
         log_states = self.project.get("serve.log_states", True) is not False
+        kinds = self.redact_kinds() if log_states else ()
         rec_heads = {}
         for name, h in heads.items():
-            r = {"class": h.get("class"), "p": h.get("p"), "tier": h.get("tier")}
+            r = {k: h.get(k) for k in ("class", "p", "tier")}
+            for k in ("head", "stakes", "probabilities", "excluded_mass", "proposed_tier", "uncertainty"):
+                if h.get(k) is not None:
+                    r[k] = h[k]
             if log_states:
-                r["state"] = h.get("state")
+                r["state"] = redact(h.get("state"), kinds)[0] if kinds else h.get("state")
             rec_heads[name] = r
-        return self.logs.add_decision({"kind": kind, "model": version, "heads": rec_heads, **(extra or {})})
+        if log_states:   # a record never grows past MAX_LOGGED_STATE_BYTES of states (many questions, big states)
+            budget = R.MAX_LOGGED_STATE_BYTES
+            for r in rec_heads.values():
+                if "state" not in r:
+                    continue
+                size = len(R.encode(R.dumps(R.plain(r["state"]))))
+                if size > budget:
+                    r["state_digest"] = digest(r.pop("state"))
+                    r["state_omitted"] = f"{size} bytes: over the per-record log budget; send the state with feedback"
+                else:
+                    budget -= size
+        b = self.bundle(version)
+        meta = b.meta if b is not None else {}
+        pk = meta.get("pack") or {}
+        pack = {"name": pk.get("name") or getattr(self.pack_for(version), "name", None),
+                "version": pk.get("version") or getattr(self.pack_for(version), "version", None)}
+        if request_state is _MISSING:   # older callers: the state of the first head stands for the request
+            request_state = next(iter(heads.values()), {}).get("state") if heads else None
+        q = questions or {"digest": digest({"kind": kind, "heads": sorted(heads)}), "battery": None}
+        rk = self.redact_kinds()
+        if rk:
+            audit = redact(audit, rk)[0] if audit else audit
+            warnings = [redact(w, rk)[0] for w in (warnings or [])]
+        receipt = R.make(requested_model=requested_model, model=version, pack=pack,
+                         feature_version=meta.get("feature_version"), state=request_state, questions=q,
+                         policy_digest=self.policy_digest(version), rollout=rollout, latency_ms=latency_ms,
+                         warnings=warnings, audit=audit)
+        row = {"kind": kind, "model": version, "heads": rec_heads, **(extra or {}), "receipt": receipt}
+        if self.is_dry:
+            return {"decision_id": "dry-run", "created_at": now_iso(), **row}
+        return self.logs.add_receipt(row)
+
+    def record(self, version: str, kind: str, heads: dict[str, dict], extra: dict | None = None,
+               **receipt: Any) -> str:
+        """Log a decision (see log_decision) and return its decision_id."""
+        return self.log_decision(version, kind, heads, extra, **receipt)["decision_id"]
 
     def decide(self, req: DecideRequest) -> dict:
         version = self.resolve(req.model)
@@ -422,22 +921,35 @@ class Service:
         names = req.heads or list(specs)
         if not names:
             raise ContractError("no heads to decide with")
+        extra = req.model_extra or {}
+        strict = bool(extra.get("strict"))
+        hspecs = {name: self.spec(name, version) for name in names}
+        allowed, considered = self.filter_options(hspecs, extra, names)
         warnings: list[str] = []
         results, logged = {}, {}
         for name in names:
-            spec = self.spec(name, version)
-            r = self.head_decision(version, spec, req.state, stakes=req.stakes, explore=req.explore,
-                                   warnings=warnings)
+            spec = hspecs[name]
+            if name in allowed and not allowed[name]:
+                r = self.no_option_decision(version, spec, req.state, stakes=req.stakes, warnings=warnings,
+                                            considered=considered.get(name))
+            else:
+                r = self.head_decision(version, spec, req.state, stakes=req.stakes, explore=req.explore,
+                                       warnings=warnings, allowed=allowed.get(name), strict=strict)
+            self.attach_contract(r, name, allowed.get(name), considered.get(name))
             results[name] = r
-            logged[name] = {"state": req.state, "class": r["decision"]["class"], "p": r["decision"]["p"],
-                            "tier": r["decision"]["tier"]}
+            logged[name] = self.head_log(req.state, r)
         cfg = self.policy(version)
         tier = PL.weakest([r["decision"] for r in results.values()], cfg)
-        did = self.record(version, "decide", logged)
-        return {"decision_id": did, "model": version, "action": tier, "tier": tier,
+        latency = round((time.perf_counter() - t0) * 1000, 2)
+        rollout = self.rollout_summary(list(results.values()), tier, cfg)
+        row = self.log_decision(version, "decide", logged, {"action": tier, "stakes": req.stakes},
+                                request_state=req.state, requested_model=req.model, latency_ms=latency,
+                                warnings=warnings, audit=request_audit(extra), rollout=rollout,
+                                questions=self.decision_contract("decide", names, extra, stakes=req.stakes))
+        return {"decision_id": row["decision_id"], "model": version, "action": tier, "tier": tier,
                 "explore": bool(req.explore), "heads": results, "policy": cfg.to_dict(), "warnings": warnings,
-                "usage": {"input_tokens": 0, "output_tokens": 0, "questions": len(results),
-                          "latency_ms": round((time.perf_counter() - t0) * 1000, 2)}}
+                "rollout": rollout, "receipt": R.summary(row),
+                "usage": {"input_tokens": 0, "output_tokens": 0, "questions": len(results), "latency_ms": latency}}
 
     def evaluate(self, req: EvaluateRequest) -> dict:
         version = self.resolve(req.model)
@@ -451,17 +963,32 @@ class Service:
     # ------------------------------------------------------------------ the reinforcement loop
     def feedback(self, req: FeedbackRequest) -> dict:
         version = self.registry.latest_id()
-        head, decision = req.head, None
+        head, decision, dh, question = req.head, None, None, None
         if req.decision_id:
             decision = self.logs.decision(req.decision_id)
             if decision is None:
                 raise ContractError(f"unknown decision_id {req.decision_id!r}", kind="unknown_decision")
+            # a decision record keys its heads by head name (decide / evaluate) or by question id (a /v1/systemone
+            # receipt, whose entries name their head): `head` may be either
+            dheads = decision.get("heads") or {}
             if head is None:
-                dheads = list(decision.get("heads") or {})
                 if len(dheads) != 1:
-                    raise ContractError(f"decision {req.decision_id} involved heads {dheads}: name the one this "
-                                        f"outcome is for in `head`", heads=dheads)
-                head = dheads[0]
+                    raise ContractError(f"decision {req.decision_id} involved heads {list(dheads)}: name the one "
+                                        f"this outcome is for in `head`", heads=list(dheads))
+                key = next(iter(dheads))
+            elif head in dheads:
+                key = head
+            else:
+                keys = [k for k, h in dheads.items() if (h or {}).get("head") == head]
+                key = keys[0] if len(keys) == 1 else None
+                if len(keys) > 1:
+                    raise ContractError(f"decision {req.decision_id} asked head '{head}' in several questions "
+                                        f"{keys}: name the question id in `head`", heads=list(dheads))
+            if key is not None:
+                dh = dheads[key]
+                head = (dh or {}).get("head") or key
+                if key != head:
+                    question = key   # a /v1/systemone receipt: one head may be asked in several questions
         if not head:
             raise ContractError("head is required (or a decision_id of a single-head decision, which implies it)")
         spec = self.spec(head, version)
@@ -472,7 +999,8 @@ class Service:
         label = spec.labels[yi]
         row: dict = {"decision_id": req.decision_id, "head": head, "label": label, "weight": req.weight,
                      "source": req.source}
-        dh = ((decision or {}).get("heads") or {}).get(head) if decision else None
+        if question is not None:
+            row["question"] = question
         if req.x is not None:
             # a vector is only usable at the next train if it has the current model's feature schema: check it now
             # instead of promising a training row that every pack would skip
@@ -489,7 +1017,8 @@ class Service:
             self._check_vector(spec, state, names, fv)
             row.update(state=state)
         elif req.state is not None:
-            row["state"] = req.state
+            kinds = self.redact_kinds()
+            row["state"] = redact(req.state, kinds)[0] if kinds else req.state
         elif dh is not None and dh.get("state") is not None:
             row["state"] = dh["state"]
         else:
@@ -497,20 +1026,59 @@ class Service:
                                 "or the decision_id of a logged decision (with serve.log_states on)")
         if decision is not None:
             row["time"] = decision.get("created_at")
+        rk = self.redact_kinds()
+        for k in ("tags", "note", "missing_evidence"):
+            v = getattr(req, k, None)
+            if v:
+                row[k] = redact(v, rk)[0] if rk else v
         update = None
         if dh is not None:
             table = self.ledger.table(head)
             if table is None:
                 update = {"updated": False, "reason": f"head '{head}' is not trained: it has no posterior table yet"}
+            elif dh.get("class") is None:
+                update = {"updated": False, "reason": "the decision committed to no class (every option was removed)"}
             elif table_is_live(table, decision.get("model")):
-                update = self.ledger.update(head, req.decision_id, dh["class"], float(dh["p"]), label)
+                # each prediction counts once: a receipt that asked one head in two questions holds two predictions,
+                # scored as two trials (decision_id#question); a head asked once keeps the plain decision_id
+                asked = [k for k, h in (decision.get("heads") or {}).items() if ((h or {}).get("head") or k) == head]
+                trial = req.decision_id if question is None or len(asked) < 2 else f"{req.decision_id}#{question}"
+                update = self.ledger.update(head, trial, dh["class"], float(dh["p"]), label)
             else:
                 update = {"updated": False, "reason": "the decision was made by a model version other than the one "
                                                       "the posterior table belongs to"}
         saved = self.logs.add_feedback(row)
-        return {"id": saved["id"], "stored": True, "head": head, "label": label,
-                "feedback_rows": self.logs.feedback_counts().get(head, 0), "bernoulli": update,
-                "note": "used as an up-weighted training row at the next train"}
+        out = {"id": saved["id"], "stored": True, "head": head, "label": label,
+               "feedback_rows": self.logs.feedback_counts().get(head, 0), "bernoulli": update,
+               "note": "used as an up-weighted training row at the next train"}
+        if "regression" in (req.tags or []):
+            from . import regress as RG  # a reviewer's correction becomes a case every later version must pass
+
+            try:
+                case = RG.add_case(RG.cases_path(self.project), RG.case_from_feedback(self, saved))
+                out["regression_case"] = {"id": case["id"], "stored": True}
+            except ContractError as e:          # the feedback is stored either way; say why there is no case
+                out["regression_case"] = {"stored": False, "reason": e.message}
+            except OSError as e:                # the project directory is not writable from this process
+                out["regression_case"] = {"stored": False, "reason": f"the regression cases file could not be "
+                                                                      f"written ({type(e).__name__})"}
+        return out
+
+    def outcome(self, req: OutcomeRequest) -> dict:
+        """A decision-level outcome (POST /v1/outcome), joined with its decision by the metrics."""
+        decision = self.logs.decision(req.decision_id)
+        if decision is None:
+            raise ContractError(f"unknown decision_id {req.decision_id!r}", kind="unknown_decision")
+        row = {k: v for k, v in req.model_dump().items() if v is not None}
+        rk = self.redact_kinds()
+        if rk:
+            row = {k: (redact(v, rk)[0] if k in ("note", "provider", "route_taken", "tags", "verified_by") else v)
+                   for k, v in row.items()}
+        row["kind"] = decision.get("kind")
+        row["model"] = decision.get("model")
+        saved = self.logs.add_outcome(row)
+        return {"id": saved["id"], "stored": True, "decision_id": req.decision_id,
+                "note": "joined with the decision by GET /v1/metrics; outcomes never train a head"}
 
     # ------------------------------------------------------------------ views
     def head_view(self, version: str, spec: HeadSpec, pending: dict) -> dict:
@@ -624,6 +1192,190 @@ class Service:
                           "/v1/feedback with a decision_id",
                           "the table belongs to one model version and restarts from the new holdout at a train"]}
 
+    # ------------------------------------------------------------------ receipts
+    def receipt_view(self, decision_id: str) -> dict:
+        row = self.logs.decision(decision_id)
+        if row is None:
+            raise ContractError(f"unknown decision_id {decision_id!r}", kind="unknown_decision", status=404)
+        return json_safe(row)
+
+    def check_receipt(self, decision_id: str, *, state: Any = _MISSING, state_digest: str | None = None,
+                      max_age_s: float | None = None) -> dict:
+        """Does decision `decision_id` still approve acting on `state` now? (core/receipts.py `check`)"""
+        row = self.receipt_view(decision_id)
+        r = row.get("receipt") or {}
+        if not r.get("state_digest"):
+            raise ContractError(f"decision {decision_id} was logged before receipts existed: it cannot be checked",
+                                kind="no_receipt")
+        if state is _MISSING and state_digest is None:
+            raise ContractError("send the state you are about to act on (`state`) or its digest (`state_digest`): a "
+                                "receipt approves the state it judged, nothing else", field="state")
+        sd = digest(state) if state is not _MISSING else str(state_digest)
+        reg = self.registry.registry()
+        latest = self.registry.latest_id()
+        known = list(reg["versions"]) or [latest]
+        model = row.get("model")
+        try:
+            pd = self.policy_digest(model) if model in known else None
+        except Exception:   # a bundle that no longer loads: the policy cannot be compared, the model check says why
+            pd = None
+        bat = (r.get("questions") or {}).get("battery")
+        bv = None
+        if bat:
+            try:
+                b = self.batteries(model if model in known else latest).get(bat.get("name"))
+                bv = b.version if b is not None else None
+            except ContractError:
+                bv = None
+        cap = 2
+        for name, h in (row.get("heads") or {}).items():
+            if (h or {}).get("tier") == "act":
+                c, _ = effective_cap(self.rollout(), self.switch, stakes=h.get("stakes") or row.get("stakes"),
+                                     head=h.get("head") or name)
+                cap = min(cap, c)
+        if row.get("action") == "act" and self.switch.cap()[0] < cap:
+            cap = self.switch.cap()[0]
+        out = R.check(row, state_digest=sd, latest=latest, known_models=known, policy_digest=pd,
+                      automation_cap=cap, battery_version=bv, max_age_s=max_age_s)
+        # a confirm decision approves an action only once a person confirmed it (the guide's layered gate)
+        if R.needs_confirmation(row):
+            conf = self.logs.confirmations(decision_id)
+            if conf:
+                out["checks"]["confirmation"] = "confirmed"
+                out["confirmed"] = conf[-1]
+            else:
+                out["checks"]["confirmation"] = "missing"
+                out["stale_reasons"].append(f"a confirm decision: a person must confirm it before the action "
+                                            f"(POST /v1/receipts/{decision_id}/confirm)")
+                out["current"] = False
+        return out
+
+    def confirm_receipt(self, decision_id: str, *, by: str, note: str | None = None,
+                        state_digest: str | None = None) -> dict:
+        """Record that a person confirmed a decision (POST /v1/receipts/{id}/confirm). The confirmation belongs to
+        the receipt and so to its state: a changed state still makes the receipt stale."""
+        row = self.receipt_view(decision_id)
+        r = row.get("receipt") or {}
+        if state_digest is not None and state_digest != r.get("state_digest"):
+            raise ContractError("state_digest is not the digest of the state this decision judged: confirm the "
+                                "decision you reviewed", kind="state_mismatch", field="state_digest")
+        rk = self.redact_kinds()
+        note = redact(note, rk)[0] if (note and rk) else note
+        rec = self.logs.add_confirmation({"decision_id": decision_id, "by": by, "note": note,
+                                          "state_digest": r.get("state_digest"), "action": row.get("action")})
+        return {"confirmed": True, "decision_id": decision_id, "id": rec["id"], "at": rec["received_at"], "by": by}
+
+    def verify_receipts(self) -> dict:
+        return R.verify_chain(self.logs.decision_log.path)
+
+    # ------------------------------------------------------------------ operations metrics and the review queue
+    def review_capacity(self) -> float | None:
+        """rlcd.yaml serve.review_capacity_per_day: confirm decisions the reviewers can take per day (None: unset)."""
+        v = self.project.get("serve.review_capacity_per_day")
+        if v is None:
+            return None
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not v > 0:
+            raise ContractError(f"rlcd.yaml serve.review_capacity_per_day must be a positive number, got {v!r}",
+                                kind="bad_config", status=500)
+        return float(v)
+
+    def abstain_names(self) -> tuple[str, ...]:
+        """The names the abstain action goes by in the logs: the built-in ones and this project's policy.abstain."""
+        names = list(OPS.ABSTAIN_NAMES)
+        with contextlib.suppress(Exception):   # a pack that cannot load must not take the metrics down
+            names.append(self.policy_config().abstain)
+        return tuple(dict.fromkeys(names))
+
+    def holdouts(self, version: str, head: str | None = None) -> dict[str, dict]:
+        """{head: ops.holdout_summary(report.json)} for the trained heads of `version` ({} when it has none)."""
+        try:
+            b = self.bundle(version)
+        except Exception:      # a version no longer registered, or a bundle that does not load
+            return {}
+        out: dict[str, dict] = {}
+        for name in (b.names() if b is not None else []):
+            if head is not None and name != head:
+                continue
+            h = b.head(name)
+            try:
+                out[name] = OPS.holdout_summary(h.report, decision=h.spec.decision, model=version)
+            except Exception:  # an old or damaged bundle without report.json: nothing to compare with
+                continue
+        return out
+
+    def metrics_view(self, *, since: str | None = None, until: str | None = None, model: str | None = None,
+                     kind: str | None = None, head: str | None = None) -> dict:
+        """GET /v1/metrics (core/ops.py) over decisions.jsonl, feedback.jsonl and outcomes.jsonl. The holdout of
+        `model` (default: the version rlcd-latest points at) is put next to that version's online numbers."""
+        version = None
+        if model:
+            try:
+                version = self.resolve(model)
+            except ContractError:   # a version no longer served still has decisions in the log
+                version = model
+        target = version or self.registry.latest_id()
+        holdout = self.holdouts(target, head)
+        out = OPS.metrics(self.logs.decisions(), self.logs.feedback(), self.logs.outcomes(), since=since,
+                          until=until, model=version, kind=kind, head=head, holdout=holdout,
+                          review_capacity_per_day=self.review_capacity(), abstain_names=self.abstain_names())
+        out["holdout_model"] = target if holdout else None
+        return out
+
+    def review_view(self, *, limit: int = 50, head: str | None = None, kind: str | None = None,
+                    include_abstain: bool = True, oldest_first: bool = True) -> dict:
+        """GET /v1/review: confirm and abstain decisions without feedback, oldest first (core/ops.py)."""
+        limit = max(0, int(limit))
+        items = OPS.review_queue(self.logs.decisions(), self.logs.feedback(), limit=None, head=head, kind=kind,
+                                 include_abstain=include_abstain, oldest_first=oldest_first,
+                                 abstain_names=self.abstain_names())
+        return {"pending": len(items), "shown": min(len(items), limit), "items": json_safe(items[:limit]),
+                "capacity_per_day": self.review_capacity(),
+                "resolve": "POST /v1/feedback {decision_id, head, label, source, tags?: [\"regression\"], note?, "
+                           "missing_evidence?}: correct the route, name missing evidence, or keep the case as a "
+                           "regression fixture; POST /v1/receipts/{id}/confirm when a person confirms the action"}
+
+    # ------------------------------------------------------------------ automation and rollout
+    def automation_view(self) -> dict:
+        return {"rollout": self.rollout().to_dict(), "automation": self.switch.state().to_dict(),
+                "history": self.switch.history(20)}
+
+    def set_automation(self, enabled: bool, *, reason: str | None = None, by: str | None = None) -> dict:
+        self.switch.set(bool(enabled), reason=reason, by=by, at=now_iso())
+        return self.automation_view()
+
+    def promote(self, version: str, *, reason: str | None = None, by: str | None = None,
+                kind: str = "promote") -> dict:
+        """Point rlcd-latest at `version` (kind "rollback" or "promote"): no retrain, no code change."""
+        try:
+            return self.registry.set_latest(version, reason=reason, by=by, kind=kind)
+        except UnknownModel:
+            raise ContractError(f"unknown model {version!r}", kind="unknown_model",
+                                available=self.registry.available()) from None
+
+    # ------------------------------------------------------------------ batteries
+    def batteries_view(self, model: str | None = None) -> dict:
+        version = self.resolve(model)
+        specs = self.specs(version)
+        out = []
+        for b in self.batteries(version).values():
+            d = b.to_dict()
+            problems = []
+            for q in b.questions():
+                spec = specs.get(q.head)
+                if spec is None:
+                    problems.append(f"question '{q.id}': no head named {q.head!r} in {version}")
+                    continue
+                try:
+                    q.bind(spec)
+                except ContractError as e:
+                    problems.append(e.message)
+                d["questions"][q.id]["trained"] = self.loaded(version, q.head) is not None
+                if not d["questions"][q.id]["trained"]:
+                    problems.append(f"question '{q.id}': head {q.head!r} is not trained in {version}")
+            d["problems"] = problems
+            out.append(d)
+        return {"model": version, "batteries": out}
+
     def health(self) -> dict:
         version = self.registry.latest_id()
         running = self.trainer.running()
@@ -631,10 +1383,18 @@ class Service:
         try:
             for n, s in self.specs(version).items():
                 heads[n] = {"trained": self.loaded(version, s.name) is not None}
-        except Exception as e:  # health must answer even when the pack cannot load
-            heads = {"error": f"{type(e).__name__}: {e}"}
+        except Exception as e:  # health must answer even when the pack cannot load; the text (paths, DSNs) is logged
+            import logging
+
+            logging.getLogger("open_rlcd").error("health: the pack cannot load: %s", e)
+            heads = {"error": f"{type(e).__name__}: the pack cannot load (details are in the server log)"}
         b = self.bundle(version)
+        try:
+            rollout = self.rollout().mode
+        except ContractError:
+            rollout = "invalid"
         return {"status": "ok", "service": "open-rlcd", "version": VERSION, "model": version, "alias": LATEST,
                 "pack": ((b.meta.get("pack") or {}).get("name") if b else self._default_pack),
                 "heads": heads, "training": running["job_id"] if running else None, "home": str(self.home),
-                "untrained_id": f"{MODEL_PREFIX}0"}
+                "untrained_id": f"{MODEL_PREFIX}0", "rollout": rollout,
+                "automation": self.switch.state().enabled}

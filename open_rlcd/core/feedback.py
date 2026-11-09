@@ -3,7 +3,13 @@
     feedback.jsonl    outcomes and corrections posted to /v1/feedback (the reinforcement loop). Each row becomes
                       an up-weighted training row at the next train; with a decision_id it also updates the
                       Beta-Bernoulli ledger at once.
-    decisions.jsonl   what /v1/decide and /v1/evaluate answered, so feedback can refer to a decision_id.
+    confirmations.jsonl  a person confirmed a confirm-tier decision (POST /v1/receipts/{id}/confirm); a receipt check
+                      of a confirm decision is not current without one.
+    outcomes.jsonl    decision-level outcomes posted to /v1/outcome (task success, route taken, cost): measured
+                      downstream by the caller, joined with decisions by the metrics; they never train a head.
+    decisions.jsonl   what /v1/decide and /v1/evaluate answered (and /v1/systemone, /v1/rank when receipts are
+                      on for them), so feedback can refer to a decision_id. Every line is a receipt in a hash
+                      chain (core/receipts.py); lines written before receipts existed stay readable.
 
 Both are plain JSON lines (never pickles); a torn last line is skipped, never fatal. States are stored as sent
 (they are re-featurised at the next train, so a feature-version change does not orphan them); set
@@ -15,11 +21,14 @@ is never rotated by the service: archive it yourself after a train if it grows l
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
+from .digest import decode, encode
+from .receipts import ChainedLog
 from .training import now_iso
 
 
@@ -30,26 +39,45 @@ class JsonlLog:
 
     def append(self, row: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._lock, open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(row, separators=(",", ":"), ensure_ascii=False, default=str) + "\n")
+        line = encode(json.dumps(row, separators=(",", ":"), ensure_ascii=False, default=str) + "\n")
+        with self._lock, open(self.path, "a+b") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":
+                    f.seek(0, os.SEEK_END)
+                    f.write(b"\n")      # a torn last line (a crash mid-write) must not swallow this row
+            f.seek(0, os.SEEK_END)
+            f.write(line)
 
     def rows(self) -> Iterator[dict]:
         if not self.path.exists():
             return
-        with open(self.path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        yield json.loads(line)
-                    except json.JSONDecodeError:
-                        continue  # a torn last line must not break training
+        with open(self.path, "rb") as f:
+            for raw in f:
+                if not raw.strip():
+                    continue
+                try:
+                    row = json.loads(decode(raw))
+                except ValueError:       # a torn line (also one cut inside a character) never breaks a reader
+                    continue
+                if isinstance(row, dict):
+                    yield row
+
+
+class DecisionLog(ChainedLog):
+    """decisions.jsonl: chained receipts, read back like any JSON-lines log."""
+
+    def rows(self) -> Iterator[dict]:
+        yield from JsonlLog(self.path).rows()
 
 
 class FeedbackLog:
     def __init__(self, home: Path):
         self.feedback_log = JsonlLog(Path(home) / "feedback.jsonl")
-        self.decision_log = JsonlLog(Path(home) / "decisions.jsonl")
+        self.decision_log = DecisionLog(Path(home) / "decisions.jsonl")
+        self.outcome_log = JsonlLog(Path(home) / "outcomes.jsonl")
+        self.confirmation_log = JsonlLog(Path(home) / "confirmations.jsonl")
         self._index: dict[str, dict] = {}
         self._counts: dict[str, int] = {}
         self._counted = 0                  # bytes of feedback.jsonl already counted
@@ -86,19 +114,41 @@ class FeedbackLog:
                             break
                         pos += len(line)
                         try:
-                            h = json.loads(line).get("head", "?")
+                            h = json.loads(decode(line)).get("head", "?")
                         except (ValueError, AttributeError):
                             continue
                         self._counts[h] = self._counts.get(h, 0) + 1
                 self._counted = pos
             return dict(self._counts)
 
+    def add_outcome(self, row: dict) -> dict:
+        row = {"id": uuid.uuid4().hex, "received_at": now_iso(), **row}
+        self.outcome_log.append(row)
+        return row
+
+    def outcomes(self) -> list[dict]:
+        return list(self.outcome_log.rows())
+
+    def add_confirmation(self, row: dict) -> dict:
+        row = {"id": uuid.uuid4().hex, "received_at": now_iso(), **row}
+        self.confirmation_log.append(row)
+        return row
+
+    def confirmations(self, decision_id: str | None = None) -> list[dict]:
+        return [r for r in self.confirmation_log.rows() if decision_id is None or r.get("decision_id") == decision_id]
+
+    def decisions(self) -> Iterator[dict]:
+        yield from self.decision_log.rows()
+
     def add_decision(self, row: dict) -> str:
-        did = uuid.uuid4().hex
-        rec = {"decision_id": did, "created_at": now_iso(), **row}
-        self.decision_log.append(rec)
-        self._index[did] = rec
-        return did
+        return self.add_receipt(row)["decision_id"]
+
+    def add_receipt(self, row: dict) -> dict:
+        """Append one decision record (chained; see core/receipts.py) and return it as written."""
+        rec = {"decision_id": uuid.uuid4().hex, "created_at": now_iso(), **row}
+        rec = self.decision_log.append(rec)
+        self._index[rec["decision_id"]] = rec
+        return rec
 
     def decision(self, decision_id: str) -> dict | None:
         if decision_id in self._index:

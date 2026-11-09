@@ -123,7 +123,15 @@ open_rlcd/
   report/    model_card.py  html.py
   bench.py
   cli.py     `rlcd`
+  client.py  Python client: typed questions, typed errors, retries for transport failures only, fail-closed
 ```
+
+The control layer (section 12) adds to `core/`: `digest.py` (canonical JSON digests), `inputs.py` (question state
+paths), `battery.py` (versioned question sets), `routes.py` (route contracts and deterministic filters),
+`rollout.py` (rollout modes and the kill switch), `receipts.py` (hash-chained receipts, staleness checks),
+`review.py` (evaluate's decision table and revision loop), `uncertainty.py` (uncertainty sources), `redact.py`
+(secrets out of logs), `ops.py` (metrics and the review queue), `replay.py` / `regress.py` (version replay and
+regression cases) and `checklist.py` (`rlcd check`).
 
 ## 6. Core interfaces
 
@@ -327,4 +335,32 @@ check, not accuracy on anyone's real traffic.
 
 M1 core + contract + tests -> M2 tabular pack -> M3 documents pack (local FAISS / NetworkX, synthetic RAG data)
 -> M4 labeling -> M5 serve API + CLI + bench -> M6 bundle export / import, demo bundle, model card -> M7 Qdrant /
-pgvector / Neo4j -> M8 trading adapter -> M9 docs, examples, CI. One commit per milestone with tests green.
+pgvector / Neo4j -> M8 trading adapter -> M9 docs, examples, CI -> M10 the control layer (section 12). One commit
+per milestone with tests green.
+
+## 12. The control layer (M10)
+
+The field guide *How to use Jev with LLMs* describes the harness a typed decision model needs around an LLM.
+What open-rlcd took from it, and the choices made ([control-layer.md](control-layer.md) is the user's view):
+
+* **Authority stays in code.** Nothing new can raise a tier: rollout modes and the kill switch cap at `confirm`
+  (never at the abstain action, which stays the model's own "I cannot vouch for this"); deterministic `checks`,
+  a partial artifact and out-of-evidence citations reject before any head is asked; `act` means eligible for the
+  caller's next gate.
+* **Probabilities keep meaning error rates.** Options removed by `allowed` / route contracts are zeroed, not
+  renormalised: the decision commits to the best allowed option with its own calibrated probability, and
+  `excluded_mass` reports what was removed. Asymmetric per-class thresholds are evaluated on the holdout with the
+  same per-class levels that serve, so the verdict verifies what is served.
+* **Fail closed on evidence.** A question path that does not resolve is a 422; `strict` refuses missing training
+  inputs; a choice with every option removed commits to nothing and escalates.
+* **Receipts bind, they do not prove.** A receipt is a line of `decisions.jsonl` (the log feedback already
+  referred to), chained by digests computed over each head state's digest, so states can be pruned for retention
+  while the chain still verifies. Appends hold an exclusive file lock (POSIX). The chain is tamper-evident, not
+  tamper-proof: truncation needs an external anchor of the head digest.
+* **Staleness is checked, not assumed.** A receipt approves the state it judged; `/v1/receipts/{id}/check`
+  compares the state digest, the model the alias points at, the policy, the battery version, the automation state
+  (for `act` decisions) and the age.
+* **A pinned version keeps its evidence.** The Bernoulli gate of a version that is not the live table's falls back
+  to that version's own holdout table, so a client pinning an older version is not silently capped; promote /
+  rollback restarts a head's live table from the target version's holdout table unless the table already belongs
+  to it.

@@ -137,6 +137,9 @@ class Registry:
                                    carried=carried, data_card=data_card, notes=notes)
             prev_vid = reg["latest"]
             self._register(reg, vid, meta)
+            if reg["latest"] == vid and prev_vid != vid:
+                reg.setdefault("history", []).append({"at": now_iso(), "from": prev_vid, "to": vid, "reason": None,
+                                                      "by": None, "kind": "train"})
             self._write(reg)
             for name, th in trained.items():   # the Bernoulli ledger restarts from the new holdout
                 self.ledger.reset(name, {**th.ledger, "model_version": vid, "valid_for": [vid]})
@@ -146,14 +149,69 @@ class Registry:
             # before the retrain still updates it (`valid_for`, which feedback and the gate check).
             for name, (old_dir, entry) in carried.items():
                 table = self.ledger.table(name)
-                if table and table.get("model_version") == prev_vid:
-                    valid = list(table.get("valid_for") or [prev_vid])
+                if table and (table.get("model_version") == prev_vid or prev_vid in (table.get("valid_for") or [])):
+                    # live for the version being replaced (also through valid_for, e.g. after a rollback): its
+                    # outcomes scored since the holdout carry over with the very same head
+                    valid = list(dict.fromkeys([*(table.get("valid_for") or []), table.get("model_version"), prev_vid]))
+                    valid = [v for v in valid if v]
                 else:
                     table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
                     valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
                 valid = list(dict.fromkeys([*valid, vid]))
                 self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
             return vid
+
+    def set_latest(self, version: str, *, reason: str | None = None, by: str | None = None,
+                   kind: str = "promote") -> dict:
+        """Point `rlcd-latest` at an existing version (rollback or promotion), recorded in registry.json `history`.
+        Each head of that version then gates on evidence that belongs to it: a Bernoulli table that is valid for the
+        version (a carried-over head) is kept, any other restarts from the version's own holdout table (outcomes
+        scored for the version that was latest stay with that version's table, which is replaced)."""
+        with self._lock:
+            reg = self.registry()
+            if version not in reg["versions"]:
+                raise UnknownModel(version)
+            prev = reg["latest"]
+            if prev == version:
+                return {"latest": version, "previous": prev, "changed": False}
+            reg["latest"] = version
+            reg.setdefault("history", []).append({"at": now_iso(), "from": prev, "to": version, "reason": reason,
+                                                  "by": by, "kind": kind})
+            self._write(reg)
+            b = self.bundle(version)
+            restarted = []
+            for name in b.names():
+                table = self.ledger.table(name) or {}
+                if table.get("model_version") == version or version in (table.get("valid_for") or []):
+                    continue
+                restored = self.ledger.archived(name, version)    # its own evidence, outcomes included
+                base = restored if restored is not None else b.head(name).holdout_ledger()
+                self.ledger.reset(name, {**base, "model_version": version,
+                                         "valid_for": list(dict.fromkeys([*(base.get("valid_for") or []), version]))})
+                restarted.append(name)
+            return {"latest": version, "previous": prev, "changed": True, "ledger_restarted": restarted}
+
+    def previous_latest(self) -> str | None:
+        """The version to roll back to (`rlcd rollback` without --to): the version that was latest before the
+        current one became latest, skipping every version that was itself rolled back from (a second rollback
+        must not re-promote the version the first one removed). Without history: the newest older version."""
+        reg = self.registry()
+        hist = reg.get("history") or []
+        latest = reg["latest"]
+        rolled_back = {h.get("from") for h in hist if h.get("kind") == "rollback"}
+        cur, seen = latest, {latest}
+        for h in reversed(hist):
+            if h.get("to") != cur:
+                continue
+            cand = h.get("from")
+            if cand in reg["versions"] and cand not in rolled_back and cand not in seen:
+                return cand
+            if cand is None or cand in seen:
+                break
+            seen.add(cand)
+            cur = cand
+        older = [v for v in reg["versions"] if _vkey(v) < _vkey(latest or "") and v not in rolled_back]
+        return max(older, key=_vkey) if older else None
 
     # ------------------------------------------------------------------ export / import
     def export(self, version: str, dest: Path) -> Path:

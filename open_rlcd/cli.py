@@ -11,6 +11,19 @@
     rlcd bench                                 p50 / p95 / p99 per stage on this machine
     rlcd export ./bundle | rlcd import ./bundle | rlcd push --hf user/repo
     rlcd demo                                  synthetic documents project, trained, in ./rlcd-demo
+
+  the control layer (docs/control-layer.md)
+    rlcd ask --query "..." --heads a,b         one System One call against the local model (or --battery NAME)
+    rlcd batteries                             the versioned question sets and whether their heads are trained
+    rlcd receipts verify | show ID | check ID --state s.json | confirm ID --by NAME | prune --before DATE
+    rlcd automation status | off --reason ... | on   the run-time kill switch (caps every decision at confirm)
+    rlcd promote VERSION | rlcd rollback [--to VERSION]   point rlcd-latest at another version, no retrain
+    rlcd metrics [--since DATE] [--model V]    the operations report: action mix, outcomes, drift, review load
+    rlcd review [--limit 50]                   decisions waiting for a person (confirm / abstain without feedback)
+    rlcd replay [--base A] [--candidate B]     logged decisions re-run under two versions: classes, tiers, bands
+    rlcd regress [--model V]                   run the regression cases (exit 1 when one fails or cannot be judged)
+    rlcd case add --from-decision ID --head H --expect class=X   turn a logged decision into a regression case
+    rlcd check [--model V] [--json]            the pre-launch checklist (exit 1 when an item fails)
 """
 from __future__ import annotations
 
@@ -43,8 +56,9 @@ TEMPLATES: dict[str, dict] = {
 }
 # `rlcd init` offers only the packs that ship on this branch (the trading adapter lives on its own branch).
 
-HEADER = """# Open RLCD project configuration. Docs: docs/teammate-quickstart.md
+HEADER = """# Open RLCD project configuration. Docs: docs/teammate-quickstart.md, docs/control-layer.md
 # Secrets (ANTHROPIC_API_KEY, RLCD_API_KEY, database passwords) come from the environment, never from this file.
+# rollout.mode: shadow | assist | limited | full. Before automating anything, run `rlcd check`.
 """
 
 
@@ -81,7 +95,10 @@ def cmd_init(args: argparse.Namespace) -> int:
             "train": {"holdout_fraction": 0.2, "n_splits": 5, "ordering": "auto", "calibration": "auto",
                       "feedback_weight": 5},
             "labeling": {"judge": "claude-cli", "batch": 20},
-            "serve": {"host": "127.0.0.1", "port": 8095, "log_states": True},
+            "serve": {"host": "127.0.0.1", "port": 8095, "log_states": True, "redact": True,
+                      "receipts": "decisions"},
+            # shadow -> assist -> limited -> full as the evidence earns it (docs/control-layer.md)
+            "rollout": {"mode": "full"},
             "security": {"allow_remote": False}}
     write_config(root / "rlcd.yaml", data, HEADER)
     gi = root / ".gitignore"
@@ -434,6 +451,177 @@ def cmd_calibration(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_json_arg(value: str) -> Any:
+    """A JSON value given inline, or `@path` / a path to a JSON file."""
+    if value.startswith("@"):
+        return json.loads(Path(value[1:]).expanduser().read_text(encoding="utf-8"))
+    p = Path(value).expanduser()
+    if not value.lstrip().startswith(("{", "[", '"')) and p.is_file():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return json.loads(value)
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    from .core.contract import SystemOneRequest
+
+    svc = _service(args)
+    state: Any = _read_json_arg(args.state) if args.state else {"query": args.query}
+    battery = args.battery
+    if not battery and not args.heads and args.query and "preflight" in svc.batteries(svc.resolve(args.model)):
+        battery = "preflight"      # a bare query: the questions that read one (every head would need evidence too)
+    if battery:
+        req = SystemOneRequest(model=args.model, state=state, battery=battery, strict=args.strict)
+    else:
+        version = svc.resolve(args.model)
+        specs = svc.specs(version)
+        names = args.heads.split(",") if args.heads else list(specs)
+        unknown = [n for n in names if n not in specs]
+        if unknown:
+            print(f"unknown heads {unknown}; heads: {list(specs)}", file=sys.stderr)
+            return 2
+        req = SystemOneRequest(model=args.model, state=state, strict=args.strict,
+                               questions={n: {"type": specs[n].type, "head": n} for n in names})
+    _print(svc.systemone(req))
+    return 0
+
+
+def cmd_batteries(args: argparse.Namespace) -> int:
+    _print(_service(args).batteries_view(args.model))
+    return 0
+
+
+def cmd_receipts(args: argparse.Namespace) -> int:
+    svc = _service(args)
+    if args.receipts_cmd == "verify":
+        res = svc.verify_receipts()
+        _print(res)
+        if not res["ok"]:
+            print(f"receipt chain broken at {len(res['breaks'])} place(s): see `breaks`", file=sys.stderr)
+            return 1
+        print(f"{res['receipts']} receipts chained, head {res['head']} (anchor this digest elsewhere to detect "
+              f"truncation)", file=sys.stderr)
+        return 0
+    if args.receipts_cmd == "show":
+        _print(svc.receipt_view(args.decision_id))
+        return 0
+    if args.receipts_cmd == "check":
+        kw: dict[str, Any] = {"max_age_s": args.max_age}
+        if args.state is not None:
+            kw["state"] = _read_json_arg(args.state)
+        else:
+            kw["state_digest"] = args.state_digest
+        res = svc.check_receipt(args.decision_id, **kw)
+        _print(res)
+        return 0 if res["current"] else 1
+    if args.receipts_cmd == "confirm":
+        _print(svc.confirm_receipt(args.decision_id, by=args.by or os.environ.get("USER") or "unknown",
+                                   note=args.note))
+        return 0
+    if args.receipts_cmd == "prune":
+        from .core.receipts import prune_states
+
+        _print(prune_states(svc.logs.decision_log.path, args.before))
+        return 0
+    return 2
+
+
+def cmd_automation(args: argparse.Namespace) -> int:
+    svc = _service(args)
+    if args.state in (None, "status"):
+        _print(svc.automation_view())
+        return 0
+    view = svc.set_automation(args.state == "on", reason=args.reason, by=args.by or os.environ.get("USER"))
+    _print(view)
+    return 0
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    svc = _service(args)
+    target = args.version if args.cmd == "promote" else (args.to or svc.registry.previous_latest())
+    if not target:
+        print("no earlier version to roll back to", file=sys.stderr)
+        return 1
+    _print(svc.promote(target, reason=args.reason, by=os.environ.get("USER"),
+                       kind="promote" if args.cmd == "promote" else "rollback"))
+    return 0
+
+
+def cmd_metrics(args: argparse.Namespace) -> int:
+    svc = _service(args)
+    _print(svc.metrics_view(since=args.since, until=args.until, model=args.model, kind=args.kind, head=args.head))
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    svc = _service(args)
+    view = svc.review_view(limit=args.limit, head=args.head, kind=args.kind, include_abstain=not args.confirm_only,
+                           oldest_first=not args.newest_first)
+    _print(view)
+    print(f"{view['pending']} decisions wait for review; resolve one with POST /v1/feedback", file=sys.stderr)
+    return 0
+
+
+def cmd_replay(args: argparse.Namespace) -> int:
+    from .core.replay import replay
+
+    svc = _service(args)
+    candidate = svc.resolve(args.candidate)
+    base = args.base
+    if base is None:   # what served before the candidate (when it is rlcd-latest), else what serves now
+        base = svc.registry.previous_latest() if candidate == svc.registry.latest_id() else svc.registry.latest_id()
+    if not base:
+        print("no earlier version to compare with: pass --base VERSION", file=sys.stderr)
+        return 1
+    heads = args.heads.split(",") if args.heads else None
+    rep = replay(svc, base, candidate, None, heads=heads, limit=args.limit, since=args.since,
+                 max_examples=args.examples)
+    _print(rep)
+    print(rep["summary"], file=sys.stderr)
+    return 0
+
+
+def cmd_regress(args: argparse.Namespace) -> int:
+    from .core import regress as RG
+
+    svc = _service(args)
+    path = Path(args.cases).expanduser() if args.cases else RG.cases_path(svc.project)
+    cases = RG.load_cases(path)
+    if not cases:
+        print(f"no regression cases in {path}: add one with `rlcd case add --from-decision ID --head H --expect "
+              f"class=X`, or post feedback tagged \"regression\"", file=sys.stderr)
+        return 0
+    res = RG.run_cases(svc, cases, model=args.model)
+    _print(res if args.all else {**res, "results": [r for r in res["results"] if r["status"] != "passed"]})
+    print(f"{res['model']}: {res['passed']} passed, {res['failed']} failed, {res['errors']} errors ({path})",
+          file=sys.stderr)
+    return 1 if res["failed"] or res["errors"] else 0
+
+
+def cmd_case(args: argparse.Namespace) -> int:
+    from .core import regress as RG
+
+    svc = _service(args)
+    path = Path(args.cases).expanduser() if args.cases else RG.cases_path(svc.project)
+    case = RG.case_from_decision(svc, args.from_decision, head=args.head, expect=RG.parse_expect(args.expect),
+                                 note=args.note, incident=args.incident)
+    saved = RG.add_case(path, case)
+    _print(saved)
+    print(f"added {saved['id']} to {path}: it copies the decision's logged state, review it before committing",
+          file=sys.stderr)
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    from .core.checklist import format_table, run
+
+    res = run(_service(args), model=args.model)
+    if args.json:
+        _print(res)
+    else:
+        print(format_table(res))
+    return 0 if res["ok"] else 1
+
+
 # ----------------------------------------------------------------------------- parser
 
 def build_parser() -> argparse.ArgumentParser:
@@ -542,6 +730,107 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("head")
     s.add_argument("--model")
     s.set_defaults(fn=cmd_calibration)
+
+    # ---- the control layer
+    s = sub.add_parser("ask", help="answer typed questions on one state (a System One call, no HTTP)")
+    s.add_argument("--query", help="shorthand for --state '{\"query\": ...}'")
+    s.add_argument("--state", help="the state: inline JSON, or @file.json")
+    s.add_argument("--heads", help="comma-separated heads (default: every head)")
+    s.add_argument("--battery", help="a battery name (optionally name@version) instead of --heads")
+    s.add_argument("--strict", action="store_true", help="refuse a state that lacks inputs training rows had")
+    s.add_argument("--model")
+    s.set_defaults(fn=cmd_ask)
+
+    s = sub.add_parser("batteries", help="list the versioned question sets (batteries)")
+    s.add_argument("--model")
+    s.set_defaults(fn=cmd_batteries)
+
+    s = sub.add_parser("receipts", help="decision receipts: verify the chain, show, check staleness, prune states")
+    rsub = s.add_subparsers(dest="receipts_cmd", required=True)
+    rsub.add_parser("verify", help="check every receipt's digest and the chain between them")
+    r = rsub.add_parser("show", help="print one decision record")
+    r.add_argument("decision_id")
+    r = rsub.add_parser("check", help="does a decision still approve acting on this state now? (exit 1 if stale)")
+    r.add_argument("decision_id")
+    g = r.add_mutually_exclusive_group(required=True)
+    g.add_argument("--state", help="the state about to be acted on: inline JSON or @file.json")
+    g.add_argument("--state-digest", dest="state_digest")
+    r.add_argument("--max-age", type=float, dest="max_age", help="seconds")
+    r = rsub.add_parser("confirm", help="record that a person confirmed a confirm-tier decision")
+    r.add_argument("decision_id")
+    r.add_argument("--by", help="who confirmed (default: $USER)")
+    r.add_argument("--note")
+    r = rsub.add_parser("prune", help="drop logged states older than a date (digests and the chain stay)")
+    r.add_argument("--before", required=True, help="ISO 8601 date, e.g. 2026-10-01")
+    s.set_defaults(fn=cmd_receipts)
+
+    s = sub.add_parser("automation", help="the kill switch: status | on | off (off caps decisions at confirm)")
+    s.add_argument("state", nargs="?", choices=["status", "on", "off"])
+    s.add_argument("--reason")
+    s.add_argument("--by")
+    s.set_defaults(fn=cmd_automation)
+
+    s = sub.add_parser("promote", help="point rlcd-latest at a version (no retrain)")
+    s.add_argument("version")
+    s.add_argument("--reason")
+    s.set_defaults(fn=cmd_promote)
+
+    s = sub.add_parser("rollback", help="point rlcd-latest back at the previous version (or --to VERSION)")
+    s.add_argument("--to")
+    s.add_argument("--reason")
+    s.set_defaults(fn=cmd_promote)
+
+    s = sub.add_parser("metrics", help="operations metrics over the logged decisions, feedback and outcomes")
+    s.add_argument("--since", help="ISO 8601 date or time, inclusive (e.g. 2026-11-01)")
+    s.add_argument("--until", help="ISO 8601 date or time, exclusive")
+    s.add_argument("--model", help="only decisions of this model version (its holdout is compared)")
+    s.add_argument("--kind", choices=["decide", "evaluate", "systemone", "rank"])
+    s.add_argument("--head", help="only decisions this head took part in")
+    s.set_defaults(fn=cmd_metrics)
+
+    s = sub.add_parser("review", help="the review queue: confirm and abstain decisions without feedback (read-only)")
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--head", help="only decisions this head took part in and has no feedback for")
+    s.add_argument("--kind", choices=["decide", "evaluate"])
+    s.add_argument("--confirm-only", action="store_true", dest="confirm_only", help="leave out abstained decisions")
+    s.add_argument("--newest-first", action="store_true", dest="newest_first")
+    s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("replay", help="re-run logged decisions under two versions: classes, tiers, bands, labels")
+    s.add_argument("--base", help="the version to compare with (default: what rlcd-latest pointed at before the "
+                                  "candidate, or rlcd-latest when the candidate is another version)")
+    s.add_argument("--candidate", help="the version under test (default: rlcd-latest)")
+    s.add_argument("--since", help="only decisions made at or after this ISO 8601 date or time")
+    s.add_argument("--limit", type=int, help="only the N most recent decisions")
+    s.add_argument("--heads", help="comma-separated heads (or systemone question ids); default: every head")
+    s.add_argument("--examples", type=int, default=20,
+                   help="decision ids listed per head where one version was right and the other wrong")
+    s.set_defaults(fn=cmd_replay)
+
+    s = sub.add_parser("regress", help="run the regression cases against a version (exit 1 if any fails)")
+    s.add_argument("--model", help="the version under test (default: rlcd-latest)")
+    s.add_argument("--cases", help="the cases file (default: rlcd.yaml regressions:, else ./regressions.jsonl)")
+    s.add_argument("--all", action="store_true", help="print passing cases too")
+    s.set_defaults(fn=cmd_regress)
+
+    s = sub.add_parser("case", help="regression cases: add one from a logged decision")
+    csub = s.add_subparsers(dest="case_cmd", required=True)
+    c = csub.add_parser("add", help="turn a logged decision into a regression case")
+    c.add_argument("--from-decision", dest="from_decision", required=True, help="the decision_id")
+    c.add_argument("--head", help="the head, or the question id of a systemone receipt (default: the decision's "
+                                  "only head)")
+    c.add_argument("--expect", action="append", required=True,
+                   help="key=value, repeatable: class=X, class_in=X,Y, tier=T, tier_at_most=T, tier_at_least=T, "
+                        "p_at_least=P, p_at_most=P (tiers by the policy's names, or 'abstain')")
+    c.add_argument("--note")
+    c.add_argument("--incident", help="the incident this case comes from (e.g. INC-42)")
+    c.add_argument("--cases", help="the cases file (default: rlcd.yaml regressions:, else ./regressions.jsonl)")
+    s.set_defaults(fn=cmd_case)
+
+    s = sub.add_parser("check", help="the pre-launch checklist: pass / warn / fail / info per item (exit 1 on a fail)")
+    s.add_argument("--model", help="the version to check (default: rlcd-latest)")
+    s.add_argument("--json", action="store_true", help="print the result as JSON instead of the table")
+    s.set_defaults(fn=cmd_check)
     return p
 
 

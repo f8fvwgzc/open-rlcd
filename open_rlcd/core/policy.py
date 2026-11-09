@@ -20,6 +20,18 @@ decision. Two caps then apply, both from evidence rather than belief:
   * the Bernoulli gate: `act` needs the accuracy posterior of predictions like this one (same head, same class,
     same probability bin; holdout + scored feedback) to put >= `gate_min_p_above` of its mass above the stakes
     level's `min_accuracy`. Otherwise act becomes confirm.
+
+Asymmetric thresholds: a wrong "refund approved" and a wrong "refund denied" rarely cost the same, so thresholds
+can differ per head and committed class (`overrides`, any of act / confirm / min_accuracy, per stakes level or
+"*" for every level):
+
+    policy:
+      overrides:
+        needs_graph: {"true": {"*": {act: 0.9}}}            # acting on "multi-hop" needs more than on "single"
+        response_type: {out_of_scope: {high: {act: 0.97, confirm: 0.9}}}
+
+The holdout evaluation, the verdict and every decision use the threshold of the class the decision commits to, so
+what was verified is exactly what is served.
 """
 from __future__ import annotations
 
@@ -65,6 +77,11 @@ class PolicyConfig:
     min_verify_rows: int = 30           # holdout rows (and act-tier rows) needed before act is verified
     gate_min_p_above: float = 0.9       # Bernoulli gate on act
     miscalibration_p: float = 0.05      # act-tier accuracy below its mean prediction at this level -> confirm
+    # asymmetric thresholds: {head: {committed class: {stakes level | "*": {act?, confirm?, min_accuracy?}}}}
+    overrides: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.overrides = _check_overrides(self.overrides, self.stakes)
 
     def level(self, stakes: str | None, default: str = "medium") -> StakesLevel:
         """The thresholds of a stakes level. An unknown level (a request's `stakes`, or a head's `stakes` override
@@ -74,6 +91,15 @@ class PolicyConfig:
             raise UnknownStakes(f"unknown stakes level {name!r}; configured: {list(self.stakes)}",
                                 stakes=list(self.stakes))
         return self.stakes[name]
+
+    def level_for(self, head: str | None, cls: str | None, stakes: str | None,
+                  default: str = "medium") -> StakesLevel:
+        """The thresholds a decision of `head` committing to `cls` uses at `stakes`: the stakes level, overridden
+        by `overrides[head][cls]` for that level (or "*")."""
+        base = self.level(stakes, default)
+        o = ((self.overrides.get(head) or {}).get(cls) or {}) if head is not None and cls is not None else {}
+        lv = {**(o.get("*") or {}), **(o.get(stakes or default) or {})}
+        return StakesLevel(**{**asdict(base), **lv}) if lv else base
 
     def bernoulli(self) -> B.BernoulliConfig:
         return B.BernoulliConfig(min_p_above=self.gate_min_p_above)
@@ -97,6 +123,46 @@ class PolicyConfig:
         return self.abstain if tier == 0 else TIERS[tier]
 
 
+_LEVEL_KEYS = {"act", "confirm", "min_accuracy"}
+
+
+def _check_overrides(overrides: Any, stakes: dict[str, StakesLevel]) -> dict:
+    """Validate `policy.overrides`: every merged level must be a valid StakesLevel (0 <= confirm <= act <= 1)."""
+    if not overrides:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError("policy.overrides maps head -> class -> stakes level (or '*') -> thresholds")
+    out: dict = {}
+    for head, by_class in overrides.items():
+        if not isinstance(by_class, dict):
+            raise ValueError(f"policy.overrides.{head} maps a class to per-stakes thresholds")
+        out[str(head)] = {}
+        for cls, by_level in by_class.items():
+            # YAML 1.1 reads an unquoted true / false class (a noul's label) as a boolean: it means "true" / "false"
+            cls = ("true" if cls else "false") if isinstance(cls, bool) else str(cls)
+            if not isinstance(by_level, dict):
+                raise ValueError(f"policy.overrides.{head}.{cls} maps a stakes level (or '*') to thresholds")
+            levels: dict = {}
+            for lvl, th in by_level.items():
+                lvl = str(lvl)
+                if lvl != "*" and lvl not in stakes:
+                    raise ValueError(f"policy.overrides.{head}.{cls}: unknown stakes level {lvl!r}; configured: "
+                                     f"{list(stakes)} (or '*')")
+                if not isinstance(th, dict) or not th or set(th) - _LEVEL_KEYS:
+                    raise ValueError(f"policy.overrides.{head}.{cls}.{lvl} sets some of {sorted(_LEVEL_KEYS)}")
+                if any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in th.values()):
+                    raise ValueError(f"policy.overrides.{head}.{cls}.{lvl}: thresholds must be numbers")
+                levels[lvl] = {k: float(v) for k, v in th.items()}
+            for name, base in stakes.items():   # every level the override reaches must stay consistent
+                merged = {**asdict(base), **levels.get("*", {}), **levels.get(name, {})}
+                try:
+                    StakesLevel(**merged)
+                except ValueError as e:
+                    raise ValueError(f"policy.overrides.{head}.{cls} at {name} stakes: {e}") from None
+            out[str(head)][str(cls)] = levels
+    return out
+
+
 def chosen(spec: Any, P: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """(class index each row commits to, its probability). Gate heads always commit to `true`."""
     P = np.atleast_2d(np.asarray(P, float))
@@ -113,6 +179,18 @@ def tiers(p: np.ndarray, level: StakesLevel, conformal_threshold: float | None =
     if conformal_threshold is not None:
         act &= p >= conformal_threshold
     return np.where(act, 2, np.where(p >= level.confirm, 1, 0))
+
+
+def class_tiers(spec: Any, c: np.ndarray, p: np.ndarray, cfg: PolicyConfig, stakes: str,
+                conformal_threshold: float | None = None) -> np.ndarray:
+    """`tiers` with the thresholds of each row's committed class (asymmetric overrides)."""
+    p = np.asarray(p, float)
+    c = np.asarray(c, int)
+    out = np.zeros(len(p), int)
+    for k in np.unique(c) if len(c) else []:
+        m = c == k
+        out[m] = tiers(p[m], cfg.level_for(spec.name, spec.labels[int(k)], stakes), conformal_threshold)
+    return out
 
 
 def _stats(mask: np.ndarray, correct: np.ndarray, p: np.ndarray) -> dict:
@@ -135,7 +213,7 @@ def evaluate(spec: Any, P: np.ndarray, y: np.ndarray, cfg: PolicyConfig,
     correct = c == y
     out = {}
     for name, level in cfg.stakes.items():
-        t = tiers(p, level, conformal_threshold if spec.decision == "gate" else None)
+        t = class_tiers(spec, c, p, cfg, name, conformal_threshold if spec.decision == "gate" else None)
         out[name] = {"thresholds": asdict(level),
                      "act": _stats(t == 2, correct, p), "act_or_confirm": _stats(t >= 1, correct, p),
                      "tiers": {cfg.tier_name(i): int((t == i).sum()) for i in range(3)}}
@@ -195,10 +273,11 @@ def decide(spec: Any, probs: np.ndarray, cfg: PolicyConfig, *, stakes: str | Non
     `missing_inputs`: features almost every training row had that this request lacks (the service's input guard).
     The probabilities were calibrated on inputs that had them, so such a decision is capped at confirm."""
     stakes_name = stakes or spec.stakes
-    level = cfg.level(stakes_name)
+    cfg.level(stakes_name)                      # an unknown level is a 422 before anything else
     P = np.asarray(probs, float).reshape(1, -1)
     c, p = chosen(spec, P)
     ci, pv = int(c[0]), float(p[0])
+    level = cfg.level_for(spec.name, spec.labels[ci], stakes_name)
     thr = conformal_threshold if spec.decision == "gate" else None
     raw = int(tiers(np.array([pv]), level, thr)[0])
     warnings: list[str] = []
@@ -208,6 +287,14 @@ def decide(spec: Any, probs: np.ndarray, cfg: PolicyConfig, *, stakes: str | Non
         v = verdict.get(stakes_name) or {}
         if "tier" in v and v["tier"] < cap:
             cap, cap_reason = int(v["tier"]), v["reason"]
+        elif "tier" not in v:
+            # a stakes level the holdout never evaluated (added to rlcd.yaml after this head was trained and carried
+            # over unchanged): acting at it was never verified, so it can at most confirm — never fail open to act
+            no_skill = verdict and all(int((x or {}).get("tier", 2)) == 0 for x in verdict.values())
+            cap = 0 if no_skill else min(cap, 1)
+            cap_reason = (f"the head's holdout verdict has no {stakes_name!r} stakes level (it was trained before that "
+                          f"level existed): acting at it was never verified"
+                          + ("; at every verified level it shows no skill" if no_skill else ""))
     if calibrated and missing_inputs and cap > 1:
         shown = ", ".join(list(missing_inputs)[:4])
         cap, cap_reason = 1, (f"the request lacks {len(missing_inputs)} input feature(s) that almost every training "

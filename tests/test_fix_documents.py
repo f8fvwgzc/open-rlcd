@@ -43,7 +43,9 @@ class Scripted:
     def __init__(self, script: dict, relevance: list[float] | None = None, guard: bool = False):
         self.script, self.relevance, self.guard = script, relevance, guard
         self.seen: dict[str, list] = {}
-        self.project = SimpleNamespace(home=None, pack_config={})
+        self.project = SimpleNamespace(home=None, pack_config={}, get=lambda key, default=None: default)
+        self.logs = SimpleNamespace(decision=lambda decision_id: None)
+        self.logged: list[dict] = []
 
     def resolve(self, model):
         return "rlcd-0.1.1"
@@ -67,8 +69,35 @@ class Scripted:
         out["decision"] = {**out["decision"], "stakes": stakes}
         return out
 
-    def record(self, version, kind, heads, extra=None):
+    def record(self, version, kind, heads, extra=None, **receipt):
         return "d-1"
+
+    # the control-layer helpers decide() / evaluate() call: no filters, no rollout, a record kept in memory
+    def filter_options(self, specs, request, heads=None):
+        return {}, {}
+
+    def attach_contract(self, result, head, allowed, considered):
+        return None
+
+    def head_log(self, state, r, **extra):
+        d = r["decision"]
+        return {"state": state, "class": d["class"], "p": d["p"], "tier": d["tier"], **extra}
+
+    def rollout_summary(self, results, action, cfg, proposed_action=None):
+        return {"mode": "full", "capped": False, "proposed_action": proposed_action or action}
+
+    @staticmethod
+    def proposed_tier(d, cfg):
+        return d["tier"]
+
+    def decision_contract(self, kind, heads, request, **params):
+        return {"digest": None, "battery": None}
+
+    def log_decision(self, version, kind, heads, extra=None, **receipt):
+        row = {"decision_id": "d-1", "kind": kind, "model": version, "heads": heads, **(extra or {}),
+               "receipt": {"digest": None}}
+        self.logged.append({**row, **receipt})
+        return row
 
 
 def _answering(**over):

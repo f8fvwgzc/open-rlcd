@@ -22,6 +22,24 @@ Default address `127.0.0.1:8095`. Errors are `{"error": "...", "kind": "...", ..
 | 422 | `untrained`, `unknown_decision`, `unsupported` | report of an untrained head, feedback for an unknown `decision_id`, an endpoint the pack does not offer |
 | 503 | `connector_unavailable`, `encoder_unavailable` | the corpus / a vector or graph store cannot be opened or searched; the encoder cannot be loaded (messages never contain paths or DSNs; details are in the server log) |
 | 500 | `internal` | the exception type and a generic message; details are in the server log |
+| 422 | `missing_evidence` | a question's `path` / `inputs` does not resolve in the state, or a `strict` request lacks inputs almost every training row had (`missing`, `missing_groups`) |
+| 422 | `criteria_order` | a score question's `criteria` list the head's levels in another order (levels are indexed as the head defines them) |
+| 422 | `unknown_battery`, `battery_version_mismatch` | a battery that does not exist (lists `available`); a pinned battery version that is not the current one (`expected`, `current`, `changelog`) |
+| 404 | `unknown_decision` | `GET /v1/receipts/{id}` and its check for an unknown decision id (also 422 for an unknown `decision_id` in feedback, outcome, `plan` or `revision.of`) |
+| 422 | `no_receipt` | a receipt check on a decision logged before receipts existed |
+| 409 | `automation_locked` | switching automation on while `RLCD_AUTOMATION=off` is set in the server's environment |
+| 500 | `bad_config` | an invalid control-layer section in rlcd.yaml (`rollout`, `routes`, `batteries`, `serve.receipts`, `serve.redact`, `evaluate.max_revisions`, `evaluate.output_scan`) |
+| 422 | `state_mismatch` | a confirmation whose `state_digest` is not the digest of the state the decision judged |
+
+Every error body also carries `retryable`: `true` only for 409 `busy`, 429 and 503, which come with a
+`Retry-After` header (seconds). Retry those with bounded backoff; never retry anything else unchanged — a 422 needs
+a different request. **Failure behaviour for callers**: an error, a timeout or an unreachable service means *the
+review is unavailable*, never approval: fall back to proposal-only or a person (the Python client's
+`fail_closed` does exactly that).
+
+With `RLCD_ADMIN_KEY` set, `POST /v1/train`, `POST /v1/automation` and `POST /v1/receipts/{id}/confirm` need that key (`Authorization: Bearer`),
+so a caller holding only `RLCD_API_KEY` can neither retrain nor switch automation back on; the admin key is also
+accepted wherever `RLCD_API_KEY` is.
 
 ## `POST /v1/systemone`
 
@@ -107,3 +125,46 @@ feature vector `{x, feature_names, feature_version}`; a vector of another `featu
 `tier` is never stronger than `max_tier` (the head's holdout verdict at that stakes level) and `act` needs the
 Bernoulli gate to pass. A gate head (`answerable`, `grounded`) commits to `true` only when its tier is above the
 abstain action.
+
+## The control layer (additive; see [control-layer.md](control-layer.md))
+
+Request fields (every one optional; without them a request is answered exactly as before):
+
+| field | where | meaning |
+|---|---|---|
+| `path`, `inputs` | question | where the head's inputs live in a shared, named state: `path` = a sub-object, `inputs` = `{field the head reads: "dotted.path"}` (integer segments index arrays). Unresolvable -> 422 `missing_evidence` |
+| `allowed` | choice question; systemone `{question id: [options]}` (narrows, also a battery's questions); decide `{head: [options]}` | options deterministic code kept. The answer lists only those, with calibrated probabilities **not renormalised**, plus `allowed` and `excluded_mass`; the decision commits to the best allowed option with its own probability |
+| `battery` | systemone (instead of `questions`) | a named, versioned question set, optionally pinned `name@version`; the response adds `battery: {name, version, digest}` |
+| `strict` | systemone, decide, evaluate | refuse (422 `missing_evidence`) a state that lacks inputs almost every training row had, instead of capping the decision at confirm |
+| `receipt` | systemone, rank | record this call as a receipt and return it (`serve.receipts: all` does it for every call) |
+| `capabilities`, `sensitivity`, `latency_budget_ms` | decide | filter the route contracts of rlcd.yaml `routes:` before the semantic choice |
+| `baseline`, `artifact`, `checks`, `tags`, `revision` | decide / evaluate | kept in the receipt's `audit`; `artifact`, `checks` and `revision` also take part in evaluate's decision table |
+| `return_evidence` | decide (documents) | return the kept chunks `{id, doc_id, title, text, updated_at, authority, score, rank}` |
+| `plan`, `citations` | evaluate (documents) | bind the review to the evidence of a decide plan (and use its response_type contract's `max_retries` as the revision budget); the chunk ids the answer cites (outside the evidence -> reject; `null` -> a warning) |
+| `tags`, `note`, `missing_evidence` | feedback | review annotations; `tags: ["regression"]` turns the corrected case into a regression fixture |
+
+Response fields: decide / evaluate add `receipt: {id, digest, prev, state_digest, contract_digest,
+questions_digest}` and `rollout: {mode, automation, capped, proposed_action}`; each head result adds
+`uncertainty: {sources, margin, entropy, top2}` and, when route contracts apply, `considered` and `contract`; a
+head decision adds `rollout: {mode, automation, cap, capped, proposed_tier?, reason?}` (and `caps` when a
+deterministic rule lowered it); the documents plan adds `contracts`; evaluate adds `next` (`ship`,
+`human_review`, `revise`, `retry_generation`, `escalate_to_human`), `decided_by` (`checks`, `artifact`,
+`citations`, `output_scan`, `revision`, `heads`), `revise` and `revision`. `/health` adds `rollout` and `automation`.
+
+New endpoints:
+
+| endpoint | meaning |
+|---|---|
+| `GET /v1/batteries?model=` | the batteries with version, owner, changelog, consumers, digest, their questions and any problem (missing / untrained head) |
+| `GET /v1/receipts/{id}` | one decision record (with logged states when `serve.log_states`) |
+| `POST /v1/receipts/{id}/check` | `{state | state_digest, max_age_s?}` -> `{current, stale_reasons, checks}`: does the decision still approve acting on this state now? A `confirm` decision is current only after a person confirmed it; an abstained decision (escalate / hold, a rejected answer) approves nothing and is never current |
+| `POST /v1/receipts/{id}/confirm` | `{by, note?, state_digest?}`: a person confirmed a confirm-tier decision (kept in `confirmations.jsonl`; a `state_digest` that is not the receipt's is a 422 `state_mismatch`; with `RLCD_ADMIN_KEY` set it needs that key) |
+| `GET` / `POST /v1/automation` | the kill switch `{enabled, reason?, by?}`, the rollout mode and the switch history |
+| `POST /v1/outcome` | a decision-level outcome `{decision_id, task_success?, route_taken?, provider?, fallback?, latency_ms?, cost?, tokens?, retries: {transport, workflow}?, verified_by?, note?, tags?}`; joined by the metrics, never trains |
+| `GET /v1/metrics?since=&until=&model=&kind=&head=` | the operations report: action mix (automatic action, review, abstention), rollout caps, review load against `serve.review_capacity_per_day`, per head the tier / class mix, entropy, uncertainty sources and — joined with feedback — accuracy, false automation, false rejection, review agreement and online reliability next to the holdout (`vs_holdout`, `drift_suspected`), binding links, plan and verdict distributions, outcomes (task success, routes, fallbacks, cost, latency, transport vs workflow retries), latency percentiles, notes on what the numbers can and cannot say. `since` inclusive, `until` exclusive (ISO 8601) |
+| `GET /v1/review?limit=1..1000&head=&kind=&include_abstain=&oldest_first=` | confirm and abstain decisions without feedback, oldest first, with what a reviewer needs (heads, uncertainty, state, warnings, why) |
+| `GET /v1/check?model=` | the pre-launch checklist `{ok, model, checks: [{id, status, title, detail}], counts}`; `ok` is false only when a check fails (ids in `core/checklist.py`) |
+
+`POST /v1/feedback` with `tags: ["regression"]` also adds a regression case (`regression_case: {id, stored: true}`
+or `{stored: false, reason}`) to the project's regressions file (rlcd.yaml `regressions:`, default
+`./regressions.jsonl`), which `rlcd regress` runs against every version (formats in `core/regress.py`).
