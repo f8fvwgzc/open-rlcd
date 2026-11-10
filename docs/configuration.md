@@ -21,13 +21,14 @@ rlcd config show      # what the project resolves to: home, pack, heads, thresho
 ```
 error  rollout.mode: must be one of shadow, assist, limited, full; got 'shaddow'. Did you mean 'shadow'?
 error  train.holdout_fracton: unknown key. Did you mean 'holdout_fraction'?
-warn   labeling.api_key: the key names a secret and has a value written into the file: secrets belong in the environment ...
+warn   routes.response_type.direct_answer.api_key: the key names a secret and has a value written into the file: secrets belong in the environment ...
 ```
 
-* **error**: the file cannot mean what was written (an unknown key, a wrong type, a value out of range). `rlcd
-  train` and `rlcd serve` print the findings and refuse to start (exit code 2) until it is fixed. `rlcd check`
-  reports it as the failing item `config.valid`. `rlcd decide` and `rlcd ask` print the findings to stderr and
-  still answer (they are read-only), so a misspelled `rolout:` is not silently ignored there either.
+* **error**: the file cannot mean what was written (an unknown key, a wrong type, a value out of range, a route
+  contract the service would refuse). `rlcd train` and `rlcd serve` print the findings and refuse to start (exit
+  code 2) until it is fixed. `rlcd check` reports it as the failing item `config.valid`. `rlcd decide` and
+  `rlcd ask` print the findings to stderr and still answer (they are read-only), so a misspelled `rolout:` is not
+  silently ignored there either.
 * **warn**: it runs, and deserves a look (a value that looks like a secret, a name that matches no head, a key
   nothing reads). Warnings never stop a command.
 
@@ -39,8 +40,22 @@ without findings is a file without typos, not a good configuration.
 
 The tables below are the keys the code reads. They are kept equal to the checker's own list by a test
 (`tests/test_config_check.py`), so a key that is here is accepted and a key that is not is reported.
-"default" is what you get when the key is absent. A key written with no value (`port:`) means the default,
-except where the table says "required when written".
+"default" is what you get when the key is absent.
+
+A key written with no value (`timeout:`, or `timeout: null`) usually means the default too. The exceptions:
+
+* **An empty value is an error** for every `train.*` key, `policy.min_verify_rows`, `policy.gate_min_p_above`,
+  `policy.miscalibration_p`, `policy.stakes.<level>` and its `act`, `confirm` and `min_accuracy`,
+  `labeling.batch`, `serve.host`, `serve.port`, `rollout.mode`, `rollout.heads.<head>`, `routes.<head>`,
+  `batteries.<battery>`, `evaluate.max_revisions`, and in the tabular pack `pack_config.data`,
+  `pack_config.max_categories` and `pack_config.na_values`. `rlcd train` and `rlcd serve` refuse to start until
+  the key has a value or the line is gone.
+* **Under `heads.<head>`, an empty field does not bring back the pack's value: it replaces it.** `type:`,
+  `model:` and `decision:` are errors. `conformal:` (like `conformal: null`) removes the pack's promise, such as
+  the 0.05 on `answerable` and `grounded` in the documents pack. `stakes:` passes the check, but `rlcd train` then
+  stops on that head ("stakes None is not a level the policy defines"). To keep the pack's value, remove the line.
+* **`rollout.limited.stakes:` with no value means no level**, not the default `[low]`: mode `limited` then
+  automates nothing (the check warns).
 
 ## Top level
 
@@ -56,13 +71,16 @@ except where the table says "required when written".
 
 `heads:` maps a head name to the fields you override; every other field keeps the pack's value (`rlcd config
 show` prints the merged result and which fields came from your file). A name the pack does not have adds a
-head: it then needs at least `type` (and, in the tabular pack, `label`).
+head. In the documents pack it needs at least `type` and `view` (`query`, `query_chunk`, `query_evidence` or
+`query_evidence_answer`), and `classes` or `levels` for a choice or score head; the check asks only for `type`,
+and a head without `view` cannot train. In the tabular pack it needs `label`: the type is inferred from the
+column.
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. |
-| `heads.<head>.stakes` | a stakes level | the pack's (`medium`) | Which thresholds of `policy.stakes` its decisions use when the request names none. Must be a level the policy has. |
-| `heads.<head>.conformal` | number in (0, 0.5) | none | A promised error rate, checked on the holdout: for a `gate` head the error among its yeses, otherwise the miscoverage. Without enough holdout rows the promise cannot be made and the head stays at confirm. |
+| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. A battery that asks the head then fails as a whole (422 `unknown_head`, and `rlcd check` fails `batteries.bound`): give the battery a version without that question (worked example 1). |
+| `heads.<head>.stakes` | a stakes level | the pack's (`medium`; documents `grounded`: `high`) | Which thresholds of `policy.stakes` its decisions use when the request names none. Must be a level the policy has. |
+| `heads.<head>.conformal` | number in (0, 0.5) | the pack's (documents: 0.05 on `answerable` and `grounded`, none on the others; tabular: none) | A promised error rate. For a `gate` head, the error among its yeses: the threshold is chosen on the calibration blocks and checked on the holdout. Too few calibration rows (45 at 0.05 with the default `train.conformal_delta`) or a holdout that breaks the promise caps the head at confirm. For other heads, the miscoverage of a prediction set returned with each answer; it never caps a decision. |
 | `heads.<head>.model` | `logreg`, `lightgbm`, `auto` | the pack's (`logreg`) | The base model. `auto` is LightGBM when it can be imported, else logistic regression. |
 | `heads.<head>.decision` | `argmax`, `gate` | the pack's (`argmax`) | `gate` (noul heads only): the decision is about `true` ("proceed"), never about the more likely class. |
 | `heads.<head>.type` | `noul`, `choice`, `score` | the pack's | The question type. Changing it changes the question: retrain. |
@@ -101,7 +119,8 @@ settings you can talk the model into:
 
 1. **The holdout verdict** (`rlcd train` prints it as `verdict(medium)`, `rlcd check` per level). `act` is
    verified only when the head showed skill and at least `policy.min_verify_rows` trusted holdout rows (and as
-   many act-tier rows among them) were scored; otherwise the verdict is `confirm` and no live decision acts.
+   many act-tier rows among them) were scored; otherwise the verdict is `confirm` (or, for a head that shows no
+   skill, the abstain action) and no live decision acts.
 2. **The Bernoulli gate.** Every decision is a trial: the committed class came true or it did not. Counts are
    kept per head, committed class and probability bin (0.8-0.9, 0.9-1.0, ...), start from the holdout rows of
    the version being served, and grow with every outcome posted to `/v1/feedback` with a `decision_id`. `act`
@@ -131,7 +150,7 @@ Command-line flags of `rlcd train` and fields of `POST /v1/train` win over these
 | `train.gap` | whole number >= 0 | 0 | Time ordering: timestamps left out before each calibration block. |
 | `train.calibration` | `auto`, `sigmoid`, `isotonic`, `temperature` | `auto` | The calibrator. `auto` picks isotonic only with enough rows per class, else sigmoid. |
 | `train.isotonic_min_per_class` | whole number >= 1 | 3000 | Trusted rows per class in every calibration block before `auto` picks isotonic. |
-| `train.conformal_delta` | number in (0, 1) | 0.1 | A head's `conformal` promise holds with probability at least 1 minus this. |
+| `train.conformal_delta` | number in (0, 1) | 0.1 | A gate head's `conformal` promise holds with probability at least 1 minus this. Not used for other heads. |
 | `train.n_estimators` | whole number in [10, 3000] | 300 | LightGBM trees, unless the head's `params` set them. |
 | `train.min_trusted` | whole number >= 1 | 30 | Fewest trusted rows a head needs to be trained at all. |
 | `train.seed` | whole number | 7 | Random seed of the splits and the models. |
@@ -145,7 +164,7 @@ Command-line flags of `rlcd train` and fields of `POST /v1/train` win over these
 | key | type | default | what it does |
 |---|---|---|---|
 | `labeling.judge` | text | `claude-cli` | `claude-cli[:model]`, `anthropic[:model]`, `ollama:<model>` or `openai:<base_url>\|<model>`. `--judge` overrides it. `claude-cli` and `anthropic` send item text to Anthropic and are refused unless `security.allow_remote` is on. |
-| `labeling.model` | text | none | The model, when `judge` names none. |
+| `labeling.model` | text | none | The model, when `labeling.judge` names none: `judge: ollama` with `model: llama3` is `ollama:llama3`. Not read when `--judge` is given. |
 | `labeling.batch` | whole number >= 1 | 20 | Items per judge call. `--batch` overrides it. |
 | `labeling.timeout` | number > 0 | 300 | Seconds before one judge call is given up. |
 | `labeling.executable` | text | `claude` | The Claude Code command the `claude-cli` judge runs. |
@@ -176,7 +195,7 @@ The rollout can only take automation away from what the policy allows.
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `rollout.mode` | `shadow`, `assist`, `limited`, `full` | `full` | `shadow`: decide and log, automate nothing. `assist`: a person confirms every action. `limited`: act only inside the slice below. `full`: the policy alone decides. Write it in quotes if you ever mean `"off"`: YAML reads a bare `off` as false, which is an error here. |
+| `rollout.mode` | `shadow`, `assist`, `limited`, `full` | `full` | `shadow`: decide and log, automate nothing. `assist`: a person confirms every action. `limited`: act only inside the slice below. `full`: the policy alone decides. There is no `off` mode: to automate nothing use `shadow`, or the kill switch (`rlcd automation off`, `RLCD_AUTOMATION=off`). A bare `off` or `no` is read by YAML as false and refused like any other value. |
 | `rollout.limited.stakes` | name or list of names | `[low]` | Mode `limited`: the stakes levels that may act. |
 | `rollout.limited.heads` | name or list of names | any head | Mode `limited`: only these heads may act. |
 | `rollout.heads.<head>` | `shadow`, `assist`, `limited`, `full` | `rollout.mode` | A mode for one head, overriding `rollout.mode`. |
@@ -186,6 +205,11 @@ The rollout can only take automation away from what the policy allows.
 `routes.<head>.<option>` is the contract of one option. The five keys below are read by the deterministic
 filter that runs before the head chooses; every other key in a contract is yours and is returned untouched with
 the decision (so the check only warns when one looks like a misspelling of these five).
+
+A contract under an option the head does not have (a misspelt option), or on a head that is not a `choice` head,
+is an error: the service would refuse every decision that consults that head (500 `bad_config`). A contract
+under a name that is not a head of the project is only a warning, since no decision consults it, but `rlcd check`
+fails `routes.contracts` until the model has that head or the contract is gone.
 
 | key | type | default | what it does |
 |---|---|---|---|
@@ -243,13 +267,13 @@ Read by `rlcd check` (item `owners`), which warns until all five are named. Each
 | `pack_config.encoder.cache` | true / false | true | Cache embeddings under `<home>/cache/embeddings`. |
 | `pack_config.corpus` | path | none | The folder `rlcd ingest` reads when no path is given. |
 | `pack_config.queries` | path | none | The query log `rlcd label bootstrap` labels (JSON lines, a JSON array, or CSV with a `query` column). |
-| `pack_config.chunking.max_chars` | whole number >= 1 | 1200 | Chunk size in characters. |
-| `pack_config.chunking.overlap` | whole number >= 0 | 150 | Characters shared by neighbouring chunks. |
+| `pack_config.chunking.max_chars` | whole number >= 1 | 1200 | Chunk size in characters. The chunker raises a value below 50 to 50. |
+| `pack_config.chunking.overlap` | whole number >= 0 | 150 | Characters shared by neighbouring chunks, at most a third of `max_chars`: the chunker lowers a larger value to that. |
 | `pack_config.vector.kind` | `local` | `local` | The vector store. Only the local one exists. |
 | `pack_config.vector.backend` | `auto`, `faiss`, `hnswlib`, `numpy` | `auto` | The index of the local vector store. `auto`: faiss, else hnswlib, else numpy, whichever is installed. |
 | `pack_config.graph.kind` | `local` | `local` | The entity graph. Only the local one exists. |
 | `pack_config.graph.terms` | list of text | empty | Entity names to recognise (needed for names the tokenizer cannot find, such as kanji names). |
-| `pack_config.graph.max_fanout` | whole number >= 1 | 200 | Most chunks followed from one entity. |
+| `pack_config.graph.max_fanout` | whole number >= 1 | 200 | An entity mentioned by more than this many chunks is always a hub (never followed), whatever `hub_share` gives. It does not cut the chunks of an entity that is followed. |
 | `pack_config.graph.hub_share` | number in [0, 1] | 0.05 | An entity mentioned in more than this share of all chunks is a hub and is not followed. |
 | `pack_config.graph.hub_min` | whole number >= 0 | 10 | An entity mentioned by this many chunks or fewer is never a hub. |
 | `pack_config.retrieve_k` | whole number >= 1 | 5 | Top-k of each retriever at decide time (fused, up to 3k candidates). |
@@ -271,8 +295,8 @@ any of the target keys) directly under `pack_config`. Not both.
 |---|---|---|---|
 | `pack_config.data` | path | required | The training table: `.csv`, `.tsv`, `.txt` (optionally `.gz`) or `.parquet`. A local file; nothing is fetched. |
 | `pack_config.id` | column | none | Row ids: reported, never a feature. |
-| `pack_config.group` | column | none | Rows of one group never straddle train, calibration and holdout. |
-| `pack_config.time` | column | none | ISO 8601 or epoch seconds; lets the holdout be the most recent period. |
+| `pack_config.group` | column | none | With `train.ordering: group` (or `auto`, which picks group whenever this column is set), rows of one group never straddle train, calibration and holdout. Under `ordering: time` the holdout is one time cut that ignores groups. |
+| `pack_config.time` | column | none | ISO 8601 or epoch seconds; lets the holdout be the most recent period (with a `group` and ordering `auto`: the groups whose first row came latest, with all their rows). |
 | `pack_config.time_format` | text | none | A Python `strptime` format for `time` values in another notation, e.g. `"%d/%m/%Y %I:%M %p"` for `31/01/2025 02:15 PM`. Times without a zone are read as UTC. Values that do not match it are still tried as ISO 8601 / epoch seconds. |
 | `pack_config.segment` | column | none | Per-segment base rates and holdout slices. |
 | `pack_config.features` | `auto` or a list of columns | `auto` | `auto`: every column except label, id, group, time, segment and the `exclude` and `text` columns (empty and identifier-like columns are left out, with a note). `auto` cannot know which other columns are only filled in after the decision: list those under `exclude`. |
@@ -371,7 +395,7 @@ the server next to it. `GET /health` shows what the server runs with (`model`, `
 | `heads.<head>.enabled` | at once | restart |
 | `train.*` | the next `rlcd train` | restart, then the next `POST /v1/train` |
 | `pack_config`: what features are built from (tabular: the table and its columns; documents: the encoder, chunking) | after `rlcd train` (documents: `rlcd ingest` first): the trained schema and encoder are stored in the bundle | after `rlcd train`, as above |
-| `pack_config`: decide-time settings of the documents pack (`retrieve_k`, `max_evidence_age_days`, `require_evidence_dates`, `feature_cache`) | at once | restart |
+| `pack_config`: decide-time settings of the documents pack (`retrieve_k`, `max_evidence_age_days`, `require_evidence_dates`, `feature_cache`, and what opening the corpus reads: `rrf_k`, `vector.backend`, `graph.terms`, `graph.max_fanout`, `graph.hub_share`, `graph.hub_min`, `on_encoder_change`; new `graph.terms` link chunks only after a re-ingest) | at once | restart |
 | `rollout.*`, `routes`, `batteries`, `evaluate.*` | at once | restart |
 | `serve.log_states`, `serve.redact`, `serve.receipts`, `serve.review_capacity_per_day`, `security.allow_remote`, `regressions`, `owners` | at once | restart |
 | `serve.host`, `serve.port`, `home`, `pack` | the next command | restart |
@@ -382,9 +406,9 @@ Not in the file, and seen by a running server on its next request without a rest
 automation off`, `POST /v1/automation`), which version `rlcd-latest` points at (`rlcd promote`, `rlcd rollback`,
 `rlcd import`, a finished train), and the Bernoulli ledger (every `/v1/feedback`).
 
-When `rlcd.yaml`'s `policy` (or a head's `stakes`) is not what the served version uses, `rlcd decide`, `rlcd
-ask` and `rlcd serve` (at start) print one line to stderr saying so, and `rlcd check` reports it as
-`thresholds.config`. A version trained before `rlcd config check` existed whose stored policy is unusable
+When `rlcd.yaml`'s `policy` (or a head's `stakes` or `conformal`) is not what the served version uses, `rlcd
+decide`, `rlcd ask` and `rlcd serve` (at start) print one line to stderr saying so, and `rlcd check` reports it
+as `thresholds.config`. A version trained before `rlcd config check` existed whose stored policy is unusable
 (`abstain: act`) refuses to decide (422 `bad_bundle`) until it is retrained or rolled back.
 
 ## Worked examples
@@ -405,6 +429,14 @@ heads:
   answerable: {stakes: medium, conformal: 0.05}   # promise: at most 5% of the yeses are wrong
   grounded: {stakes: high}
   needs_graph: {enabled: false}                    # this deployment has no entity graph
+batteries:
+  preflight:                       # the pack's preflight also asks needs_graph, which is off here
+    version: "1-nograph"
+    owner: search-team
+    changelog: ["1-nograph: the pack's preflight without multi_hop (needs_graph is off)"]
+    questions:
+      kind: {type: choice, head: response_type}
+      route: {type: choice, head: route}
 labeling: {judge: claude-cli, batch: 20}
 serve: {host: 127.0.0.1, port: 8095, redact: [secrets, pii]}
 rollout: {mode: shadow}            # log every decision, automate nothing, until `rlcd check` is clean
@@ -419,13 +451,13 @@ pack: tabular
 pack_config:
   data: data/customers.csv
   id: row_id
-  group: customer_id               # a customer's rows stay on one side of the holdout
-  time: month
+  group: customer_id               # with ordering auto (below), a customer's rows stay on one side of the holdout
+  time: month                      # orders the groups: the holdout is the customers who appear latest
   hash_categories: true            # the bundle stores hashes of categorical values, not the values
   targets:
     churned: {label: churned, positive: "yes", stakes: medium}
     next_plan: {label: plan_tier_next, type: choice, classes: [downgrade, same, upgrade], stakes: low}
-train: {holdout_fraction: 0.2, n_splits: 5, ordering: time}
+train: {holdout_fraction: 0.2, n_splits: 5, ordering: auto}   # `time`: the latest months, customers on both sides
 policy: {abstain: hold}
 rollout:
   mode: limited
@@ -456,5 +488,6 @@ evaluate: {max_revisions: 1, output_scan: [secrets, pii]}
 
 Stricter thresholds do not make the model better: they move decisions from act to confirm and abstain, and
 `serve.review_capacity_per_day` is there so `rlcd check` tells you when that is more than your reviewers can
-take. A head needs enough trusted holdout rows to be verified at a threshold at all; `rlcd train` prints the
-verdict per stakes level.
+take. A head needs enough trusted holdout rows to be verified at a threshold at all. `rlcd train` prints only
+the verdict at `medium`; `rlcd check` (item `skill.<head>`) and `rlcd calibration <head>` print it per stakes
+level, `critical` included.

@@ -27,15 +27,24 @@ of yours and no data: `.dockerignore` is an allow-list, so a local `var/` or `.e
 
 ### Build
 
+`compose.yaml` builds the image itself and runs it as `open-rlcd:local` (or as `RLCD_IMAGE`, when that is set).
+It takes the extras from `RLCD_EXTRAS`, in the environment or in the `.env` file next to `compose.yaml`:
+
 ```bash
-docker build -t open-rlcd .                                      # core only: about 460 MB
-docker build -t open-rlcd --build-arg RLCD_EXTRAS=documents .    # + onnxruntime, faiss, tokenizers, pypdf: about 615 MB
+docker compose build                                  # core only: about 460 MB
+RLCD_EXTRAS=documents docker compose build            # + onnxruntime, faiss, tokenizers, pypdf: about 615 MB
 ```
+
+Without compose, `docker build -t open-rlcd:local --build-arg RLCD_EXTRAS=documents .` builds the same image. An
+image built under another name is not the one compose runs.
 
 `RLCD_EXTRAS` is a space-separated list of the extras in `pyproject.toml` (`documents`, `qdrant`, `pgvector`,
 `neo4j`, `parquet`, ...). Build the image with the extras the model was trained with: a bundle whose encoder is
 ONNX needs `documents`; a tabular project that reads Parquet needs `parquet`. The demo bundle and a documents
-project with the hashing encoder run on the core image.
+project with the hashing encoder run on the core image. `docker compose up` builds only when `open-rlcd:local`
+does not exist yet, so after changing `RLCD_EXTRAS` run `docker compose build` again (or `up -d --build`), or
+the old image keeps serving. An ONNX model on a core-only image answers `/health` and `/ready` as usual and
+fails every decision with 503 `encoder_unavailable`.
 
 ### Try it (the demo model)
 
@@ -57,11 +66,39 @@ serves it, exactly as `uv run rlcd serve` does after a clone. That is a smoke te
 
 ### Run your project
 
+Write the settings into a `.env` file next to `compose.yaml` (git ignores it). Run compose from that directory:
+it then reads the file for every command, so every `docker compose` command on this page, and every one you
+type later, includes the project overlay:
+
 ```bash
-export RLCD_PROJECT_DIR=/srv/acme            # the directory that holds rlcd.yaml
-export RLCD_DOMAIN=rlcd.example.com RLCD_TLS=you@example.com
-docker compose -f compose.yaml -f deploy/compose.project.yaml up -d
+cat > .env <<'EOF'
+COMPOSE_FILE=compose.yaml:deploy/compose.project.yaml
+# the directory that holds rlcd.yaml
+RLCD_PROJECT_DIR=/srv/acme
+RLCD_DOMAIN=rlcd.example.com
+RLCD_TLS=you@example.com
+# the extras the model needs (see Build); leave the line out for the core image
+RLCD_EXTRAS=documents
+EOF
+docker compose build
+docker compose up -d
 ```
+
+Keep the two keys in your secret store and export them in the shell that runs compose. If they do go into
+`.env`, keep that file out of version control and readable only by operators.
+
+**Every compose command needs the overlay.** `deploy/compose.project.yaml` is the only place that sets
+`RLCD_PROJECT` and mounts the project. A container that compose creates or recreates without it (`up` after a key
+rotation, an upgrade or an image rollback, or a one-off `run`) starts with no project. With a built-in pack,
+nothing says so. It serves the model in the home on the code defaults: rollout `full` (whatever rlcd.yaml says,
+`shadow` included), redaction of secrets only, and none of rlcd.yaml's routes, batteries or regression cases.
+`/health` and `/ready` stay green. On a home with no model yet, it imports the synthetic demo model and makes it
+`rlcd-latest`, with one line in the container log. `COMPOSE_FILE` in `.env` prevents that. Without it, pass
+`-f compose.yaml -f deploy/compose.project.yaml` to every `docker compose` command, including the ones on this
+page.
+
+`docker compose up` builds only when the image does not exist yet. `build` comes first here because "Try it" may
+have left a core-only `open-rlcd:local`.
 
 A fresh home with a project has no model: `/health` reports `"model": "rlcd-0.1.0"` (the untrained id) and
 `"ready": false`, `GET /ready` answers 503, `rlcd serve` says so on stderr when it starts, and every decision
@@ -86,7 +123,8 @@ In the container:
   `RLCD_API_KEY` (exit 2), also when only `RLCD_ADMIN_KEY` is set. `--insecure-no-auth` overrides it for a
   network you trust; `compose.yaml` requires both keys anyway.
 
-Any other `rlcd` command runs in the same image, against the same home and project:
+Any other `rlcd` command runs in the same image, against the same home and project (with `COMPOSE_FILE` in
+`.env`, as above):
 
 ```bash
 docker compose exec rlcd rlcd check                 # inside the running container
@@ -110,14 +148,14 @@ Read by the service (every `os.environ` lookup in `open_rlcd/`):
 | `RLCD_ADMIN_KEY` | when set, the three operator routes need this key instead; it protects nothing else | unset: the API key (or nobody) guards them |
 | `RLCD_AUTOMATION` | `off` (also `0`, `false`, `disabled`, `no`) forces the kill switch off; the API cannot switch it back on | unset |
 | `RLCD_ALLOW_REMOTE` | `1` lets connectors and LLM judges talk to non-loopback hosts (same as `security.allow_remote: true`) | unset: loopback only |
-| `RLCD_MAX_BODY_BYTES` | largest request body; larger is a 413 | 16 MiB (`deploy/Caddyfile` has the same limit) |
+| `RLCD_MAX_BODY_BYTES` | largest request body; larger is a 413 | 16 MiB (`deploy/Caddyfile` has the same limit, `max_size 16MiB`; raise both together) |
 | `RLCD_PACK` | the pack when rlcd.yaml names none | `documents` |
 | `RLCD_DEBUG` | `1`: the CLI prints a traceback instead of one line | unset |
 | `HF_HUB_OFFLINE` | `1`: the ONNX encoder is never downloaded; a missing file is an error | unset |
 
-Not needed on a server: `ANTHROPIC_API_KEY` (the labeling judge, used on the training machine) and `RLCD_URL`
-(the Python client's default base URL). The image also sets `HF_HOME=/var/lib/rlcd/cache/huggingface` so the
-Hugging Face client keeps its own files inside the volume.
+Not needed on a server: `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (the labeling judges, used on the training
+machine) and `RLCD_URL` (the Python client's default base URL). The image also sets
+`HF_HOME=/var/lib/rlcd/cache/huggingface` so the Hugging Face client keeps its own files inside the volume.
 
 Ports: `8095` inside the container (fixed by the image's command and its `HEALTHCHECK`); the proxy publishes
 `443` and `80` (`RLCD_HTTPS_PORT`, `RLCD_HTTP_PORT` to change the host side).
@@ -162,6 +200,9 @@ export RLCD_API_KEY=$(openssl rand -hex 32)      # update your secret store firs
 docker compose up -d rlcd                        # recreates the container with the new value
 ```
 
+On a project deployment the recreated container gets the project only through `COMPOSE_FILE` in `.env` (see
+[Run your project](#run-your-project)). Without it, the container comes back on the code defaults.
+
 There is no overlap window: after the restart the old key is a 401, which clients must not retry. Roll the new
 key out to callers and restart in the same change window. The admin key rotates the same way and affects only
 operators. The kill switch, the model alias and all state live in the home and survive the restart.
@@ -189,7 +230,9 @@ root filesystem read-only, with a tmpfs `/tmp`).
 | `cache/embeddings/*.sqlite` | embedding cache, one file per encoder hash | continuously | rebuildable; safe to delete while stopped |
 | `cache/huggingface/` | the Hugging Face client's own files | first download | rebuildable |
 | `reports/` | `rlcd report` output | on demand | rebuildable |
-| `*.json.tmp`, `decisions.jsonl.bak` | temporary files of an atomic replace / a prune | transient | ignore |
+| `*.tmp` | temporary files of an atomic replace (`registry.json.<pid>.<thread>.tmp`, ...) and of an ingest (under `corpus/`, such as `meta.json.tmp`) | transient | ignore; a leftover can be deleted while the service is stopped |
+| `*.lock` | inter-process lock files next to the files they guard (`registry.json.lock`, `bernoulli.json.lock`, ...) | on first use, never removed | keep: never delete one while any `rlcd` process runs; harmless in a backup |
+| `decisions.jsonl.bak` | a copy of the log while `rlcd receipts prune` rewrites it | removed when the prune succeeds | one that is still there means a prune failed: keep it, and restore `decisions.jsonl` from it if `rlcd receipts verify` fails |
 
 Not in the home: `rlcd.yaml`, `regressions.jsonl` and your source documents live in the project directory. Keep
 that in version control.
@@ -207,8 +250,9 @@ Pruning rewrites the file; run it with the service stopped. Feedback can no long
 `/v1/metrics` and `/v1/review` read the logs from the start on every call, so they slow down as the logs grow.
 
 **Receipts are tamper-evident, not tamper-proof.** Anyone who can write the home can rewrite the whole chain.
-`rlcd receipts verify` prints the head digest: store it somewhere the service cannot write (your log system, a
-ticket, an object-lock bucket) on a schedule, and compare on restore.
+`rlcd receipts verify` prints the head digest of each chain (`head` for `decisions.jsonl`, `confirmations.head`
+for `confirmations.jsonl`): store both somewhere the service cannot write (your log system, a ticket, an
+object-lock bucket) on a schedule, and compare on restore.
 
 ### Back up
 
@@ -216,16 +260,19 @@ Stop the writer, copy the directory, start again. The copy is then consistent ac
 registry.
 
 ```bash
-docker compose exec -T rlcd rlcd receipts verify | tee receipts-head.json     # note "head" and "receipts"
 docker compose stop rlcd
+docker compose run --rm -T rlcd receipts verify | tee receipts-head.json        # note both chains' "head" and "receipts"
 docker run --rm -v rlcd_rlcd-home:/var/lib/rlcd:ro --entrypoint tar open-rlcd:local \
   -C /var/lib/rlcd --exclude ./cache -czf - . > rlcd-home-$(date +%F).tgz
 docker compose start rlcd
 ```
 
-(`rlcd_rlcd-home` is the compose volume; `open-rlcd:local` is the image name `compose.yaml` builds.) A
-filesystem or volume snapshot taken while stopped is equally good. Add `--exclude ./encoders --exclude ./corpus`
-if you would rather re-download and re-ingest.
+Record the head after the stop. A decision logged between the two steps would be in the archive but not in the
+recorded head, and the restore check below would then fail for a good backup. `-T` keeps the command's stderr
+out of the JSON. (`rlcd_rlcd-home` is the compose volume. `open-rlcd:local` is the image `compose.yaml` builds;
+any image of this project will do, since only its `tar` runs.) A filesystem or volume snapshot taken while
+stopped is equally good. Add `--exclude ./encoders --exclude ./corpus` if you would rather re-download and
+re-ingest.
 
 A copy taken while the service runs is usable but not guaranteed consistent: a log may end in a half-written line
 (readers skip it and `verify` lists it under `unreadable`), and the ledger may be one feedback ahead of or behind
@@ -247,11 +294,12 @@ docker compose up -d
 curl --cacert rlcd-root.crt https://localhost/health  # "model" is the version you expect
 ```
 
-(With a project, add `-f compose.yaml -f deploy/compose.project.yaml` to every `docker compose` command.)
+(With a project, these commands rely on `COMPOSE_FILE` in `.env`, as everywhere on this page: see
+[Run your project](#run-your-project).)
 
-`receipts verify` must report `"ok": true`, and `"head"` and `"receipts"` must equal what you noted at backup
-time. `ok` alone does not prove completeness: a log cut off at the end still verifies, which is why the head
-digest is recorded outside the home. For a bind-mounted home instead of a named volume, `chown -R 10001:10001`
+`receipts verify` must report `"ok": true`, and `"head"` and `"receipts"`, and the same two under
+`"confirmations"`, must equal what you noted at backup time. `ok` alone does not prove completeness: a log cut
+off at the end still verifies, which is why the head digests are recorded outside the home. For a bind-mounted home instead of a named volume, `chown -R 10001:10001`
 the directory on the host.
 
 ## Concurrency
@@ -269,19 +317,20 @@ only). What still lives in one process's memory is why a second *server* on the 
 | state | how it is written | two processes on one home |
 |---|---|---|
 | `decisions.jsonl` (receipt chain) | append under an exclusive file lock; the chain tip is re-read when another writer was there | safe on a local POSIX filesystem: still one chain |
-| `feedback.jsonl`, `outcomes.jsonl`, `confirmations.jsonl` | one appended line under a file lock | safe: no row is torn or lost. A server's in-memory index of decisions is its own, so it does not see what another server logged |
+| `feedback.jsonl`, `outcomes.jsonl`, `confirmations.jsonl` | one appended line under a file lock | safe: no row is torn or lost. A decision id missing from a process's in-memory index is looked up in the shared `decisions.jsonl`, so another process's decisions are found (each such miss reads the whole log) |
 | `bernoulli.json` (the ledger that gates `act`) | read, change, atomic replace, all under a file lock | safe: no update is lost |
 | `registry.json` (versions, the `rlcd-latest` alias) | read, change, atomic replace, all under a file lock | safe: version ids are never claimed twice. A long `import` holds the lock, so a train finishing meanwhile waits for it |
 | the alias and the kill switch, read side | re-read from disk on every request | fine: every process sees a promote, rollback or `automation off` at once |
 | training jobs | in memory; "one at a time" is enforced per process | a second process starts a second train; `GET /v1/train/{id}` only works on the process that started it |
-| embedding cache (sqlite) | one connection per process | not designed for several writer processes |
+| embedding cache (`cache/embeddings/*.sqlite`) | one SQLite connection per process (WAL mode) | writers take turns through SQLite's own lock, and a writer waits up to 5 s before its request fails: fine for an admin command next to the server, not designed for several busy writers |
 
 The `rlcd` CLI is a second process too. It is meant to be used against a live home for the operator commands,
 and the service picks the result up without a restart:
 
 | command while the service runs | safe? |
 |---|---|
-| `receipts verify`, `receipts show`, `metrics`, `review`, `check`, `automation status`, `calibration`, `replay`, `regress` | yes (read-only) |
+| `receipts verify`, `receipts show`, `metrics`, `review`, `automation status`, `calibration`, and `check` without regression cases | yes (read-only) |
+| `replay`, `regress`, and `check` when the project has regression cases | yes, but not read-only: they encode states through the embedding cache, so they write `cache/embeddings/*.sqlite` (see the table above) and need a writable home |
 | `automation off` / `on` | yes (one atomic file) |
 | `promote`, `rollback`, `import` | yes: they rewrite `registry.json` and `bernoulli.json` under the same file locks the server takes, so a feedback call landing in the same instant is still counted |
 | `receipts prune`, `train` | stop the service first (prune rewrites the log; a CLI train and an API train are not mutually excluded) |
@@ -315,25 +364,24 @@ rlcd export ./acme-bundle        # the current rlcd-latest (or --model VERSION);
 ```
 
 Copy `acme-bundle/` to the server by whatever you trust (it is model weights learned from your data: treat it
-like the data). On the server:
+like the data). On the server, from the directory with `compose.yaml` and its `.env` (the overlay comes from
+`COMPOSE_FILE` there, see [Run your project](#run-your-project)):
 
 ```bash
-dc() { docker compose -f compose.yaml -f deploy/compose.project.yaml "$@"; }
-
 # 1. register it without serving it
-dc run --rm -v "$PWD/acme-bundle":/bundle:ro rlcd import /bundle --keep-latest
+docker compose run --rm -v "$PWD/acme-bundle":/bundle:ro rlcd import /bundle --keep-latest
 #    -> imported /bundle as rlcd-0.1.4
 
 # 2. look at it
-dc exec rlcd rlcd check --model rlcd-0.1.4
-dc exec rlcd rlcd regress --model rlcd-0.1.4          # if the project has regression cases
-dc exec rlcd rlcd replay --candidate rlcd-0.1.4       # logged decisions under the old and the new version
+docker compose exec rlcd rlcd check --model rlcd-0.1.4
+docker compose exec rlcd rlcd regress --model rlcd-0.1.4      # if the project has regression cases
+docker compose exec rlcd rlcd replay --candidate rlcd-0.1.4   # logged decisions under the old and the new version
 
 # 3. serve it
-dc exec rlcd rlcd promote rlcd-0.1.4 --reason "CHG-1234"
+docker compose exec rlcd rlcd promote rlcd-0.1.4 --reason "CHG-1234"
 
 # 4. if it misbehaves
-dc exec rlcd rlcd rollback --reason "INC-42"          # back to the version that served before; or --to VERSION
+docker compose exec rlcd rlcd rollback --reason "INC-42"      # back to the version that served before; or --to VERSION
 ```
 
 How these really behave:
@@ -371,7 +419,10 @@ the admin key.
 
 ```bash
 # 1. back up the home (above)
-# 2. try the new image against a copy, not the live home
+# 2. try the new image against a copy, not the live home. NEW_IMAGE is the new release built under a tag of its
+#    own, with the same RLCD_EXTRAS, in a checkout of that release:
+#      docker build -t open-rlcd:2026-12 --build-arg RLCD_EXTRAS=documents .
+#    A tag of its own keeps the old image for the rollback below.
 docker volume create rlcd-upgrade-test
 docker run --rm -i -v rlcd-upgrade-test:/var/lib/rlcd --entrypoint tar NEW_IMAGE -C /var/lib/rlcd -xzf - < rlcd-home-2026-11-10.tgz
 docker run --rm -v rlcd-upgrade-test:/var/lib/rlcd -v /srv/acme:/project:ro -e RLCD_PROJECT=/project NEW_IMAGE check
@@ -379,25 +430,30 @@ docker run --rm -v rlcd-upgrade-test:/var/lib/rlcd -v /srv/acme:/project:ro -e R
 docker run --rm -v rlcd-upgrade-test:/var/lib/rlcd -v /srv/acme:/project:ro -e RLCD_PROJECT=/project NEW_IMAGE \
   ask --query "a question your users ask"
 docker volume rm rlcd-upgrade-test
-# 3. switch: compose stops the old container before starting the new one
-RLCD_IMAGE=NEW_IMAGE docker compose up -d rlcd
+# 3. switch: set RLCD_IMAGE=NEW_IMAGE in .env (edit the line if there is one already), then
+docker compose up -d rlcd          # compose stops the old container before starting the new one
 ```
+
+`RLCD_IMAGE` goes into `.env`, not in front of one command. Every later compose command has to use the same
+image: a key rotation, a `run --rm` for verify, prune or a restore. A command without it falls back to
+`open-rlcd:local`. `up` then recreates the service on the old image, or builds one from whatever the checkout
+holds, and a one-off `run` executes old code against a home the new code wrote.
 
 What can stop an old model from answering under new code:
 
 | check | where it is recorded | on mismatch |
 |---|---|---|
 | bundle format | `model.json` `format` (`open-rlcd-bundle/1`) | the bundle is refused at load |
-| `feature_version` | `model.json`, e.g. `documents-v2:hashing-256-s0:0b1d19ee81e5` = the pack's feature schema, the encoder id, the encoder file's hash | every request to that head is a 422 `feature_version_mismatch` until a model trained on the new features is imported. A release that changes a pack's features changes the schema part |
+| `feature_version` | `model.json`, e.g. `documents-v2:hashing-256-s0:0b1d19ee81e5` = the pack's feature schema, the encoder id, the encoder file's hash | every request to that head is refused until a model trained on the new features is imported. In the documents pack, a release that changes the number of features in a view is refused first, with a 422 `feature_schema_mismatch`. A change to the schema label or the encoder id alone gives a 422 `feature_version_mismatch`. A release that changes a pack's features changes the schema part. `/ready` stays 200 either way, which is why step 2 runs against a copy |
 | encoder hash | `model.json` `encoder.sha256` | the encoder refuses to load: same model file, or retrain |
 | extras | the image's `RLCD_EXTRAS` | an ONNX bundle on a core-only image fails when the encoder is first needed |
 
 There is no migration step and no schema version on the home: a release either reads the files as they are or
 the checks above say why not. That is why step 2 runs against a copy.
 
-**Rolling back the image:** start the previous image on the same home (`RLCD_IMAGE=OLD docker compose up -d rlcd`).
-If the new image trained or imported models, or you are unsure the old code reads what the new one wrote, restore
-the backup from step 1 instead.
+**Rolling back the image:** set `RLCD_IMAGE` in `.env` back to the previous image (remove the line to return to
+`open-rlcd:local`), then `docker compose up -d rlcd`. If the new image trained or imported models, or you are
+unsure the old code reads what the new one wrote, restore the backup from step 1 instead.
 
 **Rolling back the model** is independent of the image: `rlcd rollback` (above).
 
@@ -406,7 +462,7 @@ the backup from step 1 instead.
 | endpoint | key | use |
 |---|---|---|
 | `GET /health` | none | liveness: 200 whenever the process is up. The image's `HEALTHCHECK` and the proxy's upstream check call it |
-| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served |
+| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served. It builds no encoder and opens no corpus: a missing extra, encoder files missing under `HF_HUB_OFFLINE=1`, or an unreadable corpus still answer 200 here and fail each decision with a 503 |
 | `GET /v1/check` | API | the pre-launch checklist as JSON: `ok`, and per item pass / warn / fail |
 | `GET /v1/metrics?since=2026-11-01` | API | action mix, false automation, online reliability against the holdout, review load, latency. JSON, not Prometheus format |
 | `GET /v1/calibration?head=answerable` | API | the holdout numbers a head was accepted on |
@@ -416,30 +472,36 @@ the backup from step 1 instead.
 `/health` answers `"status": "ok"` whenever the process is up: it says "restart me or not", nothing about the
 model. Use `/ready` (or the `ready` field of `/health`) for "send traffic or not": a Kubernetes `readinessProbe`,
 a load balancer's health check, a deploy script that waits for the import. Keep the liveness probe on `/health`:
-an untrained service is alive, and restarting it does not train it.
+an untrained service is alive, and restarting it does not train it. Neither endpoint touches the encoder or the
+corpus, so after every deploy, upgrade and import, and as a periodic probe, also send one smoke decision:
+`POST /v1/systemone` with a state you know, expecting 200.
 
 | alert when | where | why |
 |---|---|---|
 | `/health` fails or the container is `unhealthy` | probe | the process is down |
 | `/ready` answers 503 (`/health` `ready` is `false`) | probe | no trained model can decide: `reasons` says why (untrained, the pack cannot load, an unusable stored policy) |
 | `/health` `model` equals `untrained_id` (`rlcd-0.1.0`) | `/health` | no model is loaded: every decision abstains (an empty or wrong volume) |
-| `/health` `heads` has an `error` key | `/health` | the pack cannot load (missing extra, unreadable corpus); details are in the log |
+| `/health` `heads` has an `error` key | `/health` | the pack itself cannot load (an unknown pack, or a custom pack whose module fails to import); `/ready` is 503 too. A missing extra, missing encoder files or an unreadable corpus do not show here: see the 5xx row |
 | `/health` `model` changes when nobody promoted | `/health` | someone trained, imported or rolled back |
 | `/health` `automation` is `false` | `/health` | the kill switch is off: informational, but someone should own it |
 | `drift_suspected` is non-empty | `/v1/metrics` | online act-tier accuracy is below what the holdout promised: retrain or roll back |
 | `review_load.review_over_capacity` is true | `/v1/metrics` | more confirm decisions per day than `serve.review_capacity_per_day` |
 | the automatic share (`actions.automatic`) drops or the abstain share jumps | `/v1/metrics` | inputs changed, or a cap was applied |
 | `rlcd receipts verify` exits 1, or its `receipts` count is lower than the last recorded one | scheduled job | the audit trail was edited or truncated |
-| `ok` is false | `/v1/check` | a checklist item regressed (a key unset, redaction off, no rollback target, ...) |
-| rate of 5xx; rate of 401 | proxy log | failures; a caller with an old key |
+| `ok` is false | `/v1/check` | an item fails: the receipt chain does not verify (`receipts.chain`), the bundle does not validate (`model.bundle`), a regression case fails (`regressions.cases`), rlcd.yaml has an error (`config.valid`), ... |
+| `counts.warn` rises, or `secrets.redact`, `rollback.ready` or `automation.switch` turns to `warn` | `/v1/check` | warnings never make `ok` false: redaction off, no rollback target and the kill switch off are warnings |
+| rate of 5xx; rate of 401 | proxy log | failures, including the per-request 503s that `/health` and `/ready` cannot see (`encoder_unavailable`, `connector_unavailable`: the kind is only in the response body, and the documents pack's own 503s are not logged); a caller with an old key |
 | free space on the home volume | host | the logs are never rotated |
 
 `/v1/metrics` reads the full logs on each call: poll it every few minutes with `since`, not every few seconds.
 Outcome-based numbers (false automation, drift) only exist if callers post `/v1/feedback` and `/v1/outcome`.
 
 **Logs.** The service writes to stdout / stderr: uvicorn's access line per request and the `open_rlcd` logger for
-errors. A 500 or 503 response body deliberately carries no exception text; the traceback is in the container
-log (`docker compose logs -f rlcd`). Verbosity: override the command with
+errors. A 500, and a 503 from a configured vector or graph store, carry only the exception's type in the body;
+the details are in the container log (`docker compose logs -f rlcd`). The documents pack's own 503s differ:
+`encoder_unavailable` and a local-corpus `connector_unavailable` carry the error message in the body (the encoder
+one can include the absolute path of `encoders/` in the home), and nothing is logged for them. Their reason is
+in the response the caller received. Verbosity: override the command with
 `["serve", "--host", "0.0.0.0", "--port", "8095", "--log-level", "warning"]`. Request bodies are
 not logged here; they are in `decisions.jsonl` (redacted) when `serve.log_states` is on. The proxy logs JSON
 access lines with status codes.
@@ -454,8 +516,9 @@ docker compose exec rlcd rlcd automation off --reason "INC-42"
 ```
 
 It is a file in the home: it takes effect on the next request and survives restarts and upgrades. To make sure
-nobody switches it back on through the API, set `RLCD_AUTOMATION=off` in the service's environment and restart;
-`POST /v1/automation {"enabled": true}` is then a 409 until the variable is removed. Callers that hold an older
+nobody switches it back on through the API, put `RLCD_AUTOMATION=off` into `.env` and recreate the container
+with `docker compose up -d rlcd` (`docker compose restart` keeps the old environment). `POST /v1/automation
+{"enabled": true}` is then a 409 until the variable is removed the same way. Callers that hold an older
 `act` receipt find out through `/v1/receipts/{id}/check`, which reports it stale.
 
 ## Hardening checklist
@@ -468,6 +531,8 @@ nobody switches it back on through the API, set `RLCD_AUTOMATION=off` in the ser
 - [ ] The container runs as uid 10001 with a read-only root filesystem, `cap_drop: [ALL]` and
       `no-new-privileges` (as in `compose.yaml`). The project mount is read-only.
 - [ ] Exactly one service container uses the home volume; the update strategy is stop-then-start.
+- [ ] On a project deployment, `.env` sets `COMPOSE_FILE` with the overlay (and `RLCD_IMAGE` after an upgrade),
+      so no compose command recreates the service without its project.
 - [ ] The home is on encrypted storage: `decisions.jsonl` and `feedback.jsonl` hold request contents. Redaction
       (`serve.redact`) is pattern-based; set `[secrets, pii]` if states can hold e-mail addresses or card
       numbers, or `serve.log_states: false` to keep states out of the receipts entirely.

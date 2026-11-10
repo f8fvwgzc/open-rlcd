@@ -22,8 +22,10 @@ It runs on the core install, offline. The guide that explains every part is
 [docs/writing-a-pack.md](../../docs/writing-a-pack.md). The tickets are synthetic: the numbers below show that
 the pack works, not how it would do on your tickets.
 
-Run the commands from this folder (`cd examples/custom-pack`). Everything they write lands in `data/`, `var/`
-and `bundle/`, which git ignores. The outputs below are real, trimmed where marked `...`.
+Run the commands from this folder (`cd examples/custom-pack`). Steps 1-7 write only to `data/`, `var/` and
+`bundle/`, which git ignores. Step 8 creates `../triage-copy` (that is `examples/triage-copy`), which git does not
+ignore: delete it afterwards (`cd ../custom-pack && rm -rf ../triage-copy`). The outputs below are real, trimmed
+where marked `...`, except the one block in step 5 that says it is a summary.
 
 ## 1. Make the labelled tickets
 
@@ -110,7 +112,8 @@ operations (a first version has nothing to roll back to) and goes away with the 
 $ uv run rlcd decide --state '{"subject": "URGENT: charged twice", "body": "I was charged twice for my subscription. Please answer today, our customers are waiting."}'
 ```
 
-Trimmed to the answers and the reasons:
+It prints the whole decision as indented JSON (about 290 lines). Summarised from that JSON, with the answers and
+the reasons only:
 
 ```
 queue   billing  p 0.850   {billing 0.850, shipping 0.091, technical 0.022, other 0.019, account 0.017}
@@ -202,22 +205,31 @@ its own `rlcd.yaml`, and that file names it:
 ```console
 $ mkdir ../triage-copy && cp -r ticketpack ../triage-copy/ && cd ../triage-copy
 $ printf 'name: triage-copy\npack: ticketpack.pack:TicketsPack\n' > rlcd.yaml
-$ rlcd import ../custom-pack/bundle
+$ uv run rlcd import ../custom-pack/bundle
 imported ../custom-pack/bundle as rlcd-0.1.1
-$ rlcd decide --state '{"subject": "Cannot log in", "body": "My account is locked after too many attempts."}'
+$ uv run rlcd decide --state '{"subject": "Cannot log in", "body": "My account is locked after too many attempts."}'
 ```
+
+(`uv run` still finds the clone's environment from `examples/triage-copy`, so keep the copy inside the clone.)
 
 `queue` comes back as `account` with exactly the probabilities the training project gives
 (`billing 0.001729, technical 0.002191, account 0.979352, shipping 0.00753, other 0.009197` in both). The copy
 has no `data/tickets.jsonl`, which the pack's own config check mentions as a warning; serving does not need
-it, because the provider is rebuilt from the bundle. A project
-whose `rlcd.yaml` names another pack refuses the bundle instead of importing code on its word:
+it, because the provider is rebuilt from the bundle.
+
+A project whose `rlcd.yaml` names another pack does not import code on the bundle's word, but it does not
+refuse the import either. `rlcd import` checks the files, registers the bundle and makes it `rlcd-latest`
+(unless you pass `--keep-latest`). Every later use of it is refused: `rlcd decide` exits 1 with this message,
+and a running `rlcd serve` answers every decision (and `GET /v1/heads`) with a 422 that carries it:
 
 ```
 rlcd: model rlcd-0.1.1 was trained with pack 'tickets', which is neither this project's pack ('tabular') nor a
 built-in pack ['documents', 'tabular']. A bundle never names code to import: set `pack:` in rlcd.yaml to the
 pack it was trained with
 ```
+
+In a project that was already serving a model, `rlcd rollback` brings the previous version back. Import a
+bundle of unknown origin with `--keep-latest` and look at it before you promote it.
 
 ## Embeddings instead of n-grams
 

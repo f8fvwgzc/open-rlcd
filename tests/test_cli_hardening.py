@@ -525,6 +525,18 @@ def test_decide_ask_and_serve_note_a_policy_that_is_not_served_yet(biz, tmp_path
     assert "heads.outcome.stakes 'medium' -> 'low'" in io.err
     assert json.loads(io.out)["heads"]["outcome"]["decision"]["stakes"] == "medium"
 
+    # and so is its conformal promise: an edit is served only after a retrain, so it is reported like stakes
+    # (docs/adoption.md "How to change them" lists it with the thresholds; it used to pass without a word)
+    edit_yaml(root, lambda d: (d["pack_config"].pop("stakes"), d["pack_config"].update(conformal=0.1)))
+    svc = Service(load_project(root), home=home)
+    assert svc.specs("rlcd-0.1.1")["outcome"].conformal is None          # what is served
+    assert policy_drift(svc, "rlcd-0.1.1") == "heads.outcome.conformal None -> 0.1"
+    assert run(root, home, "check", "--json") in (0, 1)
+    item = {c["id"]: c for c in json.loads(capsys.readouterr().out)["checks"]}["thresholds.config"]
+    assert item["status"] == "warn" and "heads.outcome.conformal None -> 0.1" in item["detail"]
+    assert run(root, home, "decide", "--state", state) == 0
+    assert "heads.outcome.conformal None -> 0.1" in capsys.readouterr().err
+
 
 def test_policy_drift_is_none_without_a_stored_policy_or_a_difference(toy, tmp_path):
     assert policy_drift(toy.svc, toy.model) is None

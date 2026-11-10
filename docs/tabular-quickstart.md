@@ -10,7 +10,7 @@ Every output below is real, from a synthetic table of 4,000 expense claims. Your
 ## 0. Install (5 minutes)
 
 ```bash
-brew install uv libomp       # libomp: for LightGBM heads; without it, set `model: logreg` per head
+brew install uv libomp       # libomp: for LightGBM; without it, `model: auto` trains logistic regression (with a note)
 uv tool install "open-rlcd @ git+https://github.com/f8fvwgzc/open-rlcd"
 rlcd --version
 ```
@@ -32,7 +32,7 @@ C00001,E0209,2025-01-06T11:41:00Z,226.90,training,engineering,cash,30,no,osaka s
 | outcome (label) | `outcome`, `payout_delay` | What you want predicted. One head per outcome column. |
 | id | `claim_id` | Reported with results; never a feature. |
 | group | `employee_id` | All rows of one group land on the same side of the holdout. Without it, the model is scored on people it has already seen and looks better than it is. |
-| time | `submitted_at` | The holdout becomes the most recent cases, which is how a deployed model meets the future. ISO 8601 or epoch seconds; other notations need `time_format` (e.g. `"%d/%m/%Y %I:%M %p"`). |
+| time | `submitted_at` | The holdout becomes the most recent cases, which is how a deployed model meets the future. With a group as well, it becomes the groups that appear latest, with all their rows (step 2). ISO 8601 or epoch seconds; other notations need `time_format` (e.g. `"%d/%m/%Y %I:%M %p"`). |
 | known only afterwards | `rejection_reason`, `review_level` | Must **not** be features: they are filled in once the outcome is known and give it away. |
 | everything else | `amount`, `category`, `note`, ... | Features. Numbers stay numbers, other values become categories, empty cells are missing. |
 
@@ -63,7 +63,7 @@ pack_config:
   data: ./data.csv
   id: claim_id
   group: employee_id          # one employee's claims stay on one side of the holdout
-  time: submitted_at          # the holdout is the most recent claims
+  time: submitted_at          # orders the employees: the holdout is those who appear latest, with all their claims
   features: auto
   exclude: [rejection_reason, review_level]   # filled in by the reviewer, after the decision
   text: [note]
@@ -75,6 +75,11 @@ pack_config:
     lucky: {label: coin, positive: heads}
 ```
 
+* **`group` and `time` together.** With both set, the default `train.ordering: auto` splits by group: the
+  holdout is the 20 % of employees whose first claim came latest, with all their claims. That keeps each
+  employee on one side, but the holdout is not "the most recent claims": recent claims of other employees train.
+  `train: {ordering: time}` makes the holdout the latest 20 % of claims instead, and then one employee's claims
+  can land on both sides. This example keeps the group split.
 * **One outcome or several.** `label: outcome` is one head. For more, delete `label` and list them under
   `targets`: each is a head with its own model, and every declared label column is kept out of the features
   of all heads. (`lucky` is a coin flip, here to show what "no signal" looks like.)
@@ -155,12 +160,15 @@ rlcd decide --heads approved --state '{"amount": 62.40, "category": "travel", "d
 
 ```
 "action": "act",
-"answer":   {"type": "noul", "noul": 0.914889, "calibrated": true, "skill": true},
-"decision": {"class": "true", "p": 0.914889, "tier": "act", "thresholds": {"act": 0.85, "confirm": 0.65, ...}},
-"reasons":  [{"feature": "amount", "value": 62.4, "effect": "raises P(true)"}, ...,
-             {"feature": "text:note#42", "value": 0.0974, "effect": "lowers P(true)"}],
-"reason_groups": {"note": 0.5743, "amount": 0.131, "days_since_expense": 0.1234, ...}
+"heads": {"approved": {
+  "answer":   {"type": "noul", "noul": 0.914889, "calibrated": true, "skill": true},
+  "decision": {"class": "true", "p": 0.914889, "tier": "act", "thresholds": {"act": 0.85, "confirm": 0.65, ...}},
+  "reasons":  [{"feature": "amount", "value": 62.4, "effect": "raises P(true)"}, ...,
+               {"feature": "text:note#42", "value": 0.0974, "effect": "lowers P(true)"}],
+  "reason_groups": {"note": 0.5743, "amount": 0.131, "days_since_expense": 0.1234, ...}, ...}}
 ```
+
+Each head's answer, decision and reasons sit under `heads.<head>`; `action` is the decision as a whole.
 
 The state is one row as JSON: every feature column must be present (`null` for a missing value); `rlcd serve`
 lists them at `GET /v1/heads`. Never act on `p` alone when `skill` is false.
@@ -177,9 +185,10 @@ curl -s localhost:8095/v1/systemone -H 'content-type: application/json' -d '{
 ```
 
 ```
-"approve": {"type": "noul", "noul": 0.914889, "calibrated": true, "skill": true},
-"delay":   {"type": "score", "score": 0, "probabilities": {"0": 0.472689, "1": 0.285513, "2": 0.155539, "3": 0.086258}, ...},
-"lucky":   {"type": "noul", "noul": 0.516736, "calibrated": true, "skill": false}
+"answers": {
+  "approve": {"type": "noul", "noul": 0.914889, "calibrated": true, "skill": true},
+  "delay":   {"type": "score", "score": 0, "probabilities": {"0": 0.472689, "1": 0.285513, "2": 0.155539, "3": 0.086258}, ...},
+  "lucky":   {"type": "noul", "noul": 0.516736, "calibrated": true, "skill": false}},
 "warnings": ["head 'lucky': the holdout shows no skill over the base rate: every decision abstains until a retrain shows skill"]
 ```
 
@@ -212,7 +221,8 @@ sufficient. Each live decision also passes a gate that counts how often predicti
 class, same probability band) were right, starting from the holdout rows:
 
 ```
-"tier": "confirm", "uncapped_tier": "act",
+"tier": "confirm",
+"heads": {"approved": {"decision": {"tier": "confirm", "uncapped_tier": "act", ...}, ...}},
 "warnings": ["head 'approved': Bernoulli gate: predictions like this one (P(false) in 0.8-0.9) were right 32 of 42 times; P(accuracy > 0.75) = 0.523228 is below 0.9, so act becomes confirm"]
 ```
 

@@ -236,7 +236,8 @@ def cmd_label(args: argparse.Namespace) -> int:
         from .labeling.bootstrap import bootstrap
         from .labeling.judges import make_judge
 
-        judge = make_judge(args.judge or project.get("labeling.judge", "claude-cli"), project)
+        # no --judge: make_judge reads labeling.judge and labeling.model itself (an explicit spec would hide the model)
+        judge = make_judge(args.judge, project)
         provider = pack.provider(project, None)
         res = bootstrap(project, pack, provider, judge, heads=heads, limit=args.limit,
                         batch=args.batch or int(project.get("labeling.batch", 20)), progress=_bootstrap_progress)

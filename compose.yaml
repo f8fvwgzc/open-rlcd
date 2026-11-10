@@ -5,8 +5,8 @@
 #   curl --cacert <(docker compose exec -T proxy cat /data/caddy/pki/authorities/local/root.crt) https://localhost/health
 #
 # As written this serves the bundled synthetic demo model on https://localhost with a certificate from Caddy's
-# internal CA. For your own model add the project overlay (deploy/compose.project.yaml) and set RLCD_DOMAIN /
-# RLCD_TLS (deploy/Caddyfile).
+# internal CA. For your own model add the project overlay through COMPOSE_FILE in .env, so that no command runs
+# without it (deploy/compose.project.yaml says how), and set RLCD_DOMAIN / RLCD_TLS (deploy/Caddyfile).
 #
 # One `rlcd` container per home volume: do not scale this service (docs/deployment.md, "Concurrency").
 

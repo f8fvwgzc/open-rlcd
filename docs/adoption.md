@@ -21,8 +21,8 @@ tabular pack calls it `hold`). It never writes text and never authorises anythin
 
 It is the wrong tool when:
 
-* **You have no outcomes and cannot label any.** A head needs at least 30 trusted rows to train at all, and about
-  150–300 before automatic action can be verified (section 4).
+* **You have no outcomes and cannot label any.** A head needs at least 30 trusted rows to train at all, and
+  usually several hundred before automatic action can be verified (section 4).
 * **The decision is rare or one-off.** Calibration is a statement about frequencies; a decision made a few times
   a month never accumulates the evidence.
 * **An exact rule decides it.** Limits, eligibility, permissions and allowlists belong in your code, before any
@@ -107,32 +107,42 @@ The business lead is usually `policy`; the engineer usually `pack`. `policy` and
 the same single person: someone must be able to switch automation off when the threshold owner is away.
 
 What the tool enforces of this: nothing beyond the warning. `owners` is a list of names for `rlcd check`; it grants
-no permission. Access is two shared keys: `RLCD_API_KEY` for every route but `/health`, and `RLCD_ADMIN_KEY` for
-`POST /v1/train`, `POST /v1/automation` and `POST /v1/receipts/{id}/confirm`.
+no permission. Access is two shared keys: `RLCD_API_KEY` for every route but `/health` and `/ready`, and
+`RLCD_ADMIN_KEY` for `POST /v1/train`, `POST /v1/automation` and `POST /v1/receipts/{id}/confirm`.
 
 ## 4. Labelling plan
 
 **How many rows, and why.** The numbers come from three defaults: a head needs 30 trusted rows to train
-(`min_trusted`), the holdout is the last 20 % (`train.holdout_fraction`), and `act` is verified only with at least
-30 holdout rows and 30 holdout rows the policy would act on (`policy.min_verify_rows`).
+(`min_trusted`), the holdout is 20 % of the trusted rows (`train.holdout_fraction`: the latest 20 % when rows
+have a time column, or the groups that appear latest when they also have a group; otherwise a fixed hashed 20 %),
+and `act` is verified only with at least 30 holdout rows and 30 holdout rows the policy would act on
+(`policy.min_verify_rows`). For a gate head (`decision: gate`) those are the rows with P(yes) at or above `act`.
 
 | trusted rows per head | what you get |
 |---|---|
 | under 30 | the head does not train |
 | 30 – ~150 | calibrated, but the holdout is under 30 rows: decisions are capped at `confirm` |
-| ~150 | a 30-row holdout: `act` becomes possible if enough of those rows clear the act threshold |
-| ~300 (recommended) | a holdout of about 60 rows and usable reliability bins |
+| ~150 | a 30-row holdout: the floor below which `act` is impossible. `act` needs every one of those 30 rows to clear the act threshold, so expect `confirm` |
+| ~300 (recommended) | a holdout of about 60 rows and usable reliability bins; `act` needs half of them to clear the threshold |
 
-High stakes need more: at `act: 0.95` fewer holdout rows clear the threshold, so 30 act-tier rows take a larger
-holdout. The report says what is missing per head and stakes level.
+So the trusted rows `act` needs are about 30 / (holdout fraction × the share of holdout rows that clear the act
+threshold): with 20 % and a third of the rows clearing it, about 450. High stakes need more: at `act: 0.95`
+fewer rows clear the threshold. The report's verdict lines give the act-tier row count per head and stakes level
+(also `policy.holdout.<stakes>.act.n` in `calibration_<head>.json`).
 
 **Where labels come from.**
 
 | pack | trusted labels | weak labels |
 |---|---|---|
 | `tabular` | the outcome column of your file (`label_source: ground_truth` by default). No labelling session: the work is making the column correct | none; `rlcd label` has nothing to label for this pack |
-| `documents` | `rlcd label audit`: a person checks rows in the terminal | `rlcd label bootstrap`: an LLM judge labels every head for every query |
+| `documents` | `rlcd label audit`: a person checks rows in the terminal | `rlcd label bootstrap`: an LLM judge labels the items built from each query (see below) |
 | your own | `source: ground_truth` rows, or the audit if the pack implements `label_tasks` | the judge, if the pack implements `label_tasks` |
+
+What a documents query log yields: every query gives items for `response_type`, `route` and `needs_graph`.
+`chunk_relevant` and `answerable` need retrieved chunks, so an ingested corpus (`rlcd ingest`), or `evidence`
+logged with the query. `grounded`, `complete` and `risk_tier` get an item only for a `queries.jsonl` row that
+carries the drafted `answer`. Logged `evidence` is optional there: without it the top retrieved chunks stand in.
+A plain question log therefore yields no `grounded` labels at all.
 
 **LLM judge, then human audit** (documents and packs with `label_tasks`):
 
@@ -206,9 +216,16 @@ policy:
 ```
 
 **Who signs off.** The `policy` owner, after reading `rlcd report` with the `review` owner: for each head and
-stakes level, the holdout's act-tier accuracy with its interval, and how many decisions would land in `confirm`
-per day at these thresholds. The thresholds in force travel with every decision and receipt (`thresholds`,
-`policy_digest`), so what was signed off can be compared with what was served. The tool keeps no approval record:
+stakes level, the holdout's act-tier accuracy with its interval (the verdict lines of `MODEL_CARD.md`), and how
+many decisions would land in `confirm` per day at these thresholds. The report has no per-day number. Estimate
+it from `calibration_<head>.json`, which `rlcd report` writes next to it. `policy.holdout.<stakes>.tiers` counts
+holdout rows per tier before any cap. The confirm share is `confirm`, plus `act` where
+`policy.verdict.<stakes>.max_tier` is `confirm`, divided by `policy.holdout.rows`. Multiply it by your daily
+volume, and expect more at first: the Bernoulli gate starts some cells at `confirm`. Once shadow traffic flows,
+count it there: `rollout.proposed.confirm` in `rlcd metrics`, divided by the window's days.
+(`review_load.confirm_per_day` counts every capped act as confirm, so it fits only modes `limited` and `full`.)
+The thresholds in force travel with every decision and receipt (`thresholds`, `policy_digest`), so what was
+signed off can be compared with what was served. The tool keeps no approval record:
 commit rlcd.yaml and let the change review be the sign-off.
 
 **How to change them.**
@@ -229,7 +246,7 @@ What follows is what the code does. Whether that satisfies your legal and contra
 
 | file | holds | redacted | removed by |
 |---|---|---|---|
-| `decisions.jsonl` | every decide / evaluate: the state each head judged, probabilities, action, receipt | yes (`serve.redact`) | `rlcd receipts prune --before DATE` drops states, keeps digests |
+| `decisions.jsonl` | every decide / evaluate: the state each head judged, probabilities, action, receipt. Also every systemone call that sets `receipt: true` (every one under `serve.receipts: all`), with each question's input state; rank calls under the same switch add candidate ids and probabilities, no states | yes (`serve.redact`) | `rlcd receipts prune --before DATE` drops states, keeps digests |
 | `feedback.jsonl` | labels posted to `/v1/feedback`, with their own copy of the state, notes and tags | yes | you |
 | `outcomes.jsonl` | what you post to `/v1/outcome` | notes and tags | you |
 | `confirmations.jsonl` | who confirmed which decision (`by`, a name the caller sends) | notes | you |
@@ -321,8 +338,11 @@ and stand for all traffic only if you post feedback for a random sample — not 
 
 * Feedback is flowing: at least 30 labelled decisions that the policy put at `act`, per head and stakes level you
   want to automate (below 30 the drift test does not run).
-* `drift_suspected` is false for those heads, and `false_automation` is no higher than the act threshold allows
-  (at `act: 0.85`, about 15 %) and than the business accepted in section 5.
+* `drift_suspected` is false for those heads, and the error rate of what the policy would have automated,
+  `1 − heads.<head>.feedback.policy_act.<stakes>.accuracy` in `rlcd metrics`, is no higher than the act threshold
+  allows (at `act: 0.85`, about 15 %) and than the business accepted in section 5. `false_automation` cannot
+  show this yet: in shadow and assist nothing acts, so it stays empty, and its `count: 0` means "nothing
+  measured", not "no errors".
 * The model's proposed actions have been compared with `baseline`, and the disagreements read by the `review`
   owner.
 
@@ -368,7 +388,7 @@ Rollout and the kill switch cap automation. They do not make a head more accurat
 **Feedback.** For each reviewed or resolved decision, post what was true:
 
 ```bash
-curl -s localhost:8095/v1/feedback -H 'content-type: application/json' \
+curl -s localhost:8095/v1/feedback -H "Authorization: Bearer $RLCD_API_KEY" -H 'content-type: application/json' \
   -d '{"decision_id": "...", "head": "payable", "label": "false", "source": "expense-review"}'
 ```
 
@@ -443,7 +463,8 @@ company-rlcd/
   sales-leads/       rlcd.yaml   var/
 ```
 
-Commands pick the project from the nearest `rlcd.yaml`, `--project DIR`, or `RLCD_PROJECT`.
+Commands pick the project from `--project DIR` (written before the command: `rlcd --project DIR metrics`), else
+`RLCD_PROJECT`, else the nearest `rlcd.yaml` above the current folder.
 
 | may be shared | must not be shared |
 |---|---|
@@ -452,11 +473,13 @@ Commands pick the project from the nearest `rlcd.yaml`, `--project DIR`, or `RLC
 | this adoption process and the incident steps | a trained bundle: it learned one business's data and was verified on one business's holdout |
 | the people, where one team really owns two domains | `owners`, `RLCD_API_KEY` and `RLCD_ADMIN_KEY` |
 
-Three things to watch:
+Four things to watch:
 
 * `RLCD_HOME` in the environment overrides `home` in every rlcd.yaml that process loads. Set globally on a machine
   with two projects, it makes them share one home — one registry, one kill switch. Leave it unset, or set it per
   service.
+* `RLCD_PROJECT` in the environment outranks the folder you are in. Set globally, it sends every command run in
+  any project folder to that one project, `rlcd automation off` included. Leave it unset, or set it per service.
 * The kill switch is per home. Switching automation off for one business does not touch another; a company-wide
   stop is one command per project.
 * Importing another team's bundle (`rlcd import`) brings their thresholds and their holdout verdicts. It says
@@ -487,7 +510,8 @@ slices for that comparison.
 - [ ] `RLCD_API_KEY` and `RLCD_ADMIN_KEY` set, held by different callers
 
 **Model**
-- [ ] About 300 trusted rows per head that gates an action (at least 150)
+- [ ] Per head that gates an action, enough trusted rows for 30 act-tier holdout rows at its stakes level (about
+      300 to start; below 150 `act` is impossible)
 - [ ] `rlcd train`, `rlcd report` read by the `policy` and `review` owners
 - [ ] Stakes level per head and thresholds signed off by `policy`; rlcd.yaml committed
 - [ ] `rlcd check` shows no fail; every warning has an owner's answer

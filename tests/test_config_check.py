@@ -18,9 +18,9 @@ from open_rlcd.core import checklist as CL
 from open_rlcd.core import config_check as CC
 from open_rlcd.core import policy as PL
 from open_rlcd.core.config import Project, load_project
-from open_rlcd.core.contract import TrainRequest
+from open_rlcd.core.contract import ContractError, TrainRequest
 from open_rlcd.core.head import HeadSpec
-from open_rlcd.core.routes import RESERVED
+from open_rlcd.core.routes import RESERVED, RouteBook
 from open_rlcd.core.service import RECEIPT_MODES, Service
 from open_rlcd.packs.base import load_pack
 from open_rlcd.packs.tabular.data import BASE_KEYS, SPEC_KEYS, TARGET_KEYS, TOLERATED_KEYS
@@ -204,20 +204,40 @@ def test_a_wrong_value_is_one_error_at_its_path(tmp_path, data, path, fragment):
 def test_names_that_match_nothing_are_warnings(tmp_path):
     f = check(tmp_path, {"rollout": {"mode": "limited", "limited": {"stakes": ["lo"], "heads": ["rout"]},
                                      "heads": {"answerble": "shadow"}},
-                         "routes": {"route": {"teleport": {}}, "nope": {"a": {}}, "answerable": {"true": {}},
-                                    "response_type": {"summarize": {"requries": ["llm_large"]}}},
+                         "routes": {"nope": {"a": {}}, "response_type": {"summarize": {"requries": ["llm_large"]}}},
                          "owners": {"incident": "on-call"}})
     assert CC.errors(f) == []
     assert "Did you mean 'low'?" in at(f, "rollout.limited.stakes", "warn")
     assert "Did you mean 'route'?" in at(f, "rollout.limited.heads", "warn")
     assert "Did you mean 'answerable'?" in at(f, "rollout.heads.answerble", "warn")
-    assert "is not an option of head 'route'" in at(f, "routes.route.teleport", "warn")
-    assert "not a head of this project" in at(f, "routes.nope", "warn")
-    assert "noul head" in at(f, "routes.answerable", "warn")
+    assert "not a head of this project" in at(f, "routes.nope", "warn")    # never consulted by a decision
     assert "Did you mean 'requires'?" in at(f, "routes.response_type.summarize.requries", "warn")
     assert "Did you mean 'incidents'?" in at(f, "owners.incident", "warn")
     f = check(tmp_path, {"rollout": {"mode": "full", "limited": {"stakes": ["low"]}}})
     assert "only read in mode limited" in at(f, "rollout.limited", "warn")
+
+
+def test_a_route_contract_the_service_would_refuse_is_an_error(tmp_path):
+    """A contract under an option the head does not have (a misspelt option), or on a head that is not a choice
+    head, makes the service refuse every decision that consults the head: RouteBook.check_head raises 500
+    bad_config, `rlcd decide` exits 1 and `rlcd check` fails routes.contracts. It used to be only a warning, so
+    `rlcd train` and `rlcd serve` started on a file that could not decide."""
+    specs = load_pack("documents").heads(Project(root=tmp_path, data={}))
+    cases = (({"route": {"vectr": {}, "vector": {}}}, "routes.route.vectr", "is not an option of head 'route'"),
+             ({"answerable": {"true": {}}}, "routes.answerable", "is a noul head"))
+    for routes, path, fragment in cases:
+        f = check(tmp_path, {"routes": routes})
+        msg = at(f, path)                                   # an error, once
+        assert fragment in msg and "500 bad_config" in msg, msg
+        assert len(CC.errors(f)) == 1, f
+        head = next(iter(routes))
+        with pytest.raises(ContractError) as e:             # what every decision consulting the head runs into
+            RouteBook.from_config(routes).check_head(head, specs[head])
+        assert e.value.kind == "bad_config" and e.value.status == 500
+    assert "Did you mean 'vector'?" in at(check(tmp_path, {"routes": cases[0][0]}), "routes.route.vectr")
+    # a head switched off is not served, so its contracts are never consulted
+    off = check(tmp_path, {"heads": {"answerable": {"enabled": False}}, "routes": {"answerable": {"true": {}}}})
+    assert CC.errors(off) == []
 
 
 # ----------------------------------------------------------------------------- heads
@@ -436,6 +456,39 @@ def test_the_reference_page_lists_exactly_the_keys_the_check_knows():
     text = DOC.read_text(encoding="utf-8")
     for variable, _ in CC.ENVIRONMENT:
         assert f"| `{variable}` |" in text, variable
+
+
+def _not_nullable(keys: dict, prefix: str = "") -> set[str]:
+    """Every path whose explicit empty value (`key:`) the check refuses: Key.nullable False, maps included."""
+    out: set[str] = set()
+    for name, key in keys.items():
+        path = f"{prefix}{name}"
+        if not key.nullable:
+            out.add(path)
+        if key.keys is not None:
+            out |= _not_nullable(key.keys, path + ".")
+        elif key.each is not None:
+            out |= _not_nullable({f"<{key.each.label}>": key.each}, path + ".")
+    return out
+
+
+def test_the_reference_page_names_every_key_whose_empty_value_is_an_error(tmp_path):
+    bullet = DOC.read_text(encoding="utf-8").split("* **An empty value is an error**", 1)[1].split("\n* **", 1)[0]
+    named: set[str] = set()
+    parent = ""
+    for word in re.findall(r"`([a-z_.<>*]+)`", bullet):
+        if "." in word:
+            parent = word
+        else:                                   # `policy.stakes.<level>` and its `act`, `confirm` and `min_accuracy`
+            word = f"{parent}.{word}"
+        named |= {f"train.{k}" for k in CC.schema()["train"].keys} if word == "train.*" else {word}
+    want = _not_nullable(CC.schema())
+    for pack in ("documents", "tabular"):
+        want |= _not_nullable(CC._pack_keys(load_pack(pack)) or {}, "pack_config.")
+    assert named == want
+    # and the example the paragraph opens with is a key whose empty value means the default
+    assert check(tmp_path, {"labeling": {"timeout": None}}) == []
+    assert at(check(tmp_path, {"serve": {"port": None}}), "serve.port").startswith("is empty: give it a value")
 
 
 def test_the_examples_on_the_reference_page_have_no_findings(tmp_path):

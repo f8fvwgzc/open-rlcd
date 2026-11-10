@@ -492,9 +492,10 @@ def _policy_config(ctx: _Ctx) -> Outcome:
 
 def policy_drift(service: Any, version: str) -> str | None:
     """How rlcd.yaml differs from what `version` serves, as 'key served -> configured; ...': its `policy`, and the
-    `stakes` of each trained head (a version serves the policy stored in its bundle and its heads as they were
-    trained). None when they agree, or when the version stores no policy (rlcd.yaml is then served as written).
-    `rlcd check` (thresholds.config), `rlcd decide`, `rlcd ask` and `rlcd serve` all report this one text."""
+    `stakes` and `conformal` of each trained head (a version serves the policy stored in its bundle and its heads
+    as they were trained). None when they agree, or when the version stores no policy (rlcd.yaml is then served as
+    written). `rlcd check` (thresholds.config), `rlcd decide`, `rlcd ask` and `rlcd serve` all report this one
+    text."""
     b = service.bundle(version)
     if b is None or not b.meta.get("policy"):
         return None
@@ -506,9 +507,13 @@ def policy_drift(service: Any, version: str) -> str | None:
         wanted = {}
     for name in b.names():
         spec = wanted.get(name)
-        was = b.head(name).spec.stakes
-        if spec is not None and spec.stakes != was:
-            parts.append(f"heads.{name}.stakes {was!r} -> {spec.stakes!r}")
+        if spec is None:
+            continue
+        trained = b.head(name).spec
+        for field in ("stakes", "conformal"):
+            was, now = getattr(trained, field), getattr(spec, field)
+            if now != was:
+                parts.append(f"heads.{name}.{field} {was!r} -> {now!r}")
     return "; ".join(parts) or None
 
 

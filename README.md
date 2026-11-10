@@ -134,7 +134,7 @@ uv run rlcd init my-business --pack documents && cd my-business
 uv run rlcd config check                           # after every edit of rlcd.yaml: typos and bad values, by key
 uv run rlcd ingest ./data                          # your folder of .md / .txt / .html / .pdf / .json
 # write queries.jsonl: real questions people ask, one {"query": ..., "time": ..., "group": ...} per line
-export RLCD_ALLOW_REMOTE=1                         # only for claude-cli / anthropic: they send item text to Anthropic
+export RLCD_ALLOW_REMOTE=1                         # claude-cli / anthropic (item text goes to Anthropic) or a judge off loopback
 uv run rlcd label bootstrap --judge claude-cli     # or: anthropic | ollama:<model> (stays local) | openai:<url>|<model>
 uv run rlcd label audit --heads answerable,grounded --n 600   # your labels: these calibrate the model
 uv run rlcd train                                  # all heads; prints the calibration summary
@@ -229,8 +229,7 @@ not leave your machines. Secrets come from environment variables only.
 ## Run it on a server
 
 ```bash
-docker build -t open-rlcd .
-RLCD_API_KEY=... RLCD_ADMIN_KEY=... docker compose up -d      # HTTPS through Caddy; the API port is not published
+RLCD_API_KEY=... RLCD_ADMIN_KEY=... docker compose up -d --build   # HTTPS through Caddy; the API port is not published
 ```
 
 One serving process per `RLCD_HOME`; the server and the admin commands (`rlcd import`, `promote`, `rollback`,

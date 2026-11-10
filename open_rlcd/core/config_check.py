@@ -729,7 +729,9 @@ def _overrides(project: Project, specs: dict | None, out: list[dict]) -> None:
 def _cross(project: Project, specs: dict | None, ro: Rollout | None, book: RouteBook | None,
            out: list[dict]) -> None:
     """Names that must match a head: warnings, because a trained model may still carry a head the file no longer
-    lists (`rlcd check` compares routes against the model)."""
+    lists (`rlcd check` compares routes against the model). Route contracts on a head of the project are stricter:
+    one under an option the head does not have, or on a head that is not a choice head, makes the service refuse
+    every decision that consults the head (RouteBook.check_head, 500 bad_config), so that is an error."""
     if specs is None:
         return
     disabled = {n for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
@@ -755,16 +757,18 @@ def _cross(project: Project, specs: dict | None, ro: Rollout | None, book: Route
             spec = specs.get(head)
             if spec is None:
                 continue
+            refused = f"every decision that consults head {head!r} would fail (500 bad_config)"
             if spec.type != "choice":
-                out.append(_finding("warn", f"routes.{head}", f"head {head!r} is a {spec.type} head; contracts "
-                                                               f"belong to the options of a choice head"))
+                out.append(_finding("error", f"routes.{head}", f"head {head!r} is a {spec.type} head; contracts "
+                                                                f"belong to the options of a choice head, and "
+                                                                f"{refused}"))
                 continue
             for opt in options:
                 if opt not in spec.classes:
                     hint = _suggest(opt, spec.classes)
-                    out.append(_finding("warn", f"routes.{head}.{opt}",
-                                        f"is not an option of head {head!r} ({', '.join(spec.classes)})"
-                                        + (f". Did you mean {hint!r}?" if hint else "")))
+                    out.append(_finding("error", f"routes.{head}.{opt}",
+                                        f"is not an option of head {head!r} ({', '.join(spec.classes)}), so "
+                                        f"{refused}" + (f". Did you mean {hint!r}?" if hint else "")))
 
 
 def _secrets(data: dict, out: list[dict]) -> None:

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 from open_rlcd.core.config import Project
 from open_rlcd.core.head import HeadSpec
@@ -386,3 +387,39 @@ def test_make_judge_from_project_config(monkeypatch, tmp_path):
     remote = "openai:https://llm.example.com/v1|m"
     assert make_judge(remote, Project(root=tmp_path, data={"security": {"allow_remote": True}})).model == "m"
     assert make_judge(remote, Project(root=tmp_path, data={"pack_config": {"allow_remote": True}})).model == "m"
+
+
+def test_label_bootstrap_builds_the_judge_rlcd_yaml_names(monkeypatch, tmp_path, capsys):
+    """Without --judge, `rlcd label bootstrap` lets make_judge read labeling.judge AND labeling.model. It used to
+    pass labeling.judge on as an explicit spec, so labeling.model was never read: `judge: ollama` + `model: llama3`
+    passed `rlcd config check` and then stopped with "ollama needs a model"."""
+    from open_rlcd.cli import main
+    from open_rlcd.labeling import bootstrap as BS
+
+    seen: list = []
+    monkeypatch.setattr(BS, "bootstrap", lambda project, pack, provider, judge, **kw: seen.append(judge) or {})
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    monkeypatch.delenv("RLCD_HOME", raising=False)
+
+    def project(labeling: dict) -> str:
+        root = tmp_path / str(len(list(tmp_path.iterdir())))
+        root.mkdir()
+        data = {"pack": "documents", "pack_config": {"encoder": {"kind": "hashing", "dim": 64}}, "labeling": labeling}
+        (root / "rlcd.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+        return str(root)
+
+    ollama = project({"judge": "ollama", "model": "llama3", "base_url": "http://127.0.0.1:11434"})
+    assert main(["--project", ollama, "config", "check"]) == 0
+    assert main(["--project", ollama, "label", "bootstrap"]) == 0
+    assert isinstance(seen[-1], OllamaJudge) and seen[-1].model == "llama3"
+    # --judge replaces the whole judge setting: its own model, and labeling.model is not read
+    assert main(["--project", ollama, "label", "bootstrap", "--judge", "ollama:qwen2.5"]) == 0
+    assert seen[-1].model == "qwen2.5"
+    capsys.readouterr()
+    assert main(["--project", ollama, "label", "bootstrap", "--judge", "ollama"]) != 0
+    assert "ollama needs a model" in capsys.readouterr().err
+    # the hosted judges take labeling.model too (after the remote opt-in)
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")
+    assert main(["--project", project({"judge": "claude-cli", "model": "claude-haiku-5-5"}), "label", "bootstrap"]) == 0
+    assert isinstance(seen[-1], ClaudeCliJudge) and seen[-1].model == "claude-haiku-5-5"
+    assert len(seen) == 3

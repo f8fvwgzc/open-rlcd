@@ -14,9 +14,10 @@
 {$RLCD_DOMAIN:localhost} {
 	tls {$RLCD_TLS:internal}
 
-	# the service's own limit is RLCD_MAX_BODY_BYTES (default 16 MiB): refuse larger bodies here first
+	# the service's own limit is RLCD_MAX_BODY_BYTES (default 16 MiB = 16777216 bytes): refuse larger bodies here
+	# first. MiB, not MB: Caddy reads "16MB" as 16000000 bytes, which would refuse bodies the service accepts.
 	request_body {
-		max_size 16MB
+		max_size 16MiB
 	}
 
 	header {
