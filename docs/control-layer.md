@@ -18,6 +18,11 @@ request
   -> your deterministic validation: schema, identity, capability, allowlists, data egress
   -> POST /v1/decide            allowed options and route contracts filter first, then the typed choices
                                 (response type, retrieval route), chunk relevance, the evidence gate
+  -> your code                  branches on the action: act goes on, confirm waits for a person (POST
+                                /v1/receipts/{id}/confirm), anything else stops; plan.call_llm false means no
+                                generation (plan.next says what to do instead)
+  -> POST /v1/receipts/{id}/check   the plan's approval still holds for this state, right before its context
+                                leaves for the LLM
   -> your code                  assembles context from plan.use_chunks (or return_evidence) and picks the LLM from
                                 plan.contracts
   -> the LLM                    writes
@@ -25,13 +30,16 @@ request
   -> POST /v1/evaluate          your check results, the artifact status and citations first, then grounded /
                                 complete / risk_tier; next = ship | human_review | revise | retry_generation |
                                 escalate_to_human
-  -> POST /v1/receipts/{id}/check   right before the side effect: does the approval still hold for this state?
+  -> POST /v1/receipts/{id}/check   the evaluation's receipt, right before the answer ships or the side effect runs
   -> your code                  executes with least privilege, or asks a person
   -> POST /v1/feedback, /v1/outcome   what really happened (labels per head; task success, route, cost)
 ```
 
-Read-only, low-risk flows may need only one side of this. A decision call that cannot change routing, context or
-review is only latency: `GET /v1/metrics` shows which heads ever bind a decision.
+Which step is "the action" is yours to say: when sending context to a provider is itself the risk (data egress),
+gate the LLM call on the plan's receipt as above; when only shipping the answer is, the evaluation's receipt is the
+gate. Read-only, low-risk flows may need only one side of this. A decision call that cannot change routing,
+context or review is only latency: `GET /v1/metrics` shows which heads ever bind a decision.
+`examples/control-layer/run.py` walks this path end to end.
 
 ## 1. Draw the boundary
 
@@ -59,8 +67,11 @@ Send one structured state and let each question say which part its head reads:
 
 * `inputs` maps each field the head reads to a dotted path (`items.0.text` indexes arrays); `path` picks a whole
   sub-object. A path that does not resolve is a **422 `missing_evidence`**: a head never judges a guessed field.
-* `strict: true` (systemone, decide, evaluate) refuses a state that lacks inputs almost every training row had,
-  instead of answering it capped at `confirm`.
+* A state that lacks features almost every training row had is capped at `confirm` on decide and evaluate and
+  answered with a warning on systemone; `strict: true` (all three) refuses it instead (422). The guard sees only
+  features that come out missing: an optional field you leave out can read as an ordinary value (on systemone and
+  rank the documents pack reads absent `candidates` as zero candidates; decide retrieves them, or warns when no
+  corpus is ingested), so send every field the head's view lists, `now` included.
 * Treat everything in the state as untrusted data: heads score features, they do not follow instructions found in
   a document.
 * Secrets never belong in a state. As a safety net, logged states are redacted (`serve.redact`, on by default:
@@ -83,7 +94,9 @@ The response carries `battery: {name, version, digest}`. A pinned version that i
 `battery_version_mismatch` (your thresholds were chosen for the old meaning). The digest covers what can change
 an answer (types, heads, criteria, allowed options, input paths), not `instructions`. `GET /v1/batteries` lists
 them with problems (a question whose head is missing or untrained); `rlcd check` fails when receipts recorded the
-same battery version with another digest — a change shipped without a version bump.
+same battery version with another digest — a change shipped without a version bump. It can only compare calls
+that left a receipt: with the default `serve.receipts: decisions`, a `/v1/systemone` call leaves one only when it
+sends `"receipt": true`, so set `serve.receipts: all` (or send it) for the check to see your battery traffic.
 
 All questions on one state are answered in one call, each by its own head; ask the speculative ones too and let
 your code ignore what it does not need.
@@ -171,11 +184,13 @@ Every `/v1/decide` and `/v1/evaluate` (and, with `serve.receipts: all` or `"rece
 parameters), model, pack, feature version, policy digest, stakes, rollout, full distributions, tiers, the action
 and plan or verdict, latency, warnings and what you asked to keep (`baseline`, `artifact`, `checks`, `revision`,
 `tags`). `state_digest` and `contract_digest` identify the state as sent and the question contract it was asked
-under; they are not a cache key for a decide / evaluate result, whose tier also depends on the rollout, the kill
-switch, the live Bernoulli table, `explore`, the clock and the corpus — never cache those.
+under (for `/v1/evaluate` the contract includes the check results, the artifact status, the citations, the plan
+and the evaluation it revises); they are not a cache key for a decide / evaluate result, whose tier also depends
+on the rollout, the kill switch, the live Bernoulli table, `explore`, the clock and the corpus — never cache those.
 
-Receipts are hash-chained: `rlcd receipts verify` detects an edited, inserted, deleted or reordered line and
-prints the head digest — anchor it elsewhere to detect truncation. `GET /v1/receipts/{id}` returns one.
+Receipts are hash-chained, and so are confirmations (`confirmations.jsonl`): `rlcd receipts verify` detects an
+edited, inserted, deleted or reordered line in either and prints both head digests — anchor them elsewhere to
+detect truncation. `GET /v1/receipts/{id}` returns one.
 
 **Before a side effect**, check the approval still holds:
 
@@ -188,8 +203,10 @@ the `rlcd-latest` alias moved, the policy or battery version changed, automation
 since an `act` decision, the receipt is older than `max_age_s`, or the decision is at `confirm` and nobody has
 confirmed it yet, or when the decision abstained (it approves no action). A person confirms with
 `POST /v1/receipts/{id}/confirm {"by": "..."}` (or `rlcd receipts confirm ID --by NAME`); with `RLCD_ADMIN_KEY` set
-that route needs the admin key, so a caller holding only the decision key cannot confirm its own decisions. The
-confirmation belongs to that receipt and its state.
+that route needs the admin key, so a caller holding only the decision key cannot confirm its own decisions
+(without one, anyone who can call the API can; `rlcd check` warns once the log holds confirm decisions). The
+confirmation belongs to that receipt and its state: a check counts it only when it names the state the decision
+judged and matches its own digest.
 
 Retention: `rlcd receipts prune --before 2026-10-01` drops the logged states of `decisions.jsonl` (also of lines
 written before receipts existed) but keeps their digests, so the chain still verifies; feedback can no longer train
@@ -215,7 +232,8 @@ so abstention keeps meaning "the model cannot vouch for this".
 * **Kill switch**: `rlcd automation off --reason "incident 42"` or `POST /v1/automation {"enabled": false}`:
   every decision is capped at confirm at once, while decisions are still made, logged and returned. With
   `RLCD_AUTOMATION=off` in the server's environment the API cannot switch it back on. With `RLCD_ADMIN_KEY` set,
-  training and the switch need that key, so a decision caller can neither retrain nor re-enable automation.
+  training, the switch and confirmations need that key, so a decision caller can neither retrain, re-enable
+  automation nor confirm its own decisions.
 * **Rollback**: `rlcd rollback` (or `rlcd promote VERSION`) points `rlcd-latest` at another version — no retrain,
   no code change; the version's heads gate on their own evidence again.
 * **Measure**: `GET /v1/metrics` / `rlcd metrics`: automatic-action, review and abstention rates, false automation
@@ -266,8 +284,9 @@ returns a synthetic decision marked `fallback: true` that abstains (or asks) —
 
 ## Honest limits
 
-* Receipts are tamper-evident, not tamper-proof: anyone who can write `RLCD_HOME` can rewrite the whole chain;
-  anchor the head digest outside it.
+* Receipts and confirmations are tamper-evident, not tamper-proof: anyone who can write `RLCD_HOME` can rewrite a
+  whole chain, or append a confirmation that verifies; anchor both head digests outside it, and set
+  `RLCD_ADMIN_KEY` so confirmations arrive through the API from whoever holds that key.
 * Redaction is pattern-based: a bare high-entropy string with no recognisable shape is kept.
 * Removing options does not retrain anything: when the head's mass sits on removed options, no allowed option is
   likely to be right, and `excluded_mass` says so.

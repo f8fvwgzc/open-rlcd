@@ -38,8 +38,8 @@ review is unavailable*, never approval: fall back to proposal-only or a person (
 `fail_closed` does exactly that).
 
 With `RLCD_ADMIN_KEY` set, `POST /v1/train`, `POST /v1/automation` and `POST /v1/receipts/{id}/confirm` need that key (`Authorization: Bearer`),
-so a caller holding only `RLCD_API_KEY` can neither retrain nor switch automation back on; the admin key is also
-accepted wherever `RLCD_API_KEY` is.
+so a caller holding only `RLCD_API_KEY` can neither retrain, switch automation back on nor confirm its own
+`confirm` decisions; the admin key is also accepted wherever `RLCD_API_KEY` is.
 
 ## `POST /v1/systemone`
 
@@ -138,7 +138,7 @@ Request fields (every one optional; without them a request is answered exactly a
 | `strict` | systemone, decide, evaluate | refuse (422 `missing_evidence`) a state that lacks inputs almost every training row had, instead of capping the decision at confirm |
 | `receipt` | systemone, rank | record this call as a receipt and return it (`serve.receipts: all` does it for every call) |
 | `capabilities`, `sensitivity`, `latency_budget_ms` | decide | filter the route contracts of rlcd.yaml `routes:` before the semantic choice |
-| `baseline`, `artifact`, `checks`, `tags`, `revision` | decide / evaluate | kept in the receipt's `audit`; `artifact`, `checks` and `revision` also take part in evaluate's decision table |
+| `baseline`, `artifact`, `checks`, `tags`, `revision` | decide / evaluate | kept in the receipt's `audit`; `artifact`, `checks` and `revision` also take part in evaluate's decision table, so evaluate's `contract_digest` covers the check results, the artifact status, the citations, the plan and the evaluation it revises |
 | `return_evidence` | decide (documents) | return the kept chunks `{id, doc_id, title, text, updated_at, authority, score, rank}` |
 | `plan`, `citations` | evaluate (documents) | bind the review to the evidence of a decide plan (and use its response_type contract's `max_retries` as the revision budget); the chunk ids the answer cites (outside the evidence -> reject; `null` -> a warning) |
 | `tags`, `note`, `missing_evidence` | feedback | review annotations; `tags: ["regression"]` turns the corrected case into a regression fixture |
@@ -158,7 +158,7 @@ New endpoints:
 | `GET /v1/batteries?model=` | the batteries with version, owner, changelog, consumers, digest, their questions and any problem (missing / untrained head) |
 | `GET /v1/receipts/{id}` | one decision record (with logged states when `serve.log_states`) |
 | `POST /v1/receipts/{id}/check` | `{state | state_digest, max_age_s?}` -> `{current, stale_reasons, checks}`: does the decision still approve acting on this state now? A `confirm` decision is current only after a person confirmed it; an abstained decision (escalate / hold, a rejected answer) approves nothing and is never current |
-| `POST /v1/receipts/{id}/confirm` | `{by, note?, state_digest?}`: a person confirmed a confirm-tier decision (kept in `confirmations.jsonl`; a `state_digest` that is not the receipt's is a 422 `state_mismatch`; with `RLCD_ADMIN_KEY` set it needs that key) |
+| `POST /v1/receipts/{id}/confirm` | `{by, note?, state_digest?}`: a person confirmed a confirm-tier decision (kept in `confirmations.jsonl`, hash-chained like the receipts; the response adds its `digest`; a `state_digest` that is not the receipt's is a 422 `state_mismatch`; with `RLCD_ADMIN_KEY` set it needs that key). A check counts only a confirmation that names the decision's state and matches its digest |
 | `GET` / `POST /v1/automation` | the kill switch `{enabled, reason?, by?}`, the rollout mode and the switch history |
 | `POST /v1/outcome` | a decision-level outcome `{decision_id, task_success?, route_taken?, provider?, fallback?, latency_ms?, cost?, tokens?, retries: {transport, workflow}?, verified_by?, note?, tags?}`; joined by the metrics, never trains |
 | `GET /v1/metrics?since=&until=&model=&kind=&head=` | the operations report: action mix (automatic action, review, abstention), rollout caps, review load against `serve.review_capacity_per_day`, per head the tier / class mix, entropy, uncertainty sources and — joined with feedback — accuracy, false automation, false rejection, review agreement and online reliability next to the holdout (`vs_holdout`, `drift_suspected`), binding links, plan and verdict distributions, outcomes (task success, routes, fallbacks, cost, latency, transport vs workflow retries), latency percentiles, notes on what the numbers can and cannot say. `since` inclusive, `until` exclusive (ISO 8601) |

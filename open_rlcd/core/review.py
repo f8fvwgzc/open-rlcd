@@ -157,8 +157,8 @@ def revision_verdict(ctx: dict | None, failed_now: list[str], max_revisions: int
         return None
     n = ctx["attempt"]
     if ctx["unchanged"]:
-        return (f"revision {n} sent exactly the state of evaluation {ctx['of']}: asking again over the same "
-                f"evidence is not a recovery; change the answer or the evidence, or escalate")
+        return (f"attempt {n} (revision {n - 1}) sent exactly the state of evaluation {ctx['of']}: asking again over "
+                f"the same evidence is not a recovery; change the answer or the evidence, or escalate")
     if n - 1 > max_revisions:
         return (f"revision budget exhausted: this is attempt {n}, after {n - 1} revisions (evaluate.max_revisions = "
                 f"{max_revisions}); escalate or narrow the task")

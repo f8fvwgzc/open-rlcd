@@ -374,14 +374,16 @@ def test_the_revision_loop_is_finite(docs, case):
     grounded, complete = rv["failed"]
     spec = docs.svc.spec("grounded", docs.svc.resolve(None))
     assert grounded["meaning"] == spec.positive and grounded["tier"] == "escalate" and grounded["p"] < 0.5
-    assert complete["needed"] == 3 and complete["level"] < 3 and complete["meaning"]
+    assert grounded["why"] == "fails"           # P(grounded) < 0.5 is a failure, not an uncertain pass
+    assert complete["needed"] == 3 and complete["level"] < 3 and complete["meaning"] and complete["why"] == "fails"
     row = docs.svc.receipt_view(first["decision_id"])
     assert (row["failed"], row["next"], row["verdict"]) == (["grounded", "complete"], "revise", "reject")
     # asking again over exactly the same state is not a recovery
     again = evaluate(c, {"state": bad, "stakes": "low", "revision": {"of": first["decision_id"]}})
     assert (again["verdict"], again["decided_by"], again["next"]) == ("reject", "revision", "escalate_to_human")
     assert again["revision"] == {"of": first["decision_id"], "attempt": 2, "max_revisions": 2}
-    assert any("sent exactly the state of evaluation" in w for w in again["warnings"]) and "revise" not in again
+    assert any("attempt 2 (revision 1) sent exactly the state of evaluation" in w for w in again["warnings"])
+    assert "revise" not in again
     # the same property failing in two consecutive attempts stops the loop
     twice = evaluate(c, {"state": {**bad, "answer": "Our office is closed on Sundays."}, "stakes": "low",
                          "revision": {"of": first["decision_id"]}})
@@ -396,6 +398,25 @@ def test_the_revision_loop_is_finite(docs, case):
                       ("abc", "validation")):
         r = c.post("/v1/evaluate", json={"state": case.state, "revision": rev})
         assert r.status_code == 422 and r.json()["kind"] == kind and r.json()["field"] == "revision", rev
+
+
+def test_evaluate_receipts_digest_what_the_decision_table_reads(docs, case):
+    c = docs.client
+    ids = [e["id"] for e in case.state["evidence"]]
+
+    def contract(**body: Any) -> str:
+        return evaluate(c, {"state": case.state, "stakes": "low", **body})["receipt"]["contract_digest"]
+
+    gen1, passed = {"status": "complete", "model": "gen-1"}, {"tests": True}
+    base = contract(citations=ids[:1], artifact=gen1, checks=passed)
+    # provenance that cannot change the verdict is kept in the audit fields, not in the contract
+    assert contract(citations=ids[:1], artifact={**gen1, "model": "gen-2", "latency_ms": 7.0}, checks=passed) == base
+    others = [contract(citations=None, artifact=gen1, checks=passed),
+              contract(artifact=gen1, checks=passed),
+              contract(citations=ids[:1], artifact={**gen1, "status": "partial"}, checks=passed),
+              contract(citations=ids[:1], artifact=gen1, checks={"tests": False}),
+              contract(citations=ids[:1], artifact=gen1, checks=passed, plan=case.plan["decision_id"])]
+    assert len({base, *others}) == len(others) + 1        # each of them asks another question about one state
 
 
 def test_the_revision_budget_comes_from_evaluate_max_revisions(docs, case):

@@ -439,7 +439,9 @@ def _revise(failed: list[str], specs: dict, heads: dict, evidence: list[dict], c
         d = r.get("decision") or {}
         item = {"property": name, "meaning": getattr(spec, "positive", None) or getattr(spec, "description", ""),
                 "p": d.get("p"), "tier": d.get("tier")}
-        favourable = d.get("class") == "true" if name == "grounded" else False
+        # grounded is a gate head: its decision always names the class it would commit to ("true"), so whether it
+        # leans favourable is P(true), not the class
+        favourable = float(d.get("p") or 0.0) >= 0.5 if name == "grounded" else False
         if name == "complete":
             item["level"] = int((r.get("answer") or {}).get("score", 0))
             item["needed"] = 3
@@ -620,14 +622,22 @@ def evaluate(pack: Any, service: Any, request: dict) -> dict:
         audit["revision"] = {"of": ctx["of"], "attempt": ctx["attempt"]}
     if plan_id is not None:
         audit["plan"] = plan_id
+    # the request fields the decision table reads besides the state belong to the question contract, so two
+    # evaluations of one state that differ in them never share a contract_digest (provenance such as the artifact's
+    # model or latency is kept in `audit`, not here: it cannot change the verdict)
+    contract: dict[str, Any] = {
+        "stakes": request.get("stakes"), "plan": plan_id, "revision": of,
+        "checks": {n: c["passed"] for n, c in checks.items()} if checks is not None else None,
+        "artifact": artifact["status"] if artifact is not None else None}
+    if "citations" in request:
+        contract["citations"] = request.get("citations")
     row = service.log_decision(
         version, "evaluate", {n: _log(service, state, r) for n, r in heads.items()},
         {"verdict": verdict, "next": nxt, "action": action, "stakes": stakes, "decided_by": decided_by,
          "failed": failed},
         request_state=request.get("state"), requested_model=request.get("model"), latency_ms=latency,
         warnings=warnings, audit=audit or None, rollout=rollout,
-        questions=service.decision_contract("evaluate", list(specs) or list(EVALUATE_HEADS), request,
-                                            stakes=request.get("stakes")))
+        questions=service.decision_contract("evaluate", list(specs) or list(EVALUATE_HEADS), request, **contract))
     return {"decision_id": row["decision_id"], "model": version, "action": action, "tier": action, "verdict": verdict,
             "next": nxt, "decided_by": decided_by, "stakes": stakes, "stakes_from": stakes_from, "explore": explore,
             "heads": heads, "policy": cfg.to_dict(), "rollout": rollout, "receipt": R.summary(row),

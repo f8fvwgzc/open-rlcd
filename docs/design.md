@@ -359,7 +359,9 @@ What open-rlcd took from it, and the choices made ([control-layer.md](control-la
   tamper-proof: truncation needs an external anchor of the head digest.
 * **Staleness is checked, not assumed.** A receipt approves the state it judged; `/v1/receipts/{id}/check`
   compares the state digest, the model the alias points at, the policy, the battery version, the automation state
-  (for `act` decisions) and the age.
+  (for `act` decisions) and the age. An abstained decision approves no action, and a `confirm` decision holds only
+  once a person confirmed it (a line in `confirmations.jsonl` that names the decision's state and matches its own
+  digest; the file is hash-chained like the receipts, and the same limits apply).
 * **A pinned version keeps its evidence.** The Bernoulli gate of a version that is not the live table's falls back
   to that version's own holdout table, so a client pinning an older version is not silently capped; promote /
   rollback restarts a head's live table from the target version's holdout table unless the table already belongs

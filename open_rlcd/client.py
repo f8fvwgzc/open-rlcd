@@ -612,7 +612,8 @@ class Decision:
 @dataclass(frozen=True)
 class Evaluation:
     """POST /v1/evaluate: `verdict` ship | review | reject, `next` (ship | human_review | revise | retry_generation |
-    escalate_to_human), `decided_by` (checks | artifact | citations | revision | heads; "fallback" for a fallback),
+    escalate_to_human), `decided_by` (checks | artifact | citations | output_scan | revision | heads; "fallback" for a
+    fallback),
     `revise` (what failed, for the generator's next attempt). `ship` needs verdict ship AND action act."""
 
     decision_id: str | None
@@ -662,7 +663,8 @@ class Evaluation:
 class ReceiptCheck:
     """POST /v1/receipts/{id}/check: does the decision still hold for the state you are about to act on?
     `stale_reasons` says why not (changed state, moved alias, changed policy or battery, automation switched off
-    since an act decision, too old); `checks` is the per-item comparison."""
+    since an act decision, too old, a confirm decision nobody has confirmed yet, or a decision that approves no
+    action: an abstained one never holds); `checks` is the per-item comparison."""
 
     current: bool
     stale_reasons: list[str]

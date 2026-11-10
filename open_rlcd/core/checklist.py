@@ -31,17 +31,21 @@ Check ids (stable, for scripts and CI):
     routes.contracts       fail when a route contract names a head or an option the model does not have
     security.api_key       fail when rlcd.yaml serve.host is not loopback and RLCD_API_KEY is not set
     security.allow_remote  warn when connectors and judges may reach non-loopback hosts
-    security.admin_key     info: whether training and the kill switch need RLCD_ADMIN_KEY
+    security.admin_key     warn when RLCD_ADMIN_KEY is unset and the log holds confirm decisions, however old (a
+                           decision caller can confirm its own); info: whether training, the switch and
+                           confirmations need it
     secrets.redact         warn when serve.redact is off
     secrets.log_states     info: whether request states are logged
-    receipts.chain         fail when the hash chain of decisions.jsonl does not verify
+    receipts.chain         fail when the hash chain of decisions.jsonl or of confirmations.jsonl does not verify
     receipts.mode          info: serve.receipts
     model.bundle           fail when the checked version's bundle does not validate
     rollback.ready         warn without an earlier version to roll back to, fail when that version does not load
     rollout.mode           info: the rollout mode
-    automation.switch      warn when automation is switched off (or the switch cannot be written from here)
+    automation.switch      warn when automation is switched off (or the switch cannot be written from here); info
+                           says whether the switch was ever rehearsed
     batteries.bound        fail when a battery question does not bind to a head; warn when its head is untrained
-    batteries.versions     fail when receipts recorded a battery version under another digest than it has now
+    batteries.versions     fail when receipts recorded a battery version under another digest than it has now; warn
+                           when batteries exist but no receipt records one (serve.receipts: decisions skips them)
     regressions.cases      fail when a regression case fails (needs open_rlcd.core.regress; info without it)
     review.capacity        warn when confirm decisions per day exceed serve.review_capacity_per_day (or it is unset)
     owners                 warn unless rlcd.yaml `owners` names pack, heads, policy, review and incidents
@@ -552,17 +556,22 @@ def _overlap(ctx: _Ctx) -> Outcome:
 
 @_check("inputs.required", "Missing inputs fail closed")
 def _inputs(ctx: _Ctx) -> Outcome:
-    text = ("a question whose `path` / `inputs` do not resolve in the state is a 422 missing_evidence, never a guess; "
-            "a state that lacks inputs almost every training row had is capped at confirm, or refused with "
-            "`strict: true`. Your state builder still validates required fields and fails closed when a record "
-            "cannot be loaded")
+    text = ("a question whose `path` / `inputs` do not resolve in the state is a 422 missing_evidence, never a guess. "
+            "A state that lacks features almost every training row had is capped at confirm on /v1/decide and "
+            "/v1/evaluate and answered with a warning on /v1/systemone; `strict: true` refuses it (422) on all "
+            "three. That guard sees only features that come out missing: an optional field left out of the state can "
+            "read as an ordinary value instead and change the answer without a warning (on /v1/systemone and "
+            "/v1/rank the documents pack reads absent candidates as zero candidates; /v1/decide retrieves them from "
+            "the corpus, or warns when none is ingested). Your state builder still validates required fields and "
+            "fails closed when a record cannot be loaded")
     try:
         questions = [q for b in ctx.batteries.values() for q in b.questions()]
     except ContractError:
         questions = []       # batteries.bound reports a broken battery configuration
     if questions:
         named = sum(1 for q in questions if q.inputs.to_dict())
-        text += f". Battery questions that name their inputs: {named} of {len(questions)}"
+        text += (f". {named} of {len(questions)} battery question(s) name their inputs (`path` / `inputs`); the "
+                 f"others read the request state as their head's own view")
     return "info", text
 
 
@@ -640,22 +649,32 @@ def _allow_remote(ctx: _Ctx) -> Outcome:
 @_check("security.admin_key", "The operator's controls need their own key")
 def _admin_key(ctx: _Ctx) -> Outcome:
     if os.environ.get("RLCD_ADMIN_KEY"):
-        return "info", ("RLCD_ADMIN_KEY is set: POST /v1/train and POST /v1/automation need it, so a decision caller "
-                        "can neither retrain nor switch automation back on")
-    return "info", ("RLCD_ADMIN_KEY is not set: whoever holds RLCD_API_KEY (or anyone, without one) can retrain "
-                    "(POST /v1/train) and switch automation back on (POST /v1/automation)")
+        return "info", ("RLCD_ADMIN_KEY is set: POST /v1/train, POST /v1/automation and POST "
+                        "/v1/receipts/{id}/confirm need it, so a decision caller can neither retrain, switch "
+                        "automation back on nor confirm its own confirm decisions")
+    text = ("RLCD_ADMIN_KEY is not set: whoever holds RLCD_API_KEY (or anyone, without one) can retrain "
+            "(POST /v1/train), switch automation back on (POST /v1/automation) and confirm confirm decisions (POST "
+            "/v1/receipts/{id}/confirm), so a person's confirmation is not enforced")
+    confirms = ctx.scan["confirms"]
+    if confirms:
+        return "warn", (f"{text}: the log holds {confirms} confirm decision(s) that the caller who asked for them "
+                        f"could confirm itself")
+    return "info", text
 
 
 @_check("secrets.redact", "Secrets are redacted from logs")
 def _redact(ctx: _Ctx) -> Outcome:
     kinds = ctx.service.redact_kinds()
     if not kinds:
-        return "warn", ("serve.redact is off: a credential inside a state is written verbatim to decisions.jsonl and "
-                        "feedback.jsonl, append-only logs that are never rotated")
-    text = (f"serve.redact: {_names(kinds)} (pattern-based: a bare high-entropy string is kept, so the state builder "
-            f"must still keep secrets out of states)")
+        return "warn", ("serve.redact is off: a credential inside a state, a note or a reason is written verbatim to "
+                        "decisions.jsonl, feedback.jsonl and the other append-only logs, which are never rotated")
+    text = (f"serve.redact: {_names(kinds)}, applied to what the logs keep: states, audit fields and warnings "
+            f"(decisions.jsonl), feedback, outcomes, confirmations (who, note), the kill switch and the registry "
+            f"history (who, reason). Pattern-based: a bare high-entropy string is kept, so the state builder must "
+            f"still keep secrets out of states")
     if "pii" not in kinds:
-        text += "; e-mail addresses and card numbers are kept (serve.redact: [secrets, pii] masks them)"
+        text += ("; e-mail addresses and card numbers are kept, reviewers' addresses included (serve.redact: "
+                 "[secrets, pii] masks them)")
     return "pass", text
 
 
@@ -674,23 +693,37 @@ def _log_states(ctx: _Ctx) -> Outcome:
 @_check("receipts.chain", "The receipt chain verifies")
 def _receipts(ctx: _Ctx) -> Outcome:
     res = ctx.service.verify_receipts()
-    breaks = res.get("breaks") or []
+    conf = res.get("confirmations") or {}
+    breaks = [("decisions.jsonl", b) for b in res.get("breaks") or []]
+    breaks += [("confirmations.jsonl", b) for b in conf.get("breaks") or []]
     legacy = f"; {res['legacy']} older lines carry no receipt" if res.get("legacy") else ""
     if breaks:
-        first = breaks[0]
-        return "fail", (f"{len(breaks)} break(s) in decisions.jsonl, first at line {first.get('line')} "
-                        f"(decision {first.get('decision_id')}): {first.get('why')}. `rlcd receipts verify` lists "
-                        f"them all")
+        where, first = breaks[0]
+        files = list(dict.fromkeys(w for w, _ in breaks))
+        return "fail", (f"{len(breaks)} break(s) in {' and '.join(files)}, first at line {first.get('line')}"
+                        f"{f' of {where}' if len(files) > 1 else ''} (decision {first.get('decision_id')}): "
+                        f"{first.get('why')}. `rlcd receipts verify` lists them all")
+    unreadable = [f"decisions.jsonl line {n}" for n in res.get("unreadable") or []]
+    unreadable += [f"confirmations.jsonl line {n}" for n in conf.get("unreadable") or []]
+    torn = (f"; {len(unreadable)} unreadable line(s): {_names(unreadable[:5])} (a write torn by a crash, or an edit)"
+            if unreadable else "")
     if not res.get("receipts"):
-        return "info", ("no receipts yet" + (f" ({res['lines']} lines without one)" if res.get("lines") else
-                                             ": no decision has been logged"))
-    unreadable = res.get("unreadable") or []
-    text = (f"{res['receipts']} receipts chained, head {short(res.get('head'))}: anchor the head digest outside "
-            f"RLCD_HOME to detect truncation{legacy}")
-    if unreadable:
-        return "warn", (f"{text}; {len(unreadable)} unreadable line(s) at {unreadable[:5]} (a write torn by a crash, "
-                        f"or an edit)")
-    return "pass", text
+        if conf.get("receipts"):
+            n = conf["receipts"]
+            return "warn", (f"{n} confirmation{'' if n == 1 else 's'} chained (head {conf.get('head')}), but "
+                            f"decisions.jsonl holds no receipt for the decisions they confirm (archived, truncated "
+                            f"or replaced?){torn}")
+        text = "no receipts yet" + (f" ({res['lines']} lines without one)" if res.get("lines") else
+                                    ": no decision has been logged")
+        return ("warn" if unreadable else "info"), text + torn
+    # the full digests: an anchor is only as strong as what is written down
+    text = f"{res['receipts']} receipts chained, head {res.get('head')}"
+    if conf.get("receipts"):
+        n = conf["receipts"]
+        text += f"; {n} confirmation{'' if n == 1 else 's'} chained, head {conf.get('head')}"
+    text += (f": anchor {'both head digests' if conf.get('receipts') else 'the head digest'} outside RLCD_HOME to "
+             f"detect truncation{legacy}")
+    return ("warn", text + torn) if unreadable else ("pass", text)
 
 
 @_check("receipts.mode", "Which calls leave a receipt")
@@ -721,9 +754,11 @@ def _rollback(ctx: _Ctx) -> Outcome:
     if not reg.get("versions"):
         return "warn", "no trained version yet: there is nothing to roll back to"
     latest = registry.latest_id()
-    moves = len(reg.get("history") or [])
+    # only an operator's move rehearses the rollback: every train also appends a history entry (kind "train")
+    moves = sum(1 for h in reg.get("history") or [] if isinstance(h, dict) and h.get("kind") in ("promote", "rollback"))
     drill = (f"rlcd-latest has been moved {moves} time(s) by promote / rollback" if moves else
-             "rlcd-latest has never been moved: rehearse `rlcd rollback` and `rlcd promote` before launch")
+             "rlcd-latest has never been moved by promote / rollback: rehearse `rlcd rollback` and `rlcd promote` "
+             "before launch")
     prev = registry.previous_latest()
     if prev is None:
         return "warn", (f"rlcd-latest is {latest} and there is no earlier version: `rlcd rollback` has no target "
@@ -783,8 +818,14 @@ def _switch(ctx: _Ctx) -> Outcome:
     if not os.access(ctx.service.home, os.W_OK):
         return "warn", ("automation is on, but RLCD_HOME is not writable from here: the kill switch cannot be flipped "
                         "from this machine")
-    return "info", ("automation is on; `rlcd automation off --reason ...` (or POST /v1/automation) caps every decision "
-                    "at confirm at once, without a model update or a restart")
+    text = ("automation is on; `rlcd automation off --reason ...` (or POST /v1/automation) caps every decision at "
+            "confirm at once, without a model update or a restart")
+    try:
+        offs = sum(1 for h in ctx.service.switch.history(10_000) if isinstance(h, dict) and h.get("enabled") is False)
+    except (OSError, ValueError):
+        offs = 0
+    return "info", text + (f"; it has been switched off {offs} time(s) before" if offs else
+                           "; it has never been switched off: rehearse `rlcd automation off` and `on` before launch")
 
 
 # ----------------------------------------------------------------------------- batteries
@@ -829,9 +870,25 @@ def _batteries_bound(ctx: _Ctx) -> Outcome:
 @_check("batteries.versions", "Battery changes come with a version bump")
 def _battery_versions(ctx: _Ctx) -> Outcome:
     recorded = ctx.scan["batteries"]
+    try:
+        bats = ctx.batteries
+    except ContractError:
+        return "info", "the battery configuration does not load (batteries.bound says why): nothing to compare"
+    try:
+        every_call = ctx.service.receipts_mode() == "all"
+    except ContractError:
+        every_call = False      # receipts.mode reports the bad setting
+    partial = ("" if every_call else
+               "with serve.receipts: decisions, /v1/systemone leaves a receipt (and so a battery version and digest "
+               "to compare) only when the request sends \"receipt\": true; set serve.receipts: all to compare every "
+               "battery call")
     if not recorded:
-        return "info", "no receipt names a battery yet"
-    bats = ctx.batteries
+        if not bats:
+            return "info", "no battery is defined, and no receipt names one"
+        if every_call:
+            return "info", "no receipt names a battery yet"
+        return "warn", (f"no receipt names a battery, so a battery changed without a version bump goes unnoticed: "
+                        f"{partial}")
     changed: list[str] = []
     older: list[str] = []
     same = 0
@@ -854,6 +911,8 @@ def _battery_versions(ctx: _Ctx) -> Outcome:
     text = f"{same} receipt(s) recorded the current digest of their battery version"
     if older:
         text += f"; receipts of earlier versions: {_names(older)}"
+    if partial:
+        text += f" (only calls that asked for a receipt are compared: {partial})"
     return "pass", text
 
 
@@ -928,11 +987,13 @@ def _regressions(ctx: _Ctx) -> Outcome:
 # ----------------------------------------------------------------------------- the decision log: review load
 
 def _scan(service: Any, now: datetime) -> dict:
-    """One pass over decisions.jsonl: the battery refs receipts recorded, and per UTC day the confirm and abstain
-    decisions of the last REVIEW_WINDOW_DAYS days up to `now` (counted as core/ops.py counts its review load)."""
+    """One pass over decisions.jsonl: the battery refs receipts recorded, the confirm decisions of the whole log, and
+    per UTC day the confirm and abstain decisions of the last REVIEW_WINDOW_DAYS days up to `now` (counted as
+    core/ops.py counts its review load)."""
     since = now - timedelta(days=REVIEW_WINDOW_DAYS)
     per_day: dict[str, list[int]] = {}           # UTC date -> [confirm, abstain]
-    capped = window = 0
+    abstained_next: dict[str, int] = {}          # where the abstentions went: the decision's `next`
+    capped = window = confirms = 0
     first: datetime | None = None
     bats: dict[tuple[str, str], dict[str, list]] = {}
     for row in service.logs.decisions():
@@ -945,6 +1006,8 @@ def _scan(service: Any, now: datetime) -> dict:
             slot = bats.setdefault((str(bat["name"]), str(bat.get("version"))), {}).setdefault(
                 str(bat["digest"]), [0, row.get("decision_id")])
             slot[0] += 1
+        if row.get("action") in REVIEW_ACTIONS:
+            confirms += 1                         # however old: any of them can still be confirmed
         t = _time(row.get("created_at"))
         if t is None or t < since or t > now:
             continue
@@ -954,14 +1017,43 @@ def _scan(service: Any, now: datetime) -> dict:
         day = t.astimezone(UTC).date().isoformat()
         if action in REVIEW_ACTIONS:
             per_day.setdefault(day, [0, 0])[0] += 1
-            if (r.get("rollout") or {}).get("capped"):
+            ro = r.get("rollout") if isinstance(r.get("rollout"), dict) else {}
+            # capped by the rollout or the switch *and* the policy alone would have acted (a head capped inside a
+            # plan that confirms anyway is not a review the cap created)
+            if ro.get("capped") and ro.get("proposed_action", "act") == "act":
                 capped += 1
         elif isinstance(action, str) and action != "act":     # the abstain action, whatever the policy calls it
             per_day.setdefault(day, [0, 0])[1] += 1
+            plan = row.get("plan") if isinstance(row.get("plan"), dict) else {}
+            nxt = row.get("next") or plan.get("next")           # evaluate records `next`, decide its plan's
+            key = nxt if isinstance(nxt, str) else ""
+            abstained_next[key] = abstained_next.get(key, 0) + 1
     days = 0.0
     if first is not None:
         days = max(1.0, min(float(REVIEW_WINDOW_DAYS), (now - first).total_seconds() / _DAY_S))
-    return {"batteries": bats, "window": window, "per_day": per_day, "capped": capped, "days": days}
+    return {"batteries": bats, "window": window, "per_day": per_day, "capped": capped, "days": days,
+            "abstained_next": abstained_next, "confirms": confirms}
+
+
+# where an abstained decision went next (its `next`): only some of these reach a person
+_NEXT_WHERE = {
+    "escalate_to_human": "escalated to a person",
+    "human_review": "sent to a person",
+    "revise": "sent back to the generator",
+    "retry_generation": "sent back to the generator",
+    "retrieve_more": "sent back for more evidence",
+    "ask_clarifying_question": "asked back for clarification",
+    "refuse_out_of_scope": "refused as out of scope",
+}
+
+
+def _abstained_where(counts: dict[str, int]) -> str:
+    """'2 escalated to a person, 1 sent back to the generator': abstentions by where they went next."""
+    where: dict[str, int] = {}
+    for nxt, n in counts.items():
+        phrase = _NEXT_WHERE.get(nxt) or (f"next {nxt}" if nxt else "with no next step recorded")
+        where[phrase] = where.get(phrase, 0) + n
+    return ", ".join(f"{n} {p}" for p, n in sorted(where.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 @_check("review.capacity", "Human review is staffed for the volume")
@@ -986,7 +1078,7 @@ def _review(ctx: _Ctx) -> Outcome:
             f"on average, {peak} on the busiest UTC day" + (f" ({peak_day})" if peak else ""))
     notes = ""
     if abstained:
-        notes += f"; {abstained} more abstained (escalations a person handles, not counted as reviews)"
+        notes += f"; {abstained} more abstained ({_abstained_where(s.get('abstained_next') or {})}; not counted as reviews)"
     if s["capped"]:
         notes += (f"; {s['capped']} of the reviews were capped by the rollout or the kill switch (the policy alone "
                   f"would have acted)")

@@ -26,7 +26,9 @@ pinned to a version, `{"battery": "preflight@1"}`. A pinned version that is not 
 `battery_version_mismatch` (the caller's thresholds were chosen for the old meaning). The response and the receipt
 carry `{name, version, digest}`; the digest covers the question contract (types, heads, criteria, options, paths)
 and nothing else, so it changes exactly when a question's meaning can change. `rlcd check` fails when a battery's
-digest differs from the one receipts recorded under the same version: a change shipped without a version bump.
+digest differs from the one receipts recorded under the same version: a change shipped without a version bump. It
+sees only calls that left a receipt: under the default `serve.receipts: decisions` a /v1/systemone call leaves one
+only when it sends `"receipt": true` (`serve.receipts: all` records every call), and it warns when none has.
 """
 from __future__ import annotations
 

@@ -495,11 +495,15 @@ def cmd_receipts(args: argparse.Namespace) -> int:
     if args.receipts_cmd == "verify":
         res = svc.verify_receipts()
         _print(res)
+        conf = res.get("confirmations") or {}
         if not res["ok"]:
-            print(f"receipt chain broken at {len(res['breaks'])} place(s): see `breaks`", file=sys.stderr)
+            print(f"receipt chain broken at {len(res['breaks']) + len(conf.get('breaks') or [])} place(s): see "
+                  f"`breaks` (decisions.jsonl) and `confirmations.breaks`", file=sys.stderr)
             return 1
-        print(f"{res['receipts']} receipts chained, head {res['head']} (anchor this digest elsewhere to detect "
-              f"truncation)", file=sys.stderr)
+        n = conf.get("receipts") or 0
+        tail = f"; {n} confirmation{'' if n == 1 else 's'} chained, head {conf['head']}" if n else ""
+        print(f"{res['receipts']} receipts chained, head {res['head']}{tail} (anchor "
+              f"{'these digests' if tail else 'this digest'} elsewhere to detect truncation)", file=sys.stderr)
         return 0
     if args.receipts_cmd == "show":
         _print(svc.receipt_view(args.decision_id))

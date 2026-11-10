@@ -4,7 +4,8 @@
                       an up-weighted training row at the next train; with a decision_id it also updates the
                       Beta-Bernoulli ledger at once.
     confirmations.jsonl  a person confirmed a confirm-tier decision (POST /v1/receipts/{id}/confirm); a receipt check
-                      of a confirm decision is not current without one.
+                      of a confirm decision is not current without one. Hash-chained like decisions.jsonl, so an
+                      edited or inserted confirmation breaks `rlcd receipts verify`.
     outcomes.jsonl    decision-level outcomes posted to /v1/outcome (task success, route taken, cost): measured
                       downstream by the caller, joined with decisions by the metrics; they never train a head.
     decisions.jsonl   what /v1/decide and /v1/evaluate answered (and /v1/systemone, /v1/rank when receipts are
@@ -28,7 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .digest import decode, encode
-from .receipts import ChainedLog
+from .receipts import CONFIRMATION_FORMAT, ChainedLog
 from .training import now_iso
 
 
@@ -72,12 +73,16 @@ class DecisionLog(ChainedLog):
         yield from JsonlLog(self.path).rows()
 
 
+class ConfirmationLog(DecisionLog):
+    """confirmations.jsonl: chained the same way, each line carrying its own `receipt` part (prev, digest)."""
+
+
 class FeedbackLog:
     def __init__(self, home: Path):
         self.feedback_log = JsonlLog(Path(home) / "feedback.jsonl")
         self.decision_log = DecisionLog(Path(home) / "decisions.jsonl")
         self.outcome_log = JsonlLog(Path(home) / "outcomes.jsonl")
-        self.confirmation_log = JsonlLog(Path(home) / "confirmations.jsonl")
+        self.confirmation_log = ConfirmationLog(Path(home) / "confirmations.jsonl")
         self._index: dict[str, dict] = {}
         self._counts: dict[str, int] = {}
         self._counted = 0                  # bytes of feedback.jsonl already counted
@@ -130,9 +135,9 @@ class FeedbackLog:
         return list(self.outcome_log.rows())
 
     def add_confirmation(self, row: dict) -> dict:
-        row = {"id": uuid.uuid4().hex, "received_at": now_iso(), **row}
-        self.confirmation_log.append(row)
-        return row
+        """Append one confirmation to its chain; returns it as written (with receipt.prev and receipt.digest)."""
+        row = {"id": uuid.uuid4().hex, "received_at": now_iso(), **row, "receipt": {"format": CONFIRMATION_FORMAT}}
+        return self.confirmation_log.append(row)
 
     def confirmations(self, decision_id: str | None = None) -> list[dict]:
         return [r for r in self.confirmation_log.rows() if decision_id is None or r.get("decision_id") == decision_id]

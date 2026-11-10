@@ -455,7 +455,8 @@ def test_battery_questions_on_untrained_heads_warn(tmp_path):
 
 def test_a_battery_changed_without_a_version_bump_fails(trained_home, tmp_path):
     svc = make(tmp_path, trained_home, {"batteries": BATTERY})
-    assert checks(svc)["batteries.versions"]["status"] == "info"
+    unseen = checks(svc)["batteries.versions"]          # a battery no receipt names: a change would go unnoticed
+    assert unseen["status"] == "warn" and "goes unnoticed" in unseen["detail"]
     r = svc.systemone(SystemOneRequest(battery="pre", state=STATES[0], receipt=True))
     assert r["battery"]["version"] == "1" and r["receipt"]["id"]
     assert checks(svc)["batteries.versions"]["status"] == "pass"

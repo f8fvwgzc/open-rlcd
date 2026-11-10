@@ -3,7 +3,7 @@
     rlcd serve --port 8095                     (or: uvicorn open_rlcd.serve.api:app --port 8095)
 
 Errors are `{"error": "...", "kind": "...", "retryable": bool}`: 401 (only when RLCD_API_KEY is set; with
-RLCD_ADMIN_KEY set, POST /v1/train and POST /v1/automation need that key instead), 404 an
+RLCD_ADMIN_KEY set, POST /v1/train, POST /v1/automation and POST /v1/receipts/{id}/confirm need that key instead), 404 an
 unknown receipt, 413 a request body larger than RLCD_MAX_BODY_BYTES (default 16 MiB), 422 validation / unknown
 head / unknown model / feature version mismatch / missing evidence, 409 a training job is already running or the
 kill switch is locked by the environment, 503 a connector or the encoder is unreachable, 500 `internal`.

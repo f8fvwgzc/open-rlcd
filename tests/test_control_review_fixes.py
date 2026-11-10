@@ -8,12 +8,21 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from open_rlcd.core import receipts as R
 from open_rlcd.core import review as RV
+from open_rlcd.core.checklist import _abstained_where
+from open_rlcd.core.checklist import run as run_checks
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import TrainRequest
+from open_rlcd.core.digest import digest
 from open_rlcd.core.redact import redact, redact_text
 from open_rlcd.core.service import Service
 from open_rlcd.serve.api import create_app
+from tests.test_control_service import BATTERY, first_with_action
+from tests.test_control_service import client as toy_client
+from tests.test_control_service import decide as decide_color
+from tests.test_control_service import service as toy_service
+from tests.test_control_service import train as toy_train
 from tests.toypack import ToyPack
 
 NEG = {"f": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
@@ -143,3 +152,217 @@ def test_check_fails_on_rollout_entries_for_heads_the_model_does_not_have(tmp_pa
                   pack=ToyPack(n=600))
     item = {c["id"]: c for c in run(svc)["checks"]}["rollout.mode"]
     assert item["status"] == "fail" and "godo" in item["detail"]
+
+
+# ----------------------------------------------------------------------------- a second review (example output audit)
+
+def _checks(svc) -> dict:
+    return {c["id"]: c for c in run_checks(svc)["checks"]}
+
+
+@pytest.fixture
+def confirm_case(tmp_path):
+    """A trained toy service with one confirm decision (the color head, low stakes) and its state."""
+    svc = toy_service(tmp_path)
+    toy_train(svc)
+    c = toy_client(svc)
+    state, d = first_with_action(c, "confirm")
+    return svc, c, state, d
+
+
+def test_a_grounded_failure_is_labelled_by_its_probability():
+    from open_rlcd.packs.documents.decide import _revise
+
+    # a gate head always names the class it would commit to ("true"): its lean is P(true), not the class
+    heads = {"grounded": {"decision": {"class": "true", "p": 0.006, "tier": "escalate"}}}
+    assert _revise(["grounded"], {}, heads, [], None, 2)["failed"][0]["why"] == "fails"
+    heads["grounded"]["decision"]["p"] = 0.8
+    assert _revise(["grounded"], {}, heads, [], None, 2)["failed"][0]["why"] == "uncertain"
+
+
+def test_an_unchanged_revision_names_its_attempt_and_revision():
+    stop = RV.revision_verdict({"attempt": 2, "unchanged": True, "of": "e1", "previously_failed": []}, [], 2)
+    assert stop.startswith("attempt 2 (revision 1) sent exactly the state of evaluation e1")
+
+
+def test_a_confirmation_counts_only_with_its_digest_and_the_judged_state(confirm_case):
+    svc, c, state, d = confirm_case
+    did = d["decision_id"]
+    url = f"/v1/receipts/{did}"
+    path = Path(svc.home) / "confirmations.jsonl"
+    judged = svc.receipt_view(did)["receipt"]["state_digest"]
+    # a line without a digest, even with the right state, confirms nothing
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": "x", "decision_id": did, "by": "mallory", "state_digest": judged}) + "\n")
+    chk = c.post(f"{url}/check", json={"state": state}).json()
+    assert chk["current"] is False and chk["checks"]["confirmation"] == "missing"
+    assert any("1 confirmation line(s) ignored: it carries no digest" in s for s in chk["stale_reasons"])
+    # the API's confirmation is chained, and counts
+    ok = c.post(f"{url}/confirm", json={"by": "alice", "state_digest": digest(state)}).json()
+    assert ok["digest"].startswith("sha256:")
+    assert c.post(f"{url}/check", json={"state": state}).json()["current"] is True
+    v = svc.verify_receipts()
+    assert v["ok"] is True and v["confirmations"]["receipts"] == 1 and v["confirmations"]["head"] == ok["digest"]
+    assert v["confirmations"]["legacy"] == 1             # the hand-written line came before the chain started
+    detail = _checks(svc)["receipts.chain"]["detail"]
+    assert v["head"] in detail and ok["digest"] in detail and "1 confirmation chained" in detail   # full digests
+    # a copy that verifies by itself but names another state confirms nothing
+    rows = [json.loads(x) for x in path.read_text(encoding="utf-8").splitlines()]
+    other = decide_color(c, state, stakes="low")
+    assert other["action"] == "confirm"
+    forged = {**rows[-1], "decision_id": other["decision_id"], "state_digest": digest({"f": [9.0] * 6})}
+    forged["receipt"] = {k: x for k, x in rows[-1]["receipt"].items() if k != "digest"}
+    forged["receipt"]["digest"] = R.row_digest(forged)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(forged) + "\n")
+    chk = c.post(f"/v1/receipts/{other['decision_id']}/check", json={"state": state}).json()
+    assert chk["current"] is False and any("names another state" in s for s in chk["stale_reasons"])
+    # editing the real confirmation breaks its chain, and it stops counting
+    rows[-1]["by"] = "mallory"
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    v = svc.verify_receipts()
+    assert v["ok"] is False and v["confirmations"]["breaks"] and not v["breaks"]
+    chk = c.post(f"{url}/check", json={"state": state}).json()
+    assert chk["current"] is False and any("does not match its digest" in s for s in chk["stale_reasons"])
+    assert _checks(svc)["receipts.chain"]["status"] == "fail"
+
+
+def test_who_and_why_are_redacted_like_every_other_logged_field(tmp_path):
+    svc = toy_service(tmp_path, {"serve": {"redact": ["secrets", "pii"]}})
+    v1 = toy_train(svc)
+    toy_train(svc)
+    c = toy_client(svc)
+    state, d = first_with_action(c, "confirm")
+    key = "AKIAIOSFODNN7EXAMPLE"
+    ok = c.post(f"/v1/receipts/{d['decision_id']}/confirm", json={"by": "alice@example.com", "note": key}).json()
+    assert ok["by"] == "[REDACTED:email]"
+    assert c.post("/v1/feedback", json={"decision_id": d["decision_id"], "label": "red",
+                                        "source": f"reviewer {key}"}).status_code == 200
+    assert c.post("/v1/automation", json={"enabled": False, "reason": f"leaked {key}",
+                                          "by": "bob@example.com"}).status_code == 200
+    svc.promote(v1, reason=f"rehearsal {key}", by="carol@example.com", kind="rollback")
+    for name in ("confirmations.jsonl", "feedback.jsonl", "automation.jsonl", "automation.json", "registry.json"):
+        text = (Path(svc.home) / name).read_text(encoding="utf-8")
+        assert key not in text and "@example.com" not in text, name
+    assert "confirmations (who, note)" in _checks(svc)["secrets.redact"]["detail"]
+
+
+def test_check_warns_when_a_caller_could_confirm_its_own_decisions(confirm_case, monkeypatch):
+    svc = confirm_case[0]
+    monkeypatch.delenv("RLCD_ADMIN_KEY", raising=False)
+    item = _checks(svc)["security.admin_key"]
+    assert item["status"] == "warn" and "/v1/receipts/{id}/confirm" in item["detail"]
+    assert "a person's confirmation is not enforced" in item["detail"]
+    monkeypatch.setenv("RLCD_ADMIN_KEY", "operator")
+    item = _checks(svc)["security.admin_key"]
+    assert item["status"] == "info" and "nor confirm its own confirm decisions" in item["detail"]
+
+
+def test_battery_versions_say_when_no_receipt_can_be_compared(tmp_path):
+    svc = toy_service(tmp_path, {"batteries": {"intake": BATTERY}})
+    toy_train(svc)
+    c = toy_client(svc)
+    body = {"battery": "intake", "state": {"f": [0.0] * 6}}
+    assert c.post("/v1/systemone", json=body).status_code == 200          # no receipt under serve.receipts: decisions
+    item = _checks(svc)["batteries.versions"]
+    assert item["status"] == "warn" and "goes unnoticed" in item["detail"] and '"receipt": true' in item["detail"]
+    assert c.post("/v1/systemone", json={**body, "receipt": True}).status_code == 200
+    item = _checks(svc)["batteries.versions"]
+    assert item["status"] == "pass" and "only calls that asked for a receipt are compared" in item["detail"]
+    every = toy_service(tmp_path / "all", {"batteries": {"intake": BATTERY}, "serve": {"receipts": "all"}})
+    assert _checks(every)["batteries.versions"]["status"] == "info"
+    plain = toy_service(tmp_path / "none")
+    assert _checks(plain)["batteries.versions"]["status"] == "info"
+
+
+def test_abstentions_are_counted_by_where_they_went():
+    assert _abstained_where({"escalate_to_human": 1, "revise": 1}) == ("1 escalated to a person, 1 sent back to "
+                                                                       "the generator")
+    assert _abstained_where({"retry_generation": 1, "revise": 2, "": 1}) == ("3 sent back to the generator, 1 with "
+                                                                             "no next step recorded")
+
+
+def test_the_digest_is_not_a_signature_and_the_chain_says_so(confirm_case):
+    """The documented limit, pinned: a line someone wrote into RLCD_HOME with a digest of its own counts at the
+    check (the digest is unkeyed); its place in the chain is what `rlcd receipts verify` and receipts.chain judge."""
+    svc, c, state, d = confirm_case
+    row = svc.receipt_view(d["decision_id"])
+    line = {"id": "forged", "received_at": row["created_at"], "decision_id": d["decision_id"], "by": "mallory",
+            "state_digest": row["receipt"]["state_digest"], "action": "confirm",
+            "receipt": {"format": R.CONFIRMATION_FORMAT, "prev": "sha256:" + "0" * 64}}
+    line["receipt"]["digest"] = R.row_digest(line)
+    with open(Path(svc.home) / "confirmations.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(line) + "\n")
+    assert c.post(f"/v1/receipts/{d['decision_id']}/check", json={"state": state}).json()["current"] is True
+    v = svc.verify_receipts()
+    assert v["ok"] is False and "does not name the receipt before it" in v["confirmations"]["breaks"][0]["why"]
+    assert _checks(svc)["receipts.chain"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("name", ["confirmations.jsonl", "decisions.jsonl"])
+def test_one_malformed_receipt_line_does_not_stop_later_appends(confirm_case, name):
+    svc, c, state, d = confirm_case
+    assert c.post(f"/v1/receipts/{d['decision_id']}/confirm", json={"by": "alice"}).status_code == 200
+    with open(Path(svc.home) / name, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"decision_id": "junk", "receipt": "x"}) + "\n")
+    fresh = toy_client(toy_service(Path(svc.home)))      # a new process: no cached chain tip
+    assert fresh.post(f"/v1/receipts/{d['decision_id']}/confirm", json={"by": "bob"}).status_code == 200
+    assert decide_color(fresh, state, stakes="low")["decision_id"]
+    v = svc.verify_receipts()
+    chain = v["confirmations"] if name == "confirmations.jsonl" else v
+    assert len(chain["breaks"]) == 1 and "without a receipt" in chain["breaks"][0]["why"]
+    junk = fresh.post("/v1/receipts/junk/check", json={"state": state})
+    assert junk.status_code in (404, 422)              # never a 500
+
+
+def test_rollback_and_kill_switch_rehearsals_are_counted_from_operator_moves(tmp_path):
+    svc = toy_service(tmp_path)
+    toy_train(svc)
+    v2 = toy_train(svc)
+    c = _checks(svc)
+    assert "never been moved by promote / rollback" in c["rollback.ready"]["detail"]       # two trains are no drill
+    assert "never been switched off" in c["automation.switch"]["detail"]
+    svc.promote("rlcd-0.1.1", kind="rollback")
+    svc.promote(v2, kind="promote")
+    svc.set_automation(False, reason="drill", by="ops")
+    svc.set_automation(True, reason="drill over", by="ops")
+    c = _checks(svc)
+    assert "moved 2 time(s) by promote / rollback" in c["rollback.ready"]["detail"]
+    assert "switched off 1 time(s) before" in c["automation.switch"]["detail"]
+
+
+def test_the_admin_key_warning_covers_old_confirm_decisions(confirm_case, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    svc = confirm_case[0]
+    monkeypatch.delenv("RLCD_ADMIN_KEY", raising=False)
+    later = run_checks(svc, now=datetime.now(UTC) + timedelta(days=30))       # outside the review window
+    item = {x["id"]: x for x in later["checks"]}["security.admin_key"]
+    assert item["status"] == "warn" and "confirm decision(s)" in item["detail"]
+
+
+def test_a_review_counts_as_capped_only_when_the_policy_alone_would_have_acted():
+    from datetime import UTC, datetime, timedelta
+    from types import SimpleNamespace
+
+    from open_rlcd.core.checklist import _scan
+
+    now = datetime.now(UTC)
+    at = (now - timedelta(hours=1)).isoformat()
+    rows = [{"action": "confirm", "created_at": at, "receipt": {"rollout": {"capped": True, "proposed_action": "act"}}},
+            # a head was capped inside a plan that confirms anyway: not a review the cap created
+            {"action": "confirm", "created_at": at,
+             "receipt": {"rollout": {"capped": True, "proposed_action": "confirm"}}},
+            {"action": "confirm", "created_at": (now - timedelta(days=40)).isoformat(), "receipt": {}}]
+    s = _scan(SimpleNamespace(logs=SimpleNamespace(decisions=lambda: iter(rows))), now)
+    assert s["capped"] == 1 and s["confirms"] == 3 and sum(v[0] for v in s["per_day"].values()) == 2
+
+
+def test_receipts_chain_reports_confirmations_whose_decisions_are_gone(confirm_case):
+    svc, c, state, d = confirm_case
+    assert c.post(f"/v1/receipts/{d['decision_id']}/confirm", json={"by": "alice"}).status_code == 200
+    (Path(svc.home) / "decisions.jsonl").rename(Path(svc.home) / "decisions.archived.jsonl")
+    item = _checks(svc)["receipts.chain"]
+    assert item["status"] == "warn" and "holds no receipt for the decisions they confirm" in item["detail"]
+    head = svc.verify_receipts()["confirmations"]["head"]
+    assert head in item["detail"]                       # the head to anchor is still printed in full

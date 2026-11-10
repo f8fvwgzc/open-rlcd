@@ -142,8 +142,9 @@ batteries:
     version: "1"
     owner: documents-pack
     description: >-
-      after the cheap retrieval step and before any LLM call, on {query, candidates, now} (the query heads were
-      trained with the retrieval summary of the candidates; without them the input guard caps their decisions)
+      after the cheap retrieval step and before any LLM call, on {query, candidates, now}. Send the candidates and
+      the request time: the query heads read the retrieval summary of the candidates, and a request without them
+      reads as one with zero candidates (training had such rows), so the answers change without a warning
     changelog: ["1: response_type, route, needs_graph"]
     consumers:
       kind: which response the plan prepares (answer, summary, list, clarify, escalate, refuse)

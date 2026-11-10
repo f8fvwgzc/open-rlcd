@@ -1027,7 +1027,7 @@ class Service:
         if decision is not None:
             row["time"] = decision.get("created_at")
         rk = self.redact_kinds()
-        for k in ("tags", "note", "missing_evidence"):
+        for k in ("source", "tags", "note", "missing_evidence"):
             v = getattr(req, k, None)
             if v:
                 row[k] = redact(v, rk)[0] if rk else v
@@ -1203,7 +1203,7 @@ class Service:
                       max_age_s: float | None = None) -> dict:
         """Does decision `decision_id` still approve acting on `state` now? (core/receipts.py `check`)"""
         row = self.receipt_view(decision_id)
-        r = row.get("receipt") or {}
+        r = row.get("receipt") if isinstance(row.get("receipt"), dict) else {}     # a hand-edited line: no receipt
         if not r.get("state_digest"):
             raise ContractError(f"decision {decision_id} was logged before receipts existed: it cannot be checked",
                                 kind="no_receipt")
@@ -1237,16 +1237,27 @@ class Service:
             cap = self.switch.cap()[0]
         out = R.check(row, state_digest=sd, latest=latest, known_models=known, policy_digest=pd,
                       automation_cap=cap, battery_version=bv, max_age_s=max_age_s)
-        # a confirm decision approves an action only once a person confirmed it (the guide's layered gate)
+        # a confirm decision approves an action only once a person confirmed it (the guide's layered gate); a line in
+        # confirmations.jsonl counts only when it names this decision's state and matches its own digest
         if R.needs_confirmation(row):
-            conf = self.logs.confirmations(decision_id)
-            if conf:
+            valid, ignored = [], []
+            for c in self.logs.confirmations(decision_id):
+                why = R.confirmation_problem(c, row)
+                if why is None:
+                    valid.append(c)
+                else:
+                    ignored.append(why)
+            if valid:
                 out["checks"]["confirmation"] = "confirmed"
-                out["confirmed"] = conf[-1]
+                out["confirmed"] = valid[-1]
             else:
                 out["checks"]["confirmation"] = "missing"
-                out["stale_reasons"].append(f"a confirm decision: a person must confirm it before the action "
-                                            f"(POST /v1/receipts/{decision_id}/confirm)")
+                reason = (f"a confirm decision: a person must confirm it before the action "
+                          f"(POST /v1/receipts/{decision_id}/confirm)")
+                if ignored:
+                    reason += (f"; {len(ignored)} confirmation line(s) ignored: "
+                               f"{'; '.join(dict.fromkeys(ignored))}")
+                out["stale_reasons"].append(reason)
                 out["current"] = False
         return out
 
@@ -1255,18 +1266,26 @@ class Service:
         """Record that a person confirmed a decision (POST /v1/receipts/{id}/confirm). The confirmation belongs to
         the receipt and so to its state: a changed state still makes the receipt stale."""
         row = self.receipt_view(decision_id)
-        r = row.get("receipt") or {}
+        r = row.get("receipt") if isinstance(row.get("receipt"), dict) else {}     # a hand-edited line: no receipt
         if state_digest is not None and state_digest != r.get("state_digest"):
             raise ContractError("state_digest is not the digest of the state this decision judged: confirm the "
                                 "decision you reviewed", kind="state_mismatch", field="state_digest")
         rk = self.redact_kinds()
         note = redact(note, rk)[0] if (note and rk) else note
+        by = redact(by, rk)[0] if (by and rk) else by
         rec = self.logs.add_confirmation({"decision_id": decision_id, "by": by, "note": note,
                                           "state_digest": r.get("state_digest"), "action": row.get("action")})
-        return {"confirmed": True, "decision_id": decision_id, "id": rec["id"], "at": rec["received_at"], "by": by}
+        return {"confirmed": True, "decision_id": decision_id, "id": rec["id"], "at": rec["received_at"], "by": by,
+                "digest": rec["receipt"]["digest"]}
 
     def verify_receipts(self) -> dict:
-        return R.verify_chain(self.logs.decision_log.path)
+        """The chain of decisions.jsonl (top level, as before) and of confirmations.jsonl (`confirmations`); `ok`
+        only when both verify. Anchor both heads outside RLCD_HOME to detect truncation."""
+        out = R.verify_chain(self.logs.decision_log.path)
+        conf = R.verify_chain(self.logs.confirmation_log.path)
+        out["confirmations"] = conf
+        out["ok"] = bool(out["ok"] and conf["ok"])
+        return out
 
     # ------------------------------------------------------------------ operations metrics and the review queue
     def review_capacity(self) -> float | None:
@@ -1339,13 +1358,20 @@ class Service:
         return {"rollout": self.rollout().to_dict(), "automation": self.switch.state().to_dict(),
                 "history": self.switch.history(20)}
 
+    def _redacted(self, *values: str | None) -> tuple[str | None, ...]:
+        """Free-text audit fields (who, why) as serve.redact keeps them: a key pasted into a reason is masked."""
+        rk = self.redact_kinds()
+        return tuple(redact(v, rk)[0] if (v and rk) else v for v in values)
+
     def set_automation(self, enabled: bool, *, reason: str | None = None, by: str | None = None) -> dict:
+        reason, by = self._redacted(reason, by)
         self.switch.set(bool(enabled), reason=reason, by=by, at=now_iso())
         return self.automation_view()
 
     def promote(self, version: str, *, reason: str | None = None, by: str | None = None,
                 kind: str = "promote") -> dict:
         """Point rlcd-latest at `version` (kind "rollback" or "promote"): no retrain, no code change."""
+        reason, by = self._redacted(reason, by)
         try:
             return self.registry.set_latest(version, reason=reason, by=by, kind=kind)
         except UnknownModel:

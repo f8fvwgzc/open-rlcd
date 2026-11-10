@@ -198,8 +198,9 @@ stay on your machine unless you choose to `rlcd export` or `rlcd push --hf` them
 
 ## Security
 
-`RLCD_API_KEY` protects every route but `/health`; with `RLCD_ADMIN_KEY` set, training and the kill switch need
-that key instead. Bundles load only from `RLCD_HOME` and contain no code. Logged states are redacted of secrets
+`RLCD_API_KEY` protects every route but `/health`; with `RLCD_ADMIN_KEY` set, training, the kill switch and
+confirming a decision need that key instead (without it, a decision caller can confirm its own confirm decisions).
+Bundles load only from `RLCD_HOME` and contain no code. Logged states, notes and reasons are redacted of secrets
 (`serve.redact`), and `rlcd receipts prune` drops old states while keeping the receipt chain verifiable.
 Connectors and LLM judges refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or
 `RLCD_ALLOW_REMOTE=1`). Secrets come from environment variables only.

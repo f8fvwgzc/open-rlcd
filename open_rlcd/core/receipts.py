@@ -23,11 +23,21 @@ Truncating the newest lines cannot be detected from the file alone: anchor the h
 writing one home still produce one chain; a torn last line (a crash mid-write) is terminated before the next append
 and is reported, never chained.
 
+Confirmations (confirmations.jsonl: a person confirmed a confirm decision) form a second chain of the same kind:
+each line carries its own `receipt` part with `prev` and `digest`. A confirmation counts for a decision only when
+it names that decision and the state the decision judged and matches its own digest (`confirmation_problem`): a
+line without a digest, or one edited after it was written, confirms nothing, and `rlcd receipts verify` reports
+both chains. The digest is not a signature: anyone who can write RLCD_HOME can append a confirmation that counts
+(and verifies, with the right `prev`). RLCD_ADMIN_KEY on the confirm route, file permissions on the home and an
+external anchor of both heads are what limit that.
+
 Staleness (`check`): a receipt approves what it saw, not what exists now. Before a side effect, the caller sends
 the state it is about to act on; the receipt still applies only if that state has the same digest, the model is
 the same (when the decision used the `rlcd-latest` alias: it still points at the same version), the policy and
 battery version are unchanged, automation was not switched off or capped since (for an `act` decision), and the
-receipt is younger than `max_age_s`.
+receipt is younger than `max_age_s`. Two kinds of decision never apply on their own: one that abstained (escalate
+/ hold / a rejected answer) approves no action at all, and a `confirm` decision applies only once a person has
+confirmed it (the service adds that check).
 """
 from __future__ import annotations
 
@@ -47,6 +57,7 @@ except ImportError:  # pragma: no cover
     fcntl = None  # type: ignore[assignment]
 
 FORMAT = "open-rlcd-receipt/1"
+CONFIRMATION_FORMAT = "open-rlcd-confirmation/1"
 MAX_WARNINGS = 20
 MAX_AUDIT_BYTES = 64 << 10
 MAX_LOGGED_STATE_BYTES = 2 << 20        # logged head states per record (the rest keep only their digest)
@@ -220,7 +231,10 @@ def _last_digest(f) -> str | None:
             row = json.loads(decode(line))
         except ValueError:
             continue    # a torn line is never part of the chain
-        d = (row.get("receipt") or {}).get("digest") if isinstance(row, dict) else None
+        # a line whose `receipt` is not an object (written by hand, or by another tool) is skipped, as verify_chain
+        # skips it: one bad line must not stop every later append
+        r = row.get("receipt") if isinstance(row, dict) else None
+        d = r.get("digest") if isinstance(r, dict) else None
         if d:
             return d
     return None
@@ -270,7 +284,8 @@ class ChainedLog:
 
 
 def verify_chain(path: Path) -> dict:
-    """Walk decisions.jsonl and check every receipt: its own digest, and that it names the receipt before it."""
+    """Walk a chained log (decisions.jsonl, confirmations.jsonl) and check every line's receipt: its own digest, and
+    that it names the receipt before it."""
     path = Path(path)
     out: dict[str, Any] = {"path": path.name, "lines": 0, "receipts": 0, "legacy": 0, "unreadable": [], "ok": True,
                            "breaks": [], "head": None}
@@ -342,6 +357,26 @@ def needs_confirmation(row: dict) -> bool:
     if "action" in row:
         return row.get("action") == "confirm"
     return any((h or {}).get("tier") == "confirm" for h in (row.get("heads") or {}).values())
+
+
+def confirmation_problem(conf: dict, row: dict) -> str | None:
+    """Why a confirmations.jsonl line does not confirm decision `row`, or None when it does: it must name the
+    decision and the state the decision judged, and match its own digest, so a line without one or edited after it
+    was written confirms nothing. The digest is unkeyed: it catches edits, not a forger who can write RLCD_HOME. The
+    line's place in the chain is `verify_chain`'s to judge (walking the chain on every check would add nothing a
+    forger could not satisfy by naming the current head)."""
+    if not isinstance(conf, dict) or conf.get("decision_id") != row.get("decision_id"):
+        return "it names another decision"
+    if conf.get("state_digest") != (row.get("receipt") or {}).get("state_digest"):
+        return "it names another state than the one the decision judged"
+    c = conf.get("receipt")
+    if not isinstance(c, dict) or not c.get("digest"):
+        return "it carries no digest (written by hand, or before confirmations were chained: confirm it again)"
+    try:
+        same = row_digest(conf) == c["digest"]
+    except Exception:  # a malformed line confirms nothing, it never breaks the check
+        same = False
+    return None if same else "it does not match its digest (edited after it was written)"
 
 
 def check(row: dict, *, state_digest: str, latest: str, known_models: list[str], policy_digest: str | None,
