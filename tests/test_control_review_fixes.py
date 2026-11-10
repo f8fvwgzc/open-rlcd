@@ -45,10 +45,23 @@ def test_an_abstained_decision_is_never_a_current_approval(trained):
 
 
 def test_the_assignment_pattern_is_linear_on_adversarial_input():
-    for text in ("secret-" * 2000 + "x", "a" * 50_000 + "token" + "b" * 50_000 + "=", "_" * 100_000):
-        t0 = time.perf_counter()
-        redact_text(text)
-        assert time.perf_counter() - t0 < 1.0
+    """Time grows linearly with the input. A fixed wall-clock limit flakes on slow CI runners (a linear 0.33 s locally
+    took 1.03 s on a macOS runner), so each input is compared with its quarter: linear costs about 4x, the quadratic
+    backtracking this guards against about 16x. The absolute ceiling is a backstop: quadratic on these is minutes."""
+
+    def best(text: str) -> float:
+        times = []
+        for _ in range(3):
+            t0 = time.perf_counter()
+            redact_text(text)
+            times.append(time.perf_counter() - t0)
+        return min(times)
+
+    for make, n in ((lambda k: "secret-" * k + "x", 2000), (lambda k: "a" * k + "token" + "b" * k + "=", 50_000),
+                    (lambda k: "_" * k, 100_000)):
+        quarter, full = best(make(n // 4)), best(make(n))
+        assert full < 10.0, full
+        assert full < 8 * max(quarter, 0.005), (n, quarter, full)
 
 
 def test_output_screening_rejects_secret_shapes_not_documentation():
