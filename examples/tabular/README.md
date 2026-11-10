@@ -4,6 +4,11 @@ A calibrated yes/no head on a real, public table: will a client contacted by pho
 deposit? It shows the whole tabular-pack loop on data the code was not written for: read a CSV, train a
 calibrated head, publish how its probabilities held up on calls it never saw, and decide `act / confirm / hold`.
 
+New to the tabular pack? Start with [docs/tabular-quickstart.md](../../docs/tabular-quickstart.md): your own CSV
+to a served, calibrated decision in one page (`rlcd init --pack tabular`, outcomes and `exclude`, text columns,
+reading `rlcd train`, `/v1/systemone`, `/v1/feedback`). This example is the same loop as one script on a public
+dataset.
+
 ```bash
 uv run python examples/tabular/run.py                  # downloads the archive (about 1 MB) on first run
 uv run python examples/tabular/run.py --ordering row   # holdout = a seeded shuffle instead of the latest calls
@@ -48,7 +53,7 @@ date order, `;`-separated.
 ## Read the numbers honestly
 
 * `duration` (call length) is **left out**: it is only known once the call is over, when the outcome is known
-  too. The dataset's own documentation says to discard it for a realistic model; with it, any model looks far
+  too (with `features: auto` you would list it under `pack_config.exclude`). The dataset's own documentation says to discard it for a realistic model; with it, any model looks far
   better than it can be in use.
 * With the default `--ordering time` the holdout is the **latest 20 % of calls**, which is how a deployed
   model meets the future. The calls span the 2008-2010 financial crisis, so the latest months need not look

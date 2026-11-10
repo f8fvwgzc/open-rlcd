@@ -31,7 +31,7 @@ from ...features.text import EncoderError, EncoderMismatch, make_encoder
 from ...labeling.store import LabelItem, LabelStore
 from ..base import BasePack, dataset_from_labels
 from .provider import VIEWS, DocumentsProvider
-from .settings import DEFAULT_ENCODER, corpus_settings, encoder_settings
+from .settings import DEFAULT_ENCODER, config_keys, corpus_settings, encoder_settings
 
 PROVIDER_CONFIG_VERSION = 1
 
@@ -52,6 +52,9 @@ class DocumentsPack(BasePack):
         if self._defaults is None:
             self._defaults = super().defaults()
         return self._defaults
+
+    def config_keys(self) -> dict:
+        return config_keys()
 
     # ------------------------------------------------------------------ features
     def provider(self, project: Project, config: dict | None = None) -> DocumentsProvider:

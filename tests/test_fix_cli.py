@@ -74,6 +74,7 @@ def fake_claude(tmp_path, monkeypatch):
     log = tmp_path / "claude-calls.jsonl"
     monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")     # the claude-cli judge is refused without the opt-in
     return log
 
 

@@ -22,6 +22,7 @@ from typing import Any
 from .. import LATEST, MODEL_PREFIX
 from . import bundle as BD
 from .bernoulli import Ledger
+from .locks import FileLock, write_atomic
 from .training import now_iso
 
 
@@ -38,6 +39,10 @@ class Registry:
         self.home = Path(home).expanduser().resolve() if home else default_home()
         (self.home / "models").mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        # Version ids are handed out and `latest` is moved by several processes (`rlcd train`, `import`, `promote`,
+        # the server's own training jobs). registry.json is never cached: each of those read-modify-writes reads it
+        # inside this inter-process lock and holds the lock until the new file is in place.
+        self._file_lock = FileLock(self.home / "registry.json")
         self._bundles: dict[str, BD.Bundle] = {}
         self.ledger = Ledger(self.home / "bernoulli.json")
 
@@ -53,9 +58,7 @@ class Registry:
             return {"latest": None, "next": 1, "versions": {}}
 
     def _write(self, reg: dict) -> None:
-        tmp = self._path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(reg, indent=1), encoding="utf-8")
-        tmp.replace(self._path)
+        write_atomic(self._path, json.dumps(reg, indent=1))
 
     def latest_id(self) -> str:
         """The versioned id `rlcd-latest` points at. `rlcd-0.1.0` is the untrained service."""
@@ -112,7 +115,7 @@ class Registry:
                policy: dict, data_card: dict | None = None, notes: list[str] | None = None) -> str:
         """Save freshly trained heads as a new version, carrying over the previous version's other heads when
         they were trained on the same pack and feature version."""
-        with self._lock:
+        with self._lock, self._file_lock:
             reg = self.registry()
             vid = f"{MODEL_PREFIX}{int(reg['next'])}"
             carried: dict[str, tuple[Path, dict]] = {}
@@ -147,18 +150,20 @@ class Registry:
             # since) carries over too, and the table stays valid for every version that served this head: the
             # Bernoulli gate keeps its evidence for the new version, and an outcome posted now for a decision made
             # before the retrain still updates it (`valid_for`, which feedback and the gate check).
-            for name, (old_dir, entry) in carried.items():
-                table = self.ledger.table(name)
-                if table and (table.get("model_version") == prev_vid or prev_vid in (table.get("valid_for") or [])):
-                    # live for the version being replaced (also through valid_for, e.g. after a rollback): its
-                    # outcomes scored since the holdout carry over with the very same head
-                    valid = list(dict.fromkeys([*(table.get("valid_for") or []), table.get("model_version"), prev_vid]))
-                    valid = [v for v in valid if v]
-                else:
-                    table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
-                    valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
-                valid = list(dict.fromkeys([*valid, vid]))
-                self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
+            # read and reset under one hold of the ledger: an outcome another process scores meanwhile is not lost
+            with self.ledger.exclusive():
+                for name, (old_dir, entry) in carried.items():
+                    table = self.ledger.table(name)
+                    if table and (table.get("model_version") == prev_vid or prev_vid in (table.get("valid_for") or [])):
+                        # live for the version being replaced (also through valid_for, e.g. after a rollback): its
+                        # outcomes scored since the holdout carry over with the very same head
+                        valid = list(dict.fromkeys([*(table.get("valid_for") or []), table.get("model_version"), prev_vid]))
+                        valid = [v for v in valid if v]
+                    else:
+                        table = json.loads((old_dir / "bernoulli.json").read_text(encoding="utf-8"))
+                        valid = [v for v in (entry.get("trained_in"), prev_vid) if v]
+                    valid = list(dict.fromkeys([*valid, vid]))
+                    self.ledger.reset(name, {**table, "model_version": vid, "valid_for": valid})
             return vid
 
     def set_latest(self, version: str, *, reason: str | None = None, by: str | None = None,
@@ -167,7 +172,7 @@ class Registry:
         Each head of that version then gates on evidence that belongs to it: a Bernoulli table that is valid for the
         version (a carried-over head) is kept, any other restarts from the version's own holdout table (outcomes
         scored for the version that was latest stay with that version's table, which is replaced)."""
-        with self._lock:
+        with self._lock, self._file_lock:
             reg = self.registry()
             if version not in reg["versions"]:
                 raise UnknownModel(version)
@@ -180,15 +185,17 @@ class Registry:
             self._write(reg)
             b = self.bundle(version)
             restarted = []
-            for name in b.names():
-                table = self.ledger.table(name) or {}
-                if table.get("model_version") == version or version in (table.get("valid_for") or []):
-                    continue
-                restored = self.ledger.archived(name, version)    # its own evidence, outcomes included
-                base = restored if restored is not None else b.head(name).holdout_ledger()
-                self.ledger.reset(name, {**base, "model_version": version,
-                                         "valid_for": list(dict.fromkeys([*(base.get("valid_for") or []), version]))})
-                restarted.append(name)
+            # one hold of the ledger from reading a table to resetting it (the server may be scoring outcomes)
+            with self.ledger.exclusive():
+                for name in b.names():
+                    table = self.ledger.table(name) or {}
+                    if table.get("model_version") == version or version in (table.get("valid_for") or []):
+                        continue
+                    restored = self.ledger.archived(name, version)    # its own evidence, outcomes included
+                    base = restored if restored is not None else b.head(name).holdout_ledger()
+                    self.ledger.reset(name, {**base, "model_version": version,
+                                             "valid_for": list(dict.fromkeys([*(base.get("valid_for") or []), version]))})
+                    restarted.append(name)
             return {"latest": version, "previous": prev, "changed": True, "ledger_restarted": restarted}
 
     def previous_latest(self) -> str | None:
@@ -234,7 +241,7 @@ class Registry:
         the import instead of crashing the server later). Whatever fails, the copy is removed."""
         src = Path(src).expanduser()
         BD.validate(src)
-        with self._lock:
+        with self._lock, self._file_lock:
             reg = self.registry()
             vid = f"{MODEL_PREFIX}{int(reg['next'])}"
             dest = self.home / "models" / vid

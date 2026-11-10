@@ -276,6 +276,7 @@ def test_anthropic_missing_key_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(JudgeError, match="ANTHROPIC_API_KEY is not set"):
         AnthropicJudge()
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")
     with pytest.raises(JudgeError, match="ANTHROPIC_API_KEY"):
         make_judge("anthropic")
 
@@ -330,7 +331,7 @@ def test_anthropic_effort_omitted_for_models_without_it():
 
 def test_make_judge_specs(monkeypatch, tmp_path):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
-    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")           # the hosted judges need the opt-in (next test)
     j = make_judge("claude-cli")
     assert isinstance(j, ClaudeCliJudge) and j.model is None
     assert make_judge("claude-cli:claude-opus-5-5").model == "claude-opus-5-5"
@@ -338,6 +339,7 @@ def test_make_judge_specs(monkeypatch, tmp_path):
         a = make_judge("anthropic")
         assert isinstance(a, AnthropicJudge) and a.model == "claude-haiku-5-5"
         assert make_judge("anthropic:claude-sonnet-5-5").model == "claude-sonnet-5-5"
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE")
     o = make_judge("ollama:qwen2.5:7b-instruct")
     assert isinstance(o, OllamaJudge) and o.model == "qwen2.5:7b-instruct"
     oa = make_judge("openai:http://127.0.0.1:8080/v1|llama-3")
@@ -350,13 +352,37 @@ def test_make_judge_specs(monkeypatch, tmp_path):
         make_judge("openai:https://api.example.com/v1|m")
 
 
+@pytest.mark.parametrize("spec", ["claude-cli", "claude-cli:claude-haiku-5-5", "anthropic", "Anthropic:claude-sonnet-5-5"])
+def test_hosted_judges_need_the_remote_opt_in(monkeypatch, tmp_path, spec):
+    """claude-cli and anthropic send item texts to Anthropic: refused like any other non-loopback host."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key-not-real")
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    kind = spec.partition(":")[0].lower()
+    for project in (None, Project(root=tmp_path), Project(root=tmp_path, data={"security": {"allow_remote": False}})):
+        with pytest.raises(JudgeError, match=f"refusing the {kind} judge") as e:
+            make_judge(spec, project)
+        assert "Anthropic" in str(e.value) and "RLCD_ALLOW_REMOTE=1" in str(e.value)
+        assert "allow_remote: true" in str(e.value) and "ollama:<model>" in str(e.value)
+    with pytest.raises(JudgeError, match="refusing the"):        # the configured judge, not only --judge
+        make_judge(None, Project(root=tmp_path, data={"labeling": {"judge": spec}}))
+    if kind == "anthropic" and importlib.util.find_spec("anthropic") is None:
+        return
+    for data in ({"security": {"allow_remote": True}}, {"pack_config": {"allow_remote": True}}):
+        assert make_judge(spec, Project(root=tmp_path, data=data)).id.startswith(kind)
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "true")              # only the exact value "1" opts in
+    with pytest.raises(JudgeError, match="refusing the"):
+        make_judge(spec)
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")
+    assert make_judge(spec).id.startswith(kind)
+
+
 def test_make_judge_from_project_config(monkeypatch, tmp_path):
     monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
     p = Project(root=tmp_path, data={"labeling": {"judge": "ollama", "model": "m1",
                                                   "base_url": "http://localhost:11434"}})
     j = make_judge(None, p)
     assert isinstance(j, OllamaJudge) and j.model == "m1" and j.base_url == "http://localhost:11434"
-    assert make_judge(None, Project(root=tmp_path)).id == "claude-cli"
+    assert make_judge(None, Project(root=tmp_path, data={"security": {"allow_remote": True}})).id == "claude-cli"
     remote = "openai:https://llm.example.com/v1|m"
     assert make_judge(remote, Project(root=tmp_path, data={"security": {"allow_remote": True}})).model == "m"
     assert make_judge(remote, Project(root=tmp_path, data={"pack_config": {"allow_remote": True}})).model == "m"

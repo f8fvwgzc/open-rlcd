@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any
 
 from .contract import ContractError
+from .locks import FileLock, write_atomic
 
 MODES = ("shadow", "assist", "limited", "full")
 ENV_SWITCH = "RLCD_AUTOMATION"
@@ -185,11 +186,10 @@ class AutomationSwitch:
                                 f"only be switched on by changing that variable", kind="automation_locked",
                                 status=409)
         rec = {"enabled": bool(enabled), "reason": reason, "by": by, "at": at}
-        with self._lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(rec, ensure_ascii=False), encoding="utf-8")
-            tmp.replace(self.path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # the server and `rlcd automation` are separate processes: the state and its audit line change together
+        with self._lock, FileLock(self.path):
+            write_atomic(self.path, json.dumps(rec, ensure_ascii=False))
             with open(self.audit, "a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             self._seen = None

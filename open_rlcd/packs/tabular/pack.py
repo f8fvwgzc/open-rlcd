@@ -15,8 +15,14 @@ Every head reads the same feature view, "row": a request's `state` is one row as
 they calibrate and are scored on the holdout; feedback rows posted to /v1/feedback with a raw state are
 re-featurised at the next train and only train the base models (weight x feedback_weight).
 
+Columns that are only known after the decision (a second outcome, a review level, a closing date) must not be
+features. The pack keeps every declared label column out; the others it cannot know: list them under
+`pack_config.exclude`. As a safety net, `datasets()` adds a note when one feature on its own almost determines a
+head's label (`leak_notes`): a note, never a refusal.
+
 What it does not do: it does not fetch data (the file must be local), does not join tables or build
-time-window aggregates (give it one row per decision), and does not deduplicate rows. A head whose classes must
+time-window aggregates (give it one row per decision), and does not deduplicate rows of the file (feedback rows
+are deduplicated: only the latest outcome posted for a decision counts). A head whose classes must
 be read from the file is skipped by `heads()` while the file is missing; trained heads are still served from
 their bundle, which stores their specs and the provider's schema.
 """
@@ -26,6 +32,7 @@ import json
 import os
 import re
 import threading
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -43,12 +50,14 @@ from .data import (
     TabularConfigError,
     Target,
     canon,
+    config_keys,
     label_columns,
     merged_targets,
     parse_config,
     parse_time,
     read_table,
     resolve_target,
+    to_float,
 )
 from .provider import VIEW, TabularProvider, new_salt
 
@@ -75,6 +84,20 @@ class TabularPack(BasePack):
     # ------------------------------------------------------------------ config and data
     def config(self, project: Project) -> TabularConfig:
         return parse_config(project.pack_config, project.resolve_path)
+
+    def config_keys(self) -> dict:
+        return config_keys()
+
+    def head_override_keys(self) -> set[str]:
+        return {"label"}      # `heads:` may add a head, which then brings its own label column
+
+    def check_config(self, project: Project) -> list[dict]:
+        """What `parse_config` and `merged_targets` refuse, as one finding (the data file is not opened)."""
+        try:
+            merged_targets(parse_config(project.pack_config, project.resolve_path), project.head_overrides)
+        except TabularConfigError as e:
+            return [{"level": "error", "path": "pack_config", "message": str(e)}]
+        return []
 
     def table(self, cfg: TabularConfig) -> Table:
         """The training table, re-read only when the file (path, size, mtime) or the reading options change."""
@@ -145,12 +168,15 @@ class TabularPack(BasePack):
         ids = np.asarray([_key(table, cfg.id, i, na) or f"row:{i}" for i in range(n)], dtype=object)
         t_all = None
         if cfg.time:
-            t_all = np.asarray([_t(parse_time(v, na)) for v in table.data[cfg.time]], np.int64)
+            t_all = np.asarray([_t(parse_time(v, na, cfg.time_format)) for v in table.data[cfg.time]], np.int64)
             bad = int((t_all < 0).sum())
             if bad == n:
-                raise TabularConfigError(f"time column {cfg.time!r}: no value parses as ISO-8601 or epoch seconds")
+                raise TabularConfigError(_time_error(cfg, table))
             if bad:
-                common.append(f"{bad} rows have no parseable time in {cfg.time!r}: they only ever train")
+                common.append(f"{bad} of {n} rows ({_share(bad, n)}) have no parseable time in {cfg.time!r}: they "
+                              f"only ever train" + ("" if cfg.time_format else
+                                                    "; if they are written in another notation, set "
+                                                    "pack_config.time_format"))
         g_all = None
         if cfg.group:
             g_all = np.asarray([_key(table, cfg.group, i, na) or f"row:{i}" for i in range(n)], dtype=object)
@@ -180,7 +206,7 @@ class TabularPack(BasePack):
         keep = np.asarray([i for i, y in enumerate(y_raw) if y is not None], dtype=int)
         n_missing = sum(1 for v in table.data[target.label] if canon(v, na) is None)
         n_unknown = len(y_raw) - len(keep) - n_missing
-        notes = list(common)
+        notes = [*common, *target.notes]
         if n_missing:
             notes.append(f"{n_missing} rows have no label in {target.label!r}: skipped")
         if n_unknown:
@@ -194,7 +220,11 @@ class TabularPack(BasePack):
         seg = [s_all[keep]] if s_all is not None else None
         src = [np.full(len(keep), cfg.label_source, dtype=object)]
         w = [np.ones(len(keep))]
+        notes.extend(leak_notes(spec, target, table, provider, keep, y[0], na))
         fb = _feedback_rows(spec, cfg, provider, feedback, feedback_weight)
+        if fb["replaced"]:
+            notes.append(f"{fb['replaced']} feedback rows replaced by a later outcome posted for the same "
+                         f"decision_id")
         if fb["n"]:
             X.append(fb["X"])
             y.append(fb["y"])
@@ -261,6 +291,157 @@ def _t(v: int | None) -> int:
     return -1 if v is None else int(v)
 
 
+def _share(k: int, n: int) -> str:
+    """k of n as a percentage that never rounds a non-zero share to 0 % or a partial one to 100 %."""
+    pct = 100.0 * k / max(n, 1)
+    if 0 < pct < 0.1:
+        return "under 0.1 %"
+    if 99.9 < pct < 100:
+        return "over 99.9 %"
+    return f"{pct:.1f} %"
+
+
+def _time_error(cfg: TabularConfig, table: Table) -> str:
+    """Why no time was read, with two of the column's values and the option that fixes it."""
+    na = cfg.na_values
+    samples = list(dict.fromkeys(v for v in (canon(x, na) for x in table.data[cfg.time]) if v is not None))[:2]
+    shown = " and ".join(repr(v[:40]) for v in samples) or "(every value is empty)"
+    if cfg.time_format:
+        return (f"time column {cfg.time!r}: no value matches pack_config.time_format {cfg.time_format!r} (nor "
+                f"ISO-8601 or epoch seconds); the column holds values like {shown}. Fix time_format (Python "
+                f"strptime codes, e.g. '%d/%m/%Y %I:%M %p' for 31/01/2025 02:15 PM)")
+    return (f"time column {cfg.time!r}: no value parses as ISO-8601 or epoch seconds; the column holds values like "
+            f"{shown}. Set pack_config.time_format to their strptime format (e.g. '%d/%m/%Y %I:%M %p' for "
+            f"31/01/2025 02:15 PM); times without a zone are read as UTC")
+
+
+# ----------------------------------------------------------------------------- the leakage note
+
+LEAK_MIN_ROWS = 200           # labelled rows below which nothing is said (too few to tell a leak from luck)
+LEAK_MIN_MINORITY = 20        # rows outside the most frequent class below which nothing is said
+LEAK_MIN_PER_VALUE = 10       # categorical: average rows per value below which pure cells are expected by chance
+LEAK_ERROR_SHARE = 0.10       # categorical: flagged when guessing from the column leaves at most this share of the
+#                               errors of guessing the most frequent class ...
+LEAK_MAX_ERROR = 0.02         # ... and is wrong on at most this share of the rows
+LEAK_AUC = 0.99               # numeric: flagged when the column ranks one class against the rest this well
+LEAK_MAX_ROWS = 50_000        # rows looked at (evenly spaced over the file), to keep the check cheap
+
+
+def leak_notes(spec: HeadSpec, target: Target, table: Table, provider: Any, keep: np.ndarray, y: np.ndarray,
+               na: frozenset[str]) -> list[str]:
+    """Notes about feature columns that, each on its own, almost determine this head's label: the usual sign of a
+    column that is only filled in after the outcome is known (a review level, a refund amount, a closing reason).
+
+    The test, per feature column, on the file's labelled rows (never feedback rows):
+
+    * categorical column (also "is the value missing" for any column): guess every row's class as the most
+      frequent class among the rows with the same value. Flag when those guesses are wrong on at most
+      LEAK_MAX_ERROR of the rows AND on at most LEAK_ERROR_SHARE of the rows that "always guess the most frequent
+      class" gets wrong. Values are grouped as the provider encodes them (vocabulary, __other__, __missing__)
+      and the column needs LEAK_MIN_PER_VALUE rows per value on average, so a column with many rare values is
+      not flagged for cells that are pure by chance.
+    * numeric column: flag when, for some class with at least LEAK_MIN_MINORITY rows inside and outside it, the
+      column's values rank that class against the rest with an AUC of LEAK_AUC or more (or 1 - LEAK_AUC or
+      less), among the rows that have a value.
+
+    Nothing is said with fewer than LEAK_MIN_ROWS labelled rows or fewer than LEAK_MIN_MINORITY rows outside
+    the most frequent class. Text columns are not tested. What this cannot see: leaks spread over several
+    columns, weaker leaks (a column decided after the fact that is 90 % aligned with the outcome), and it
+    cannot tell a leak from a genuinely decisive input known at decision time, which is why it is a note."""
+    columns = getattr(provider, "columns", None)
+    n = len(keep)
+    if not columns or n < LEAK_MIN_ROWS:
+        return []
+    if n > LEAK_MAX_ROWS:
+        pick = np.linspace(0, n - 1, LEAK_MAX_ROWS).astype(int)
+        keep, y, n = keep[pick], y[pick], LEAK_MAX_ROWS
+    k = int(y.max()) + 1
+    class_n = np.bincount(y, minlength=k)
+    base_err = n - int(class_n.max())
+    if base_err < LEAK_MIN_MINORITY:
+        return []
+    values: dict[int, str] = {}           # class index -> the label value as the column writes it
+    for value, ci in target.mapping.items():
+        values.setdefault(ci, value)
+
+    def name_of(ci: int) -> str:
+        if target.type == "noul":
+            return repr(target.positive) if ci == 1 else f"not {target.positive!r}"
+        return repr(values.get(ci, str(ci)))
+
+    def cell_errors(codes: np.ndarray) -> tuple[int, int]:
+        """(rows a per-value majority guess gets wrong, number of values)."""
+        _, inv = np.unique(codes, return_inverse=True)
+        cells = int(inv.max()) + 1
+        table_ = np.zeros((cells, k), np.int64)
+        np.add.at(table_, (inv, y), 1)
+        return n - int(table_.max(axis=1).sum()), cells
+
+    def decisive(err: int, cells: int) -> bool:
+        return (cells >= 2 and n / cells >= LEAK_MIN_PER_VALUE and err <= LEAK_MAX_ERROR * n
+                and err <= LEAK_ERROR_SHARE * base_err)
+
+    out: list[str] = []
+    advice = ("If it is only known after the decision, list it under pack_config.exclude (or under targets if it is "
+              "an outcome itself): a model trained on it looks far better on the holdout than it can be in use. If "
+              "it is known when the decision is made, nothing needs to change")
+    for col in columns:
+        if col.kind == "text" or col.name not in table.data:
+            continue
+        raw = table.data[col.name]
+        vals = [canon(raw[i], na) for i in keep]
+        missing = np.asarray([v is None for v in vals])
+        why = None
+        if col.kind == "categorical":
+            if col.hashed:      # group by raw value: the grouping only matters up to the vocabulary size
+                top = {v for v, _ in Counter(v for v in vals if v is not None).most_common(len(col.vocabulary))}
+            else:
+                top = set(col.vocabulary) | {v.lower() for v in col.vocabulary}
+            codes = np.asarray(["\x00missing" if v is None else (v if v in top or v.lower() in top else "\x00other")
+                                for v in vals], dtype=object)
+            err, cells = cell_errors(codes)
+            if decisive(err, cells):
+                why = (f"its value alone gives the right label for {_share(n - err, n)} of {n} rows; always guessing "
+                       f"{name_of(int(class_n.argmax()))} gives {_share(n - base_err, n)}")
+        else:
+            x = np.asarray([to_float(raw[i], na) for i in keep], float)
+            have = ~np.isnan(x)
+            for ci in range(k):
+                pos = have & (y == ci)
+                neg = have & (y != ci)
+                if pos.sum() < LEAK_MIN_MINORITY or neg.sum() < LEAK_MIN_MINORITY:
+                    continue
+                auc = _auc(x[have], (y == ci)[have])
+                if auc >= LEAK_AUC or auc <= 1 - LEAK_AUC:
+                    side = "higher" if auc >= LEAK_AUC else "lower"
+                    why = (f"{side} values separate {target.label} = {name_of(ci)} from the rest almost perfectly: "
+                           f"rank AUC {max(auc, 1 - auc):.3f} over {int(have.sum())} rows")
+                    break
+            if why is None and missing.any() and not missing.all():
+                err, cells = cell_errors(missing.astype(int))
+                if decisive(err, cells):
+                    why = (f"whether it is filled in at all gives the right label for {_share(n - err, n)} of {n} "
+                           f"rows")
+        if why:
+            out.append(f"possible label leak: feature column {col.name!r} on its own almost determines "
+                       f"{target.label!r} ({why}). {advice}")
+    return out
+
+
+def _auc(x: np.ndarray, positive: np.ndarray) -> float:
+    """Rank AUC of `x` for `positive` (ties get their average rank): P(x of a positive row > x of another row)."""
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty(len(x), float)
+    xs = x[order]
+    starts = np.flatnonzero(np.r_[True, xs[1:] != xs[:-1]])
+    ends = np.r_[starts[1:], len(xs)]
+    avg = (starts + ends - 1) / 2.0 + 1.0
+    ranks[order] = np.repeat(avg, ends - starts)
+    n_pos = int(positive.sum())
+    n_neg = len(x) - n_pos
+    return float((ranks[positive].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
 def _key(table: Table, column: str | None, i: int, na: frozenset[str]) -> str | None:
     return None if column is None else canon(table.data[column][i], na)
 
@@ -273,9 +454,15 @@ def _feedback_rows(spec: HeadSpec, cfg: TabularConfig, provider: Any, feedback: 
     na = cfg.na_values
     width = len(provider.names(VIEW))
     X, y, ids, ts, groups, segs, w = [], [], [], [], [], [], []
-    skipped, why = 0, set()
-    for r in feedback or []:
-        if r.get("head") != spec.name:
+    skipped, why, replaced = 0, set(), 0
+    rows = [r for r in feedback or [] if r.get("head") == spec.name]
+    # a decision's outcome counts once, as in the Bernoulli ledger and in packs.base.dataset_from_labels: a retried
+    # or corrected POST /v1/feedback for the same decision_id replaces the earlier row instead of adding weight
+    # (a /v1/systemone receipt can ask one head in several questions: each question is its own outcome)
+    last = {(str(r["decision_id"]), r.get("question")): i for i, r in enumerate(rows) if r.get("decision_id")}
+    for i, r in enumerate(rows):
+        if r.get("decision_id") and last[(str(r["decision_id"]), r.get("question"))] != i:
+            replaced += 1
             continue
         state = r.get("state")
         try:
@@ -312,7 +499,7 @@ def _feedback_rows(spec: HeadSpec, cfg: TabularConfig, provider: Any, feedback: 
         X.append(row)
         y.append(yi)
         ids.append(fid)
-        t = parse_time(state.get(cfg.time), na) if raw and cfg.time else None
+        t = parse_time(state.get(cfg.time), na, cfg.time_format) if raw and cfg.time else None
         ts.append(_t(t if t is not None else epoch(r.get("time") or r.get("received_at"))))
         g = canon(state.get(cfg.group), na) if raw and cfg.group else None
         groups.append(g or f"feedback:{r.get('decision_id') or r.get('id')}")
@@ -323,4 +510,5 @@ def _feedback_rows(spec: HeadSpec, cfg: TabularConfig, provider: Any, feedback: 
     return {"n": n, "X": np.vstack(X) if n else np.zeros((0, width), np.float32), "y": np.asarray(y, np.int64),
             "ids": np.asarray(ids, dtype=object), "t": np.asarray(ts, np.int64),
             "group": np.asarray(groups, dtype=object), "segment": np.asarray(segs, dtype=object),
-            "weight": np.asarray(w, float), "skipped": skipped, "why": ", ".join(sorted(why))}
+            "weight": np.asarray(w, float), "skipped": skipped, "why": ", ".join(sorted(why)),
+            "replaced": replaced}

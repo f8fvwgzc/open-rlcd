@@ -5,11 +5,17 @@
       id: row_id                      # optional: row ids (reported, never a feature)
       group: customer_id              # optional: rows of one group never straddle train / calibration / holdout
       time: month                     # optional: ISO-8601 or epoch seconds; enables time ordering
+      time_format: "%d/%m/%Y %I:%M %p"   # optional: a strptime format for `time` values in another notation
       segment: channel                # optional: per-segment base rates and holdout slices
       features: auto                  # or a list of columns; auto = every column except label/id/group/time/segment
                                       #   (empty and identifier-like columns are left out, with a note)
+      exclude: [review_level]         # columns never used as features, whatever `features` says: list every
+                                      #   column that is only known after the decision (it would leak the answer)
       categorical: auto               # columns whose values are not all numbers; a list adds columns to
                                       #   treat as categorical even if numeric (zip codes, plan ids)
+      text: [note]                    # free-text columns: hashed word and character n-gram features (provider.py);
+                                      #   nothing of the text is stored in the bundle
+      text_buckets: 256               # hashed features per text column
       max_categories: 50              # one-hot vocabulary size per categorical column (plus __other__, __missing__)
       hash_categories: false          # true: bundles store salted SHA-256 hashes of categorical values, not the
                                       #   raw values (use it when a categorical column could hold personal data)
@@ -54,7 +60,10 @@ PARQUET_SUFFIXES = (".parquet", ".pq")
 TARGET_KEYS = ("label", "type", "positive", "classes", "levels")
 SPEC_KEYS = ("model", "stakes", "decision", "conformal", "description", "params", "input", "enabled")
 BASE_KEYS = ("data", "id", "group", "time", "segment", "features", "categorical", "max_categories", "targets",
-             "delimiter", "encoding", "na_values", "label_source", "question", "hash_categories")
+             "delimiter", "encoding", "na_values", "label_source", "question", "hash_categories", "exclude", "text",
+             "text_buckets", "time_format")
+DEFAULT_TEXT_BUCKETS = 256
+MIN_TEXT_BUCKETS, MAX_TEXT_BUCKETS = 8, 4096
 # general keys other parts of open-rlcd may put into any pack_config; tolerated, unused here
 TOLERATED_KEYS = ("allow_remote",)
 _INT_FLOAT = re.compile(r"^[+-]?\d+\.0+$")
@@ -116,15 +125,26 @@ def to_float(v: Any, na: frozenset[str]) -> float:
     return f if math.isfinite(f) else math.nan
 
 
-def parse_time(v: Any, na: frozenset[str]) -> int | None:
+def parse_time(v: Any, na: frozenset[str], fmt: str | None = None) -> int | None:
     """Epoch seconds from ISO-8601 text / a datetime, or from epoch seconds (milliseconds are recognised by size).
-    Naive ISO timestamps are read as UTC so a row's time never depends on the machine's time zone."""
+    Naive timestamps are read as UTC so a row's time never depends on the machine's time zone.
+
+    `fmt` (pack_config.time_format): a `strptime` format tried first on text values, so "20250106" with
+    "%Y%m%d" is a date and not an epoch; a value that does not match it is still read as ISO-8601 / epoch
+    seconds (a feedback row's state may carry the time in either notation)."""
     if is_missing(v, na):
         return None
     if isinstance(v, datetime):
         return int((v if v.tzinfo else v.replace(tzinfo=UTC)).timestamp())
     if isinstance(v, date):
         return int(datetime(v.year, v.month, v.day, tzinfo=UTC).timestamp())
+    if fmt and not isinstance(v, bool):
+        try:
+            dt = datetime.strptime(canon(v, na) or "", fmt)
+        except ValueError:
+            pass
+        else:
+            return int((dt if dt.tzinfo else dt.replace(tzinfo=UTC)).timestamp())
     f = to_float(v, na) if not isinstance(v, bool) else math.nan
     if not math.isnan(f):
         return int(f / 1000) if abs(f) > 1e11 else int(f)
@@ -269,8 +289,12 @@ class TabularConfig:
     group: str | None = None
     time: str | None = None
     segment: str | None = None
+    time_format: str | None = None                 # strptime format of the time column (None: ISO-8601 / epoch)
     features: tuple[str, ...] | None = None        # None = auto
+    exclude: tuple[str, ...] = ()                  # never features (known only after the decision, or unwanted)
     categorical: tuple[str, ...] | None = None     # None = auto
+    text: tuple[str, ...] = ()                     # free-text columns -> hashed n-gram features
+    text_buckets: int = DEFAULT_TEXT_BUCKETS       # hashed features per text column
     max_categories: int = 50
     hash_categories: bool = False                  # vocabularies as salted SHA-256 hashes (see provider.py)
     delimiter: str = "auto"
@@ -300,6 +324,16 @@ def _cols(v: Any, key: str) -> tuple[str, ...] | None:
         return None
     if not isinstance(v, list) or not all(isinstance(c, str) and c for c in v):
         raise TabularConfigError(f"pack_config.{key} must be 'auto' or a list of column names")
+    return tuple(v)
+
+
+def _col_list(v: Any, key: str) -> tuple[str, ...]:
+    if v is None:
+        return ()
+    if not isinstance(v, list) or not all(isinstance(c, str) and c for c in v):
+        raise TabularConfigError(f"pack_config.{key} must be a list of column names")
+    if len(set(v)) != len(v):
+        raise TabularConfigError(f"pack_config.{key} lists a column twice: {v}")
     return tuple(v)
 
 
@@ -353,13 +387,77 @@ def parse_config(pc: dict, resolve_path: Any) -> TabularConfig:
     na = pc.get("na_values", list(DEFAULT_NA))
     if not isinstance(na, list):
         raise TabularConfigError("pack_config.na_values must be a list of strings")
+    features = _cols(pc.get("features"), "features")
+    categorical = _cols(pc.get("categorical"), "categorical")
+    exclude = _col_list(pc.get("exclude"), "exclude")
+    text = _col_list(pc.get("text"), "text")
+    both = sorted(set(features or ()) & set(exclude))
+    if both:
+        raise TabularConfigError(f"pack_config.features and pack_config.exclude both list {both}: a column is "
+                                 f"either a feature or excluded")
+    both = sorted(set(text) & set(exclude))
+    if both:
+        raise TabularConfigError(f"pack_config.text and pack_config.exclude both list {both}: a column is either "
+                                 f"a text feature or excluded")
+    both = sorted(set(text) & set(categorical or ()))
+    if both:
+        raise TabularConfigError(f"pack_config.text and pack_config.categorical both list {both}: a column is "
+                                 f"encoded one way")
+    tb = pc.get("text_buckets", DEFAULT_TEXT_BUCKETS)
+    if tb is None:
+        tb = DEFAULT_TEXT_BUCKETS
+    if not isinstance(tb, int) or isinstance(tb, bool) or not MIN_TEXT_BUCKETS <= tb <= MAX_TEXT_BUCKETS:
+        raise TabularConfigError(f"pack_config.text_buckets must be an integer in {MIN_TEXT_BUCKETS}.."
+                                 f"{MAX_TEXT_BUCKETS}, got {tb!r}")
+    tf = pc.get("time_format")
+    if tf is not None:
+        if not isinstance(tf, str) or "%" not in tf:
+            raise TabularConfigError(f"pack_config.time_format must be a strptime format such as "
+                                     f"'%d/%m/%Y %H:%M', got {tf!r}")
+        try:
+            datetime.strptime(datetime(2001, 2, 3, 4, 5, 6, tzinfo=UTC).strftime(tf), tf)
+        except ValueError as e:
+            raise TabularConfigError(f"pack_config.time_format {tf!r} is not a usable strptime format ({e})") from None
+        if not pc.get("time"):
+            raise TabularConfigError("pack_config.time_format is set but pack_config.time (the column) is not")
     return TabularConfig(
         data=Path(resolve_path(data)), id=_col(pc.get("id"), "id"), group=_col(pc.get("group"), "group"),
-        time=_col(pc.get("time"), "time"), segment=_col(pc.get("segment"), "segment"),
-        features=_cols(pc.get("features"), "features"), categorical=_cols(pc.get("categorical"), "categorical"),
+        time=_col(pc.get("time"), "time"), segment=_col(pc.get("segment"), "segment"), time_format=tf,
+        features=features, exclude=exclude, categorical=categorical, text=text, text_buckets=tb,
         max_categories=mc, hash_categories=hc, delimiter=str(pc.get("delimiter") or "auto"),
         encoding=str(pc.get("encoding") or "utf-8-sig"),
         na_values=frozenset(str(x).strip().lower() for x in na), label_source=src, targets=targets)
+
+
+def config_keys() -> dict:
+    """The `pack_config` keys of the tabular pack for `rlcd config check` (core/config_check.py): BASE_KEYS and
+    TOLERATED_KEYS, plus the one-head shorthand (TARGET_KEYS and SPEC_KEYS at the top level, next to `label`).
+    `parse_config` stays the judge of what a combination means; this only names the keys and their types."""
+    from ...core.config_check import Key, head_keys
+
+    head = head_keys()
+    target = {"label": Key("str"), **{k: head[k] for k in (*TARGET_KEYS, *SPEC_KEYS) if k != "label"},
+              "model": Key("str", default="auto", choices=head["model"].choices)}
+    base = {
+        "data": Key("str", nullable=False),
+        "id": Key("str"), "group": Key("str"), "time": Key("str"), "segment": Key("str"),
+        "features": Key("any", default="auto"), "categorical": Key("any", default="auto"),
+        "max_categories": Key("int", default=50, min=1, max=10000, strict=True, nullable=False),
+        "targets": Key("map", each=Key("any", label="head", keys=target)),
+        "delimiter": Key("str", default="auto"),
+        "encoding": Key("str", default="utf-8-sig"),
+        "na_values": Key("list", default=list(DEFAULT_NA), nullable=False),
+        "label_source": Key("str", default="ground_truth", choices=tuple(s for s in SOURCES if s != "feedback")),
+        "question": Key("str", default="outcome"),
+        "hash_categories": Key("bool", default=False),
+        "exclude": Key("list", default=[]),
+        "text": Key("list", default=[]),
+        "text_buckets": Key("int", default=DEFAULT_TEXT_BUCKETS, min=MIN_TEXT_BUCKETS, max=MAX_TEXT_BUCKETS,
+                            strict=True),
+        "time_format": Key("str"),
+        "allow_remote": Key("bool", default=False),
+    }
+    return {**base, **target}
 
 
 def merged_targets(cfg: TabularConfig, overrides: dict) -> dict[str, dict]:
@@ -397,6 +495,7 @@ class Target:
     mapping: dict[str, int]               # choice / score: canonical value -> class index
     spec: dict                            # fields for packs.base.spec_from_yaml
     how: str                              # how type / positive / classes were chosen (shown in the description)
+    notes: tuple[str, ...] = ()           # what the reader should check (goes into the head's dataset notes)
 
     def index(self, raw: Any, na: frozenset[str]) -> int | None:
         """Class index of a label cell; None when missing or not one of the head's classes."""
@@ -457,6 +556,7 @@ def resolve_target(name: str, d: dict, table: Table | None, na: frozenset[str]) 
     classes = [_match(c, values, False, where) for c in d["classes"]] if d.get("classes") else None
     levels = [str(x) for x in d["levels"]] if d.get("levels") else None
     how: list[str] = []
+    notes: list[str] = []
     if qtype is None:
         if classes:
             qtype = "choice"
@@ -487,6 +587,12 @@ def resolve_target(name: str, d: dict, table: Table | None, na: frozenset[str]) 
                            f"set `positive` to change it)")
             else:
                 positive = max(values) if values else None
+                if positive is not None:
+                    other = min(values)
+                    notes.append(f"true means {label} = {positive!r}, false means {label} = {other!r}: rlcd.yaml does "
+                                 f"not say which value is the positive class, so the alphabetically later one "
+                                 f"was taken. If {other!r} is the outcome you ask about, set `positive: {other}` "
+                                 f"for head {name!r}")
                 how.append(f"true means {label} = {positive!r} (chosen by default as the lexicographically larger "
                            f"of {sorted(values)}: set `positive` in rlcd.yaml if that is wrong)")
         if positive is None:
@@ -533,4 +639,4 @@ def resolve_target(name: str, d: dict, table: Table | None, na: frozenset[str]) 
     desc = str(d.get("description") or "").strip()
     spec["description"] = f"{desc} [{detail}]" if desc else detail
     return Target(head=name, label=label, type=qtype, positive=positive, mapping=mapping, spec=spec,
-                  how="; ".join(how))
+                  how="; ".join(how), notes=tuple(notes))

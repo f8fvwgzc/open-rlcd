@@ -9,7 +9,7 @@ Default address `127.0.0.1:8095`. Errors are `{"error": "...", "kind": "...", ..
 
 | status | kind | when |
 |---|---|---|
-| 401 | `unauthorized` | only when `RLCD_API_KEY` is set and the request lacks `Authorization: Bearer <key>` (or `x-api-key`); `/health` is always open |
+| 401 | `unauthorized` | only when `RLCD_API_KEY` is set and the request lacks `Authorization: Bearer <key>` (or `x-api-key`); `/health` and `/ready` are always open |
 | 404 / 405 | `not_found` / `method_not_allowed`, `unknown_job` | unknown route or method; unknown training job |
 | 409 | `busy` | a training job is already running (`job_id` given) |
 | 413 | `too_large` | request body larger than `RLCD_MAX_BODY_BYTES` (default 16 MiB) |
@@ -18,9 +18,10 @@ Default address `127.0.0.1:8095`. Errors are `{"error": "...", "kind": "...", ..
 | 422 | `unknown_model` | lists `available` (`rlcd-latest` + versions) |
 | 422 | `feature_version_mismatch`, `feature_names_mismatch`, `bad_feature_vector` | a precomputed `{x, feature_version}` state that does not fit the trained head |
 | 422 | `encoder_mismatch`, `feature_schema_mismatch` | the configured encoder / feature schema is not the one the bundle was trained with |
-| 422 | `bad_bundle` | a bundle names a pack that is neither the project's pack nor a built-in one (bundles never name code to import) |
+| 422 | `bad_bundle` | a bundle names a pack that is neither the project's pack nor a built-in one (bundles never name code to import); or the served version's stored policy cannot be served (a bundle trained with `policy.abstain: act` before rlcd.yaml was checked): it refuses to decide until it is retrained or rolled back, instead of naming an abstention `act` |
 | 422 | `untrained`, `unknown_decision`, `unsupported` | report of an untrained head, feedback for an unknown `decision_id`, an endpoint the pack does not offer |
 | 503 | `connector_unavailable`, `encoder_unavailable` | the corpus / a vector or graph store cannot be opened or searched; the encoder cannot be loaded (messages never contain paths or DSNs; details are in the server log) |
+| 503 | `not_ready` | `GET /ready` only: no trained model can decide yet (`reasons`); every other route answers as before |
 | 500 | `internal` | the exception type and a generic message; details are in the server log |
 | 422 | `missing_evidence` | a question's `path` / `inputs` does not resolve in the state, or a `strict` request lacks inputs almost every training row had (`missing`, `missing_groups`) |
 | 422 | `criteria_order` | a score question's `criteria` list the head's levels in another order (levels are indexed as the head defines them) |
@@ -149,7 +150,17 @@ questions_digest}` and `rollout: {mode, automation, capped, proposed_action}`; e
 head decision adds `rollout: {mode, automation, cap, capped, proposed_tier?, reason?}` (and `caps` when a
 deterministic rule lowered it); the documents plan adds `contracts`; evaluate adds `next` (`ship`,
 `human_review`, `revise`, `retry_generation`, `escalate_to_human`), `decided_by` (`checks`, `artifact`,
-`citations`, `output_scan`, `revision`, `heads`), `revise` and `revision`. `/health` adds `rollout` and `automation`.
+`citations`, `output_scan`, `revision`, `heads`), `revise` and `revision`. `/health` adds `rollout`, `automation`
+and `ready` (true when a trained model can decide; `status` stays `"ok"` whenever the process is up).
+
+**Liveness and readiness.** `GET /health` is the liveness probe: 200 with `"status": "ok"` whenever the process
+answers, trained or not. `GET /ready` is the readiness probe: 200 `{"status": "ready", "ready": true, "model",
+"reasons": []}` when the served version has at least one trained head, its pack loads and its policy can be
+served; otherwise 503 `{"error", "kind": "not_ready", "retryable": true, "status": "not_ready", "ready": false,
+"model", "reasons": [...]}` with a `Retry-After` header. Neither needs a key, and neither shows a server path
+when a key is set. An untrained service still answers every other route as before (uninformed priors, every
+decision abstains); its 422s for "no heads to decide with" and an unknown head now also say that no model is
+trained and to run `rlcd train`.
 
 New endpoints:
 
@@ -163,6 +174,7 @@ New endpoints:
 | `POST /v1/outcome` | a decision-level outcome `{decision_id, task_success?, route_taken?, provider?, fallback?, latency_ms?, cost?, tokens?, retries: {transport, workflow}?, verified_by?, note?, tags?}`; joined by the metrics, never trains |
 | `GET /v1/metrics?since=&until=&model=&kind=&head=` | the operations report: action mix (automatic action, review, abstention), rollout caps, review load against `serve.review_capacity_per_day`, per head the tier / class mix, entropy, uncertainty sources and — joined with feedback — accuracy, false automation, false rejection, review agreement and online reliability next to the holdout (`vs_holdout`, `drift_suspected`), binding links, plan and verdict distributions, outcomes (task success, routes, fallbacks, cost, latency, transport vs workflow retries), latency percentiles, notes on what the numbers can and cannot say. `since` inclusive, `until` exclusive (ISO 8601) |
 | `GET /v1/review?limit=1..1000&head=&kind=&include_abstain=&oldest_first=` | confirm and abstain decisions without feedback, oldest first, with what a reviewer needs (heads, uncertainty, state, warnings, why) |
+| `GET /ready` | readiness (above): 200 when a trained model can decide, 503 `not_ready` with `reasons` until then; no key |
 | `GET /v1/check?model=` | the pre-launch checklist `{ok, model, checks: [{id, status, title, detail}], counts}`; `ok` is false only when a check fails (ids in `core/checklist.py`) |
 
 `POST /v1/feedback` with `tags: ["regression"]` also adds a regression case (`regression_case: {id, stored: true}`

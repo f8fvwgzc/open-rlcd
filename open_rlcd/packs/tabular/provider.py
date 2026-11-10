@@ -8,11 +8,22 @@
                            vocabulary, including one never seen in training) and `<col>=__missing__` (null /
                            NA). A value that differs from a vocabulary entry only in letter case maps to it
                            when that is unambiguous.
+    text column         -> `text_buckets` features `text:<col>#<i>` (pack_config.text): the signed feature hashing of
+                           `open_rlcd.features.text.HashingEncoder` (word unigrams and character 2-4 grams within
+                           words after NFKC + casefold, log1p-dampened counts, L2-normalised; blake2b, so the same
+                           text gives the same row in every process and on every machine). Stateless: no
+                           vocabulary is learned or stored, so nothing of the training text travels in a bundle,
+                           and because the signal is in character n-grams it does not depend on spaces between
+                           words (English, Japanese, Mongolian). A missing text is the zero vector. What it is not:
+                           it matches shared words and character runs, not meaning, and 256 buckets collide, so
+                           a single bucket in `reasons` stands for several n-grams.
 
 The schema (column order, kinds, vocabularies, NA tokens) is the whole state of the provider. It lives in
 `to_config()`, which the bundle stores, so a served model rebuilds exactly the transform it was trained with;
 `feature_version` is "tabular-v1:" + the first 12 hex characters of the schema's SHA-256, so a request with
-precomputed features of another schema is refused with a 422.
+precomputed features of another schema is refused with a 422. A text column is part of the schema (its bucket
+count and the encoder's own config), so a model trained without it has another feature_version than one trained
+with it; schemas without text columns hash exactly as they did before text columns existed.
 
 Hashed vocabularies (`pack_config.hash_categories: true`): each vocabulary entry is stored as
 "h:" + the first 16 hex characters of SHA-256(salt, 0x1f, value), plus the same hash of its lower-cased form for
@@ -45,13 +56,17 @@ from typing import Any
 import numpy as np
 
 from ...core.contract import ContractError
-from .data import Table, TabularConfig, TabularConfigError, canon, to_float
+from ...features.text import HashingEncoder
+from .data import DEFAULT_TEXT_BUCKETS, Table, TabularConfig, TabularConfigError, canon, to_float
 
 VIEW = "row"
 KIND = "tabular"
 SCHEMA_VERSION = 1
 OTHER, MISSING = "__other__", "__missing__"
 ID_LIKE_MIN_ROWS = 100
+LONG_STRING_CHARS = 12        # median length from which mostly-unique categorical values read as free text / ids
+RARE_OTHER_SHARE = 0.05       # an unseen category is worth a warning when __other__ was this rare in training
+TEXT_PREFIX = "text:"
 _SALT = re.compile(r"[0-9a-f]{32}")
 
 
@@ -68,15 +83,18 @@ def category_hash(salt: str, value: str) -> str:
 @dataclass(frozen=True)
 class Column:
     name: str
-    kind: str                             # numeric | categorical
+    kind: str                             # numeric | categorical | text
     vocabulary: tuple[str, ...] = ()      # categorical: the most frequent values sorted by value (raw), or their
     #                                       salted hashes sorted by hash (hashed)
     hashed: bool = False                  # vocabulary holds category_hash(salt, value), not values
     folded: tuple[str, ...] = ()          # hashed: category_hash(salt, value.lower()) per vocabulary entry
+    buckets: int = 0                      # text: number of hashed features
 
     def features(self) -> list[str]:
         if self.kind == "numeric":
             return [self.name]
+        if self.kind == "text":
+            return [f"{TEXT_PREFIX}{self.name}#{i}" for i in range(self.buckets)]
         return [f"{self.name}={v}" for v in (*self.vocabulary, OTHER, MISSING)]
 
     def to_dict(self) -> dict:
@@ -86,7 +104,35 @@ class Column:
             if self.hashed:          # raw columns keep their old dict, so old bundles keep their feature_version
                 d["hashed"] = True
                 d["vocabulary_folded"] = list(self.folded)
+        if self.kind == "text":      # the encoder's config is in the schema: another hashing is another version
+            d["buckets"] = self.buckets
+            d["encoder"] = text_encoder(self.buckets).config()
         return d
+
+
+def text_encoder(buckets: int) -> HashingEncoder:
+    """The stateless encoder of a text column: HashingEncoder with `buckets` dimensions and the fixed seed 0."""
+    return HashingEncoder(dim=int(buckets), seed=0)
+
+
+def _text(v: Any, na: frozenset[str]) -> str:
+    """A text cell as the string that is hashed; "" (the zero vector) when missing."""
+    if isinstance(v, (list, tuple)):
+        v = " ".join(str(x) for x in v if x is not None)
+    return canon(v, na) or ""
+
+
+def _long_strings(present: list[str], max_categories: int) -> tuple[int, int] | None:
+    """(distinct, median length) when a column's non-missing values are mostly unique long strings: at least
+    ID_LIKE_MIN_ROWS values, more distinct ones than the vocabulary holds, at least half of them distinct, and
+    a median length of LONG_STRING_CHARS or more. None otherwise (short codes and real categories)."""
+    if len(present) < ID_LIKE_MIN_ROWS:
+        return None
+    distinct = len(set(present))
+    if distinct <= max_categories or distinct < 0.5 * len(present):
+        return None
+    med = int(np.median([len(v) for v in present]))
+    return (distinct, med) if med >= LONG_STRING_CHARS else None
 
 
 def _numeric(values: list[Any], na: frozenset[str]) -> bool:
@@ -128,6 +174,7 @@ class TabularProvider:
         self._groups = {f: c.name for c in self.columns for f in c.features()}
         # per column: (offset of its first feature, kind, value -> position within its block)
         self._layout: list[tuple[Column, int, dict[str, int], dict[str, int]]] = []
+        self._encoders = {c.name: text_encoder(c.buckets) for c in self.columns if c.kind == "text"}
         off = 0
         for c in self.columns:
             pos = {v: i for i, v in enumerate(c.vocabulary)}
@@ -152,17 +199,27 @@ class TabularProvider:
         reserved = set(exclude) | set(cfg.meta_columns)
         notes: list[str] = []
         table.require(cfg.meta_columns, "pack_config id / group / time / segment")
+        # a misspelt column under `exclude` would silently stay a feature: it must exist
+        table.require(list(cfg.exclude), "pack_config.exclude")
+        table.require(list(cfg.text), "pack_config.text")
+        clash = sorted(set(cfg.text) & reserved)
+        if clash:
+            raise TabularConfigError(f"pack_config.text lists {clash}, which are label / id / group / time / segment "
+                                     f"columns")
         if cfg.features is not None:
             table.require(list(cfg.features), "pack_config.features")
             clash = sorted(set(cfg.features) & reserved)
             if clash:
                 raise TabularConfigError(f"pack_config.features lists {clash}, which are label / id / group / time / "
                                          f"segment columns: a label used as a feature leaks the answer")
-            feats = list(cfg.features)
+            clash = sorted(set(cfg.features) & set(cfg.exclude))
+            if clash:
+                raise TabularConfigError(f"pack_config.features and pack_config.exclude both list {clash}")
+            feats = [c for c in cfg.features if c not in cfg.text]
         else:
             feats = []
             for c in table.columns:
-                if c in reserved:
+                if c in reserved or c in cfg.exclude or c in cfg.text:
                     continue
                 vals = [canon(v, na) for v in table.data[c]]
                 present = [v for v in vals if v is not None]
@@ -171,11 +228,13 @@ class TabularProvider:
                     continue
                 distinct = len(set(present))
                 numeric = c not in (cfg.categorical or ()) and _numeric(table.data[c], na)
-                if (not numeric and len(present) >= ID_LIKE_MIN_ROWS and distinct > cfg.max_categories
-                        and distinct >= 0.9 * len(present)):
+                # (a column the config lists under `categorical` was asked for: it stays, with the note below)
+                if (not numeric and c not in (cfg.categorical or ()) and len(present) >= ID_LIKE_MIN_ROWS
+                        and distinct > cfg.max_categories and distinct >= 0.9 * len(present)):
                     notes.append(f"column {c!r} looks like an identifier or free text ({distinct} distinct values in "
-                                 f"{len(present)} rows): left out of the auto features; list it under "
-                                 f"pack_config.features to use it anyway")
+                                 f"{len(present)} rows): left out of the auto features. Free text belongs under "
+                                 f"pack_config.text (hashed n-gram features), not under pack_config.features "
+                                 f"(that one-hot encodes whole strings)")
                     continue
                 feats.append(c)
         if cfg.categorical is not None:
@@ -184,6 +243,7 @@ class TabularProvider:
             if stray:
                 raise TabularConfigError(f"pack_config.categorical lists {stray}, which are not feature columns")
         columns = []
+        other_rows: dict[str, int] = {}     # per categorical column: training rows encoded as __other__
         for c in feats:
             # a listed column is categorical even when its values are numbers (zip codes, plan ids); a column
             # whose values are not all numbers is categorical either way (as a number it would be all NaN)
@@ -194,13 +254,25 @@ class TabularProvider:
                 if bad:
                     notes.append(f"numeric column {c!r}: {bad} values are not numbers and are read as missing")
                 continue
-            counts = Counter(v for v in (canon(x, na) for x in table.data[c]) if v is not None)
+            present = [v for v in (canon(x, na) for x in table.data[c]) if v is not None]
+            counts = Counter(present)
             ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
             vocab = tuple(sorted(v for v, _ in ranked[:cfg.max_categories]))
+            rare = sum(n for _, n in ranked[cfg.max_categories:])
+            other_rows[c] = rare
             if len(ranked) > cfg.max_categories:
-                rare = sum(n for _, n in ranked[cfg.max_categories:])
                 notes.append(f"categorical column {c!r}: {len(ranked)} distinct values; the {cfg.max_categories} most "
                              f"frequent are one-hot encoded, {rare} rows of rarer values go to {OTHER}")
+            long = _long_strings(present, cfg.max_categories)
+            if long is not None:
+                stored = ("Its values are stored only as salted hashes (hash_categories: true)" if cfg.hash_categories
+                          else f"With hash_categories: false its {len(vocab)} most frequent values are stored word "
+                               f"for word in every bundle, readable by anyone who gets the bundle")
+                notes.append(f"categorical column {c!r} holds mostly unique long strings ({long[0]} distinct values "
+                             f"in {len(present)} rows, typical length {long[1]}): use pack_config.text (hashed "
+                             f"n-gram features, nothing of the text is stored) if it is free text, or "
+                             f"pack_config.exclude; one-hot encoding whole strings carries almost no signal. "
+                             f"{stored}")
             if cfg.hash_categories:
                 pairs = sorted((category_hash(salt, v), category_hash(salt, v.lower())) for v in vocab)
                 columns.append(Column(c, "categorical", tuple(h for h, _ in pairs), hashed=True,
@@ -215,7 +287,16 @@ class TabularProvider:
         elif cats:
             notes.append(f"categorical columns {cats}: their most frequent raw values are stored in every bundle; set "
                          f"pack_config.hash_categories: true to store salted hashes instead")
-        source = {"file": table.path.name, "rows": table.n, "learned_from": "every row of the file (no labels)"}
+        for c in cfg.text:
+            columns.append(Column(c, "text", buckets=cfg.text_buckets))
+            empty = sum(1 for v in table.data[c] if not _text(v, na))
+            if empty == table.n:
+                notes.append(f"text column {c!r} is empty in every row: its features are all zero")
+        if cfg.text:
+            notes.append(f"text columns {list(cfg.text)}: {cfg.text_buckets} hashed word / character n-gram features "
+                         f"each; no vocabulary is stored, so no text from the file is in the bundle")
+        source = {"file": table.path.name, "rows": table.n, "learned_from": "every row of the file (no labels)",
+                  "other_rows": other_rows}
         return cls(columns, na, source, notes, salt=salt if cfg.hash_categories else None)
 
     @classmethod
@@ -230,6 +311,18 @@ class TabularProvider:
                                      f"supported (this build reads {SCHEMA_VERSION})")
         cols = []
         for d in config.get("columns") or []:
+            if d.get("kind") == "text":
+                buckets = d.get("buckets", DEFAULT_TEXT_BUCKETS)
+                if not isinstance(buckets, int) or isinstance(buckets, bool) or buckets < 8:
+                    raise TabularConfigError(f"text column {d.get('name')!r}: bad bucket count {buckets!r}")
+                have = text_encoder(buckets).config()
+                if d.get("encoder") != have:
+                    raise TabularConfigError(
+                        f"text column {d.get('name')!r} was hashed with encoder {d.get('encoder')!r}; this build "
+                        f"hashes with {have!r}, which gives other features: retrain, or use the open-rlcd version "
+                        f"the bundle was trained with")
+                cols.append(Column(str(d["name"]), "text", buckets=buckets))
+                continue
             if d.get("kind") not in ("numeric", "categorical"):
                 raise TabularConfigError(f"column {d.get('name')!r}: unknown kind {d.get('kind')!r}")
             hashed = d.get("kind") == "categorical" and d.get("hashed") is True
@@ -269,6 +362,8 @@ class TabularProvider:
                             "categorical_columns": {c.name: len(c.vocabulary) for c in self.columns
                                                     if c.kind == "categorical"},
                             "categorical_values": "salted sha256 hashes" if self.hashed else "raw values",
+                            **({"text_columns": {c.name: c.buckets for c in self.columns if c.kind == "text"}}
+                               if self._encoders else {}),
                             "features": len(self._names), "notes": self.notes}}
 
     # ------------------------------------------------------------------ FeatureProvider protocol
@@ -293,6 +388,9 @@ class TabularProvider:
         for c in self.columns:
             if c.kind == "numeric":
                 cols[c.name] = {"type": "number", "missing": "null"}
+            elif c.kind == "text":
+                cols[c.name] = {"type": "text", "features": c.buckets, "missing": "null (all features zero)",
+                                "encoding": "hashed word and character n-grams; no vocabulary is stored"}
             elif c.hashed:   # the values are not in the bundle: nothing to list
                 cols[c.name] = {"type": "category", "categories": [], "more_categories": len(c.vocabulary),
                                 "hashed": True, "unseen": f"encoded as {OTHER}",
@@ -313,6 +411,7 @@ class TabularProvider:
         na = self.na_values
         X = np.zeros((len(states), len(self._names)), np.float32)
         memo: dict[tuple[str, str], int] = {}     # hashed columns: (column, value) -> position, per call
+        texts: dict[str, list[str]] = {name: [] for name in self._encoders}
         for r, s in enumerate(states):
             if not isinstance(s, dict):
                 raise ContractError("tabular heads need state = an object {column: value} (one table row)",
@@ -325,6 +424,9 @@ class TabularProvider:
                 v = s[col.name]
                 if col.kind == "numeric":
                     X[r, off] = to_float(v, na)
+                    continue
+                if col.kind == "text":
+                    texts[col.name].append(_text(v, na))
                     continue
                 key = canon(v, na)
                 if key is None:
@@ -345,4 +447,65 @@ class TabularProvider:
                     if j < 0:
                         j = len(col.vocabulary)
                 X[r, off + j] = 1.0
+        for col, off, _pos, _lower in self._layout:
+            if col.kind == "text" and states:
+                X[:, off:off + col.buckets] = self._encoders[col.name].encode(texts[col.name])
         return X
+
+    def input_warnings(self, view: str, states: list[Any]) -> list[str]:
+        """What a caller should know about how `states` were read, beyond what the feature rows show: a value in
+        a numeric column that is not a number (it is read as missing, like null), and a categorical value the
+        training vocabulary does not hold (it is encoded as __other__) when __other__ was rare or absent in
+        training, so the model has little or no evidence about it. One message per column; never an error, and
+        states `transform` would refuse are skipped. Values of hashed columns are not repeated in the message."""
+        self._view(view)
+        na = self.na_values
+        rows = (self.source or {}).get("rows")
+        seen_other = (self.source or {}).get("other_rows")
+        out: list[str] = []
+        for col, _off, pos, lower in self._layout:
+            if col.kind == "text":
+                continue
+            bad: list[str] = []
+            for s in states:
+                if not isinstance(s, dict) or col.name not in s:
+                    continue
+                v = s[col.name]
+                key = canon(v, na)
+                if key is None:
+                    continue
+                if col.kind == "numeric":
+                    if isinstance(v, bool) or not np.isnan(to_float(v, na)):
+                        continue
+                    try:
+                        nonfinite = not np.isfinite(float(str(v).strip()))   # inf / 1e999: a number, but unusable
+                    except ValueError:
+                        nonfinite = False
+                    bad.append("a non-finite number" if nonfinite else repr(key[:40]))
+                elif col.hashed:
+                    if (category_hash(self.salt, key) not in pos
+                            and lower.get(category_hash(self.salt, key.lower()), -1) < 0):
+                        bad.append("(not shown: hashed column)")
+                elif key not in pos and lower.get(key.lower(), -1) < 0:
+                    bad.append(repr(key[:40]))
+            if not bad:
+                continue
+            shown = ", ".join(dict.fromkeys(bad[:3]))
+            if col.kind == "numeric":
+                out.append(f"column {col.name!r}: {shown} is not a number, so the value was read as missing (the "
+                           f"same as null). Send a JSON number or a numeric string")
+                continue
+            n_other = seen_other.get(col.name) if isinstance(seen_other, dict) else None
+            if n_other is None:
+                how = f"it is encoded as {OTHER}"
+            elif not n_other:
+                how = (f"it is encoded as {OTHER}, which no training row had: the model has no evidence about it "
+                       f"and answers as if the column said nothing")
+            elif rows and n_other / rows < RARE_OTHER_SHARE:
+                how = (f"it is encoded as {OTHER}, like only {n_other} of the {rows} training rows: the model has "
+                       f"little evidence about it")
+            else:
+                continue      # __other__ is an ordinary, well-represented value of this column
+            out.append(f"column {col.name!r}: value {shown} was not among the {len(col.vocabulary)} values seen in "
+                       f"training; {how}. Check the spelling, or retrain once rows with it have outcomes")
+        return out

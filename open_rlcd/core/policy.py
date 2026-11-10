@@ -81,6 +81,9 @@ class PolicyConfig:
     overrides: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        problem = abstain_problem(self.abstain)
+        if problem:     # fail closed: a policy whose abstentions read as act / confirm is never served
+            raise ValueError(problem)
         self.overrides = _check_overrides(self.overrides, self.stakes)
 
     def level(self, stakes: str | None, default: str = "medium") -> StakesLevel:
@@ -121,6 +124,18 @@ class PolicyConfig:
 
     def tier_name(self, tier: int) -> str:
         return self.abstain if tier == 0 else TIERS[tier]
+
+
+def abstain_problem(name: Any) -> str | None:
+    """Why `name` cannot be the abstaining action (`policy.abstain`), or None. It names tier 0 in every response, so
+    a caller that reads `act` or `confirm` there would act on (or queue for confirmation) exactly the decisions
+    the model refused to vouch for."""
+    if not isinstance(name, str) or not name.strip():
+        return f"policy.abstain must name the abstaining action (escalate, hold, ...), got {name!r}"
+    if name in TIERS[1:]:
+        return (f"policy.abstain cannot be {name!r}: every abstention would be served as {name!r}, so a caller would "
+                f"read \"the model cannot vouch for this\" as {name!r}")
+    return None
 
 
 _LEVEL_KEYS = {"act", "confirm", "min_accuracy"}

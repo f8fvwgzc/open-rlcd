@@ -29,8 +29,16 @@ curl -s localhost:8095/v1/systemone -H 'content-type: application/json' -d '{
                 "multi_hop": {"type": "noul", "head": "needs_graph"}}}'
 ```
 
-Teammates: **[docs/teammate-quickstart.md](docs/teammate-quickstart.md)** takes you from zero to a calibrated
-model on your own documents in one page.
+Start here:
+
+| you have | read |
+|---|---|
+| a folder of documents and questions people ask about them | [docs/teammate-quickstart.md](docs/teammate-quickstart.md) |
+| a table of past cases with an outcome column (churn, fraud, approvals, leads) | [docs/tabular-quickstart.md](docs/tabular-quickstart.md) |
+| another kind of decision (ticket triage, text → category, …) | [docs/writing-a-pack.md](docs/writing-a-pack.md) and [examples/custom-pack](examples/custom-pack) |
+| a company to roll it out in: who labels, who sets thresholds, personal data, rollout criteria | [docs/adoption.md](docs/adoption.md) |
+| a server to run it on: Docker, HTTPS, backups, upgrades, monitoring | [docs/deployment.md](docs/deployment.md) |
+| an `rlcd.yaml` to write | [docs/configuration.md](docs/configuration.md) — every key; `rlcd config check` validates the file |
 
 ## What it promises — and how it checks
 
@@ -112,18 +120,22 @@ entropy, source agreement, freshness, authority, graph path length and degree). 
 LightGBM on top: they train in seconds to minutes. Never fine-tunes a transformer by default.
 
 Other packs: **tabular** (CSV / Parquet: churn, fraud, lead scoring, approvals; categorical values travel with
-the model — set `hash_categories: true` for columns that could hold personal data). A thin **trading** adapter to the
-View Engine quant sidecar follows as a separate pull request. Writing your own:
-[docs/writing-a-pack.md](docs/writing-a-pack.md).
+the model — set `hash_categories: true` for columns that could hold personal data; free-text columns go under
+`text:` and are hashed, so no text is stored in the bundle; columns only known after the decision go under
+`exclude:`). A thin **trading** adapter to the View Engine quant sidecar follows as a separate pull request.
+Writing your own: [docs/writing-a-pack.md](docs/writing-a-pack.md), with a complete ticket-triage pack in
+[examples/custom-pack](examples/custom-pack).
 
 ## Train on your own data
 
 ```bash
 uv sync --extra documents --extra labeling
 uv run rlcd init my-business --pack documents && cd my-business
+uv run rlcd config check                           # after every edit of rlcd.yaml: typos and bad values, by key
 uv run rlcd ingest ./data                          # your folder of .md / .txt / .html / .pdf / .json
 # write queries.jsonl: real questions people ask, one {"query": ..., "time": ..., "group": ...} per line
-uv run rlcd label bootstrap --judge claude-cli     # or: anthropic | ollama:<model> | openai:<url>|<model>
+export RLCD_ALLOW_REMOTE=1                         # only for claude-cli / anthropic: they send item text to Anthropic
+uv run rlcd label bootstrap --judge claude-cli     # or: anthropic | ollama:<model> (stays local) | openai:<url>|<model>
 uv run rlcd label audit --heads answerable,grounded --n 600   # your labels: these calibrate the model
 uv run rlcd train                                  # all heads; prints the calibration summary
 uv run rlcd report                                 # MODEL_CARD.md + an HTML reliability page
@@ -140,6 +152,11 @@ that gate actions first.
 
 Production outcomes posted to `/v1/feedback` update the Beta-Bernoulli posteriors at once and become
 up-weighted training rows at the next train. That is the whole "reinforcement" — described as modestly as it is.
+
+A holdout verdict of `act` is permission, not a promise: a live decision acts only where the evidence for
+predictions like it (holdout rows plus posted outcomes) is strong enough, and is `confirm` until then.
+`rlcd train` and `rlcd check` print, per head, which probability bands already act and how many correct
+outcomes the others still need.
 
 ## What the synthetic demo shows (and doesn't)
 
@@ -184,7 +201,7 @@ vector database and index settings — measure it with your own store.
 
 `POST /v1/systemone` (System One-compatible: a View Engine RLCD client works unchanged), `/v1/rank`,
 `/v1/decide`, `/v1/evaluate`, `/v1/feedback`, `/v1/outcome`, `/v1/train` (+ `GET /v1/train/{job}`),
-`/v1/receipts/{id}/check`, `/v1/automation`; `GET /health`, `/v1/models`, `/v1/heads`, `/v1/batteries`,
+`/v1/receipts/{id}/check`, `/v1/automation`; `GET /health`, `/ready`, `/v1/models`, `/v1/heads`, `/v1/batteries`,
 `/v1/calibration`, `/v1/bernoulli`, `/v1/receipts/{id}`, `/v1/metrics`, `/v1/review`. Full contract and the
 extensions table: [docs/contract.md](docs/contract.md).
 
@@ -198,12 +215,27 @@ stay on your machine unless you choose to `rlcd export` or `rlcd push --hf` them
 
 ## Security
 
-`RLCD_API_KEY` protects every route but `/health`; with `RLCD_ADMIN_KEY` set, training, the kill switch and
-confirming a decision need that key instead (without it, a decision caller can confirm its own confirm decisions).
-Bundles load only from `RLCD_HOME` and contain no code. Logged states, notes and reasons are redacted of secrets
-(`serve.redact`), and `rlcd receipts prune` drops old states while keeping the receipt chain verifiable.
-Connectors and LLM judges refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or
-`RLCD_ALLOW_REMOTE=1`). Secrets come from environment variables only.
+`RLCD_API_KEY` protects every route but `/health` and `/ready`; with `RLCD_ADMIN_KEY` set, training, the kill
+switch and confirming a decision need that key instead (without it, a decision caller can confirm its own
+confirm decisions). `rlcd serve` refuses to listen on a non-loopback address without `RLCD_API_KEY`.
+Bundles load only from `RLCD_HOME` and contain no code. Logged states, notes and reasons are redacted of
+secrets (`serve.redact`), and `rlcd receipts prune` drops old states while keeping the receipt chain
+verifiable. Connectors and judges
+refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1`). That
+includes the `claude-cli` and `anthropic` judges, which send the text of the items being labelled to Anthropic:
+`rlcd label bootstrap` refuses them until you opt in. Choose a local judge (`ollama:<model>`) for data that must
+not leave your machines. Secrets come from environment variables only.
+
+## Run it on a server
+
+```bash
+docker build -t open-rlcd .
+RLCD_API_KEY=... RLCD_ADMIN_KEY=... docker compose up -d      # HTTPS through Caddy; the API port is not published
+```
+
+One serving process per `RLCD_HOME`; the server and the admin commands (`rlcd import`, `promote`, `rollback`,
+`train`) can share a home safely. [docs/deployment.md](docs/deployment.md) covers storage, backup and restore,
+moving a model from a laptop to the server, upgrades and monitoring.
 
 ## Examples
 
@@ -211,6 +243,8 @@ Connectors and LLM judges refuse non-loopback hosts unless you allow them (`secu
   (optionally retrieve from your own folder of documents).
 * [examples/tabular](examples/tabular): the UCI Bank Marketing dataset (CC BY 4.0, downloaded at run time),
   trained and reported.
+* [examples/custom-pack](examples/custom-pack): a pack of your own in about 110 lines — support-ticket triage
+  (text → queue, urgent yes/no) in English, Japanese and Mongolian, trained, served and exported.
 * [examples/control-layer](examples/control-layer/run.py): one request through the whole control layer, offline,
   with the demo bundle, the Python client and a stand-in LLM (`uv run python examples/control-layer/run.py`).
 

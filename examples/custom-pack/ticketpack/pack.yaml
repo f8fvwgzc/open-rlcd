@@ -1,0 +1,22 @@
+# The questions of the ticket-triage pack. rlcd.yaml `heads:` overrides any field per head.
+heads:
+  queue:
+    type: choice
+    view: ticket
+    classes: [billing, technical, account, shipping, other]
+    levels:                          # what each option means, in class order (shown as the head's legend)
+      - a charge, an invoice, a refund or a payment method
+      - the product does not work - errors, crashes, slowness
+      - sign-in, password, profile or access to the account
+      - delivery of an order - late, lost, damaged, wrong address
+      - anything else - opening hours, partnerships, thanks
+    stakes: low
+    description: Which queue should handle this support ticket?
+  urgent:
+    type: noul
+    view: ticket
+    positive: the customer is blocked or losing money now and asks for an answer today
+    stakes: medium
+    description: Does this ticket need an answer today?
+policy:
+  abstain: escalate                  # the abstaining action: a person triages the ticket

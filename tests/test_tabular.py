@@ -177,6 +177,34 @@ def test_feedback_rows_join_the_next_train(tmp_path):
     assert h["data"]["holdout_rows"] <= h["data"]["by_source"]["ground_truth"]     # feedback is never scored
 
 
+def test_a_decisions_outcome_counts_once(tmp_path):
+    """Two POSTs of an outcome for one decision_id (a retry, or a correction) are one training row: the later
+    one. As in packs.base.dataset_from_labels and the Bernoulli ledger."""
+    csv = tmp_path / "churn.csv"
+    write_synthetic_csv(csv, n=1500, seed=4)
+    project, svc = make(tmp_path, csv)
+    train(svc, heads=["churned"])
+    rows, _ = generate(3, seed=22)
+    d = svc.generic_decide(DecideRequest(state=features(rows[0]), heads=["churned"]))
+    svc.feedback(FeedbackRequest(decision_id=d["decision_id"], label="yes", source="crm"))
+    svc.feedback(FeedbackRequest(decision_id=d["decision_id"], label="yes", source="crm"))     # the retry
+    e = svc.generic_decide(DecideRequest(state=features(rows[1]), heads=["churned"]))
+    svc.feedback(FeedbackRequest(decision_id=e["decision_id"], label="yes", source="crm"))
+    svc.feedback(FeedbackRequest(decision_id=e["decision_id"], label="no", source="crm"))      # the correction
+    # outcomes without a decision_id are separate cases, even with identical states
+    for _ in range(2):
+        svc.feedback(FeedbackRequest(head="churned", state=features(rows[2]), label="no", source="crm"))
+    pack, prov = svc.pack, svc.pack.provider(project)
+    ds = pack.datasets(project, prov, ["churned"], feedback=svc.logs.feedback())["churned"]
+    fb = ds.source == "feedback"
+    assert int(fb.sum()) == 4
+    assert sorted(ds.y[fb].tolist()) == [0, 0, 0, 1]            # the correction ("no") replaced the first "yes"
+    assert any("2 feedback rows replaced by a later outcome posted for the same decision_id" in n
+               for n in ds.notes)
+    h = train(svc, heads=["churned"])["heads"]["churned"]
+    assert h["data"]["by_source"]["feedback"] == 4
+
+
 def test_noise_has_no_skill_and_holds(tmp_path):
     csv = tmp_path / "noise.csv"
     # labels independent of the features. Seed 3: see the note on the core skill test's false-positive rate in

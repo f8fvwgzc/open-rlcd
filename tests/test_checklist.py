@@ -89,7 +89,7 @@ def test_an_untrained_service_fails_on_its_heads_and_still_runs_every_check(tmp_
         assert set(x) == {"id", "status", "title", "detail"} and x["status"] in CL.STATUSES and x["title"]
         assert x["detail"]
     assert set(res["counts"]) == set(CL.STATUSES) and sum(res["counts"].values()) == len(res["checks"])
-    assert {"heads.trained", "thresholds.holdout", "thresholds.config", *CONTRACT_CHECKS, "inputs.required",
+    assert {"config.valid", "heads.trained", "thresholds.holdout", "thresholds.config", *CONTRACT_CHECKS, "inputs.required",
             "deterministic.first", "routes.contracts", "security.api_key", "security.allow_remote",
             "security.admin_key", "secrets.redact", "secrets.log_states", "receipts.chain", "receipts.mode",
             "model.bundle", "rollback.ready", "rollout.mode", "automation.switch", "batteries.bound",

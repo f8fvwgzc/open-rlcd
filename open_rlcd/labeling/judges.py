@@ -12,7 +12,8 @@ early rather than failing the same way on every batch; it resumes where it stopp
 
 Security: HTTP judges refuse non-loopback hosts unless remote hosts are allowed (allow_remote=True,
 RLCD_ALLOW_REMOTE=1, or security.allow_remote / pack_config.allow_remote in rlcd.yaml), never follow redirects,
-and read secrets only from environment variables. The CLI judge runs without a shell (the prompt goes to stdin),
+and read secrets only from environment variables. make_judge refuses claude-cli and anthropic under the same
+setting: both send item texts to Anthropic. The CLI judge runs without a shell (the prompt goes to stdin),
 with every Claude Code tool and MCP server disabled, in an empty temporary directory (see ClaudeCliJudge). The
 prompt tells every judge that item text is untrusted data, never an instruction, and neutralises the prompt's
 own tags inside it (prompts.quote).
@@ -471,12 +472,16 @@ class ScriptedJudge:
 
 JUDGE_FORMS = ("claude-cli", "claude-cli:<model>", "anthropic", "anthropic:<model>", "ollama:<model>",
                "openai:<base_url>|<model>")
+# judges whose host is fixed and not this machine: make_judge refuses them unless remote hosts are allowed
+HOSTED_JUDGES = {"claude-cli": "Anthropic (through Claude Code)", "anthropic": "the Anthropic API"}
 
 
 def make_judge(spec: str | None = None, project: Any = None, transport: Any = None) -> Judge:
     """A judge from a spec string (see JUDGE_FORMS). With no spec, `labeling.judge` / `labeling.model` from
     rlcd.yaml (default claude-cli). `labeling.base_url` sets the Ollama URL and `labeling.timeout` the timeout.
-    Remote hosts are allowed by RLCD_ALLOW_REMOTE=1, security.allow_remote or pack_config.allow_remote."""
+    Remote hosts are allowed by RLCD_ALLOW_REMOTE=1, security.allow_remote or pack_config.allow_remote; without
+    that, claude-cli and anthropic (HOSTED_JUDGES) are refused like any other non-loopback host. The gate is here,
+    not in the classes: constructing ClaudeCliJudge / AnthropicJudge yourself is already an explicit choice."""
     lab: dict = project.section("labeling") if project is not None and hasattr(project, "section") else {}
     from_config = not spec
     text = str(spec or lab.get("judge") or "claude-cli").strip()
@@ -486,6 +491,11 @@ def make_judge(spec: str | None = None, project: Any = None, transport: Any = No
         arg = str(lab["model"])
     timeout = float(lab.get("timeout") or DEFAULT_TIMEOUT)
     allow = _allow_remote(project)
+    if kind in HOSTED_JUDGES and not allow:
+        raise JudgeError(f"refusing the {kind} judge: it sends the text of every item it labels to "
+                         f"{HOSTED_JUDGES[kind]}. Allow it explicitly with RLCD_ALLOW_REMOTE=1 or "
+                         f"`security: {{allow_remote: true}}` in rlcd.yaml, or keep the data on this machine with "
+                         f"--judge ollama:<model>")
     if kind == "claude-cli":
         return ClaudeCliJudge(model=arg or None, executable=str(lab.get("executable") or "claude"), timeout=timeout)
     if kind == "anthropic":

@@ -1,6 +1,8 @@
 """`rlcd` — the command teammates use.
 
     rlcd init my-business --pack documents     write my-business/rlcd.yaml (packs: documents, tabular)
+    rlcd config check [--json]                 rlcd.yaml checked key by key (exit 1 on an error); docs/configuration.md
+    rlcd config show [--json]                  what the project resolves to: home, pack, heads, thresholds, rollout
     rlcd ingest ./data                         build the local corpus (documents pack; tabular has no ingest step)
     rlcd label bootstrap --judge claude-cli    weak labels from an LLM judge (documents: needs queries.jsonl)
     rlcd label audit --heads answerable        human review in the terminal (~150+ trusted rows per head)
@@ -28,8 +30,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,16 +54,53 @@ TEMPLATES: dict[str, dict] = {
     },
     "tabular": {
         "pack_config": {"data": "./data.csv", "label": "outcome", "id": None, "group": None, "time": None,
-                        "features": "auto", "categorical": "auto", "hash_categories": False},
+                        "features": "auto", "exclude": [], "text": [], "categorical": "auto",
+                        "hash_categories": False},
         "policy": {"abstain": "hold"},
     },
 }
 # `rlcd init` offers only the packs that ship on this branch (the trading adapter lives on its own branch).
 
-HEADER = """# Open RLCD project configuration. Docs: docs/teammate-quickstart.md, docs/control-layer.md
+HEADER = """# Open RLCD project configuration. Every key: docs/configuration.md. Check it with `rlcd config check`.
+# Docs: docs/teammate-quickstart.md (documents), docs/tabular-quickstart.md (tables), docs/control-layer.md
 # Secrets (ANTHROPIC_API_KEY, RLCD_API_KEY, database passwords) come from the environment, never from this file.
 # rollout.mode: shadow | assist | limited | full. Before automating anything, run `rlcd check`.
 """
+
+
+# Commands that work on a project's own files (its data, its labels, the heads rlcd.yaml configures): without an
+# rlcd.yaml they used to fall back to a default documents project in the current folder, create ./var there and
+# download an encoder before failing. They stop before anything is read, written or downloaded.
+NEEDS_PROJECT = frozenset({"ingest", "label", "train"})
+# Commands that read or write a model home (registry, logs, ledger). They run in a project, or against a home
+# that was named (--home, RLCD_HOME) or already exists in ./var (what `rlcd serve` leaves after a clone); they
+# no longer invent an empty ./var in whatever folder they are started from.
+NEEDS_HOME = frozenset({"report", "bench", "export", "import", "push", "decide", "calibration", "ask", "batteries",
+                        "receipts", "automation", "promote", "rollback", "metrics", "review", "replay", "regress",
+                        "case", "check"})
+# Everything else runs anywhere: `init` and `demo` create their project, `config` says there is no file, and
+# `serve` without a project deliberately serves the bundled demo model (`_maybe_demo`; the Docker image relies on it).
+
+
+def _misplaced(args: argparse.Namespace) -> str | None:
+    """Why `args.cmd` cannot run from here (one line for stderr, exit 2), or None. Reads nothing but the
+    environment and whether files exist; `--project` pointing at a missing file is `load_project`'s error."""
+    cmd = args.cmd
+    if (cmd not in NEEDS_PROJECT and cmd not in NEEDS_HOME) or args.project:
+        return None
+    from .core.config import find_config
+
+    if find_config() is not None:      # raises when RLCD_PROJECT points at nothing
+        return None
+    if cmd in NEEDS_PROJECT:
+        return (f"no rlcd.yaml here or in any parent folder, and `rlcd {cmd}` works on a project. Create one with "
+                f"`rlcd init <name> --pack documents|tabular` and run it there (or pass --project DIR, or set "
+                f"RLCD_PROJECT). Nothing was read, written or downloaded.")
+    if getattr(args, "home", None) or os.environ.get("RLCD_HOME") or (Path.cwd() / "var" / "registry.json").is_file():
+        return None
+    return (f"no rlcd.yaml here or in any parent folder, and no model home to work on: run `rlcd {cmd}` inside a "
+            f"project (`rlcd init <name> --pack documents|tabular`), or name the home with --home DIR or RLCD_HOME. "
+            f"Nothing was written.")
 
 
 def _project(args: argparse.Namespace):
@@ -79,6 +120,46 @@ def _service(args: argparse.Namespace):
 
 def _print(obj: Any) -> None:
     print(json.dumps(obj, indent=2, ensure_ascii=False, default=str))
+
+
+def _policy_note(svc: Any, model: str | None = None) -> None:
+    """One stderr line when rlcd.yaml's policy (or a head's stakes) is not what the served version uses: a version
+    serves the policy stored in its bundle until `rlcd train` verifies the new one (`rlcd check`,
+    thresholds.config, reports the same text). Never fails the command."""
+    try:
+        from .core.checklist import policy_drift
+
+        version = svc.resolve(model)
+        drift = policy_drift(svc, version)
+    except Exception:       # an unknown model, a pack that cannot load: the command itself says so
+        return
+    if drift:
+        print(f"note: rlcd.yaml differs from what {version} serves ({drift}): {version} keeps the policy it was "
+              f"trained and verified with; the edit takes effect at the next `rlcd train`.", file=sys.stderr)
+
+
+def _config_ok(svc: Any, block: bool) -> bool:
+    """Print what `rlcd config check` finds in the project's rlcd.yaml to stderr before a command runs on it.
+    False when `block` and the file has an error (the caller exits 2). Without a rlcd.yaml there is nothing to
+    check: the default project always runs."""
+    project = svc.project
+    if project.path is None:
+        return True
+    from .core import config_check as CC
+
+    try:
+        pack = svc.pack
+    except Exception:      # the check reports a pack that cannot be loaded as a warning; the command says the rest
+        pack = None
+    findings = CC.check_project(project, pack)
+    for line in CC.format_findings(findings):
+        print(f"rlcd.yaml: {line}", file=sys.stderr)
+    n = len(CC.errors(findings))
+    if block and n:
+        print(f"rlcd: {project.path} has {n} error{'' if n == 1 else 's'}, so nothing was started. Fix "
+              f"{'it' if n == 1 else 'them'} and run `rlcd config check`.", file=sys.stderr)
+        return False
+    return True
 
 
 # ----------------------------------------------------------------------------- commands
@@ -101,6 +182,10 @@ def cmd_init(args: argparse.Namespace) -> int:
             "rollout": {"mode": "full"},
             "security": {"allow_remote": False}}
     write_config(root / "rlcd.yaml", data, HEADER)
+    if args.pack == "tabular":   # comments the YAML writer cannot produce: outcomes, `exclude`, `targets`
+        from .packs.tabular.scaffold import annotate
+
+        (root / "rlcd.yaml").write_text(annotate((root / "rlcd.yaml").read_text(encoding="utf-8")), encoding="utf-8")
     gi = root / ".gitignore"
     if not gi.exists():
         gi.write_text("var/\n.env\n*.npz\n", encoding="utf-8")
@@ -118,18 +203,15 @@ def next_steps(pack: str, root: Path) -> str:
             "the encoder in rlcd.yaml is ONNX: it needs the documents extra (`uv sync --extra documents`) and "
             "downloads ~135 MB on the first ingest; offline, set pack_config.encoder to {kind: hashing, dim: 256}",
             "rlcd ingest ./data",
-            "rlcd label bootstrap        # needs `claude` on PATH, or --judge anthropic | ollama:<model>",
+            "rlcd label bootstrap        # the default judge (claude-cli) sends item text to Anthropic: opt in with "
+            "RLCD_ALLOW_REMOTE=1, or stay local with --judge ollama:<model>",
             "rlcd label audit --heads answerable,grounded --n 600   # your labels calibrate the model",
             "rlcd train",
         ]
     else:
-        steps = [
-            f"cd {root}",
-            "copy your table to ./data.csv (or point pack_config.data at it)",
-            "edit rlcd.yaml: pack_config.label = the outcome column (id / group / time columns if you have them); "
-            "hash_categories: true if a categorical column could hold personal data (bundles store its values)",
-            "rlcd train",
-        ]
+        from .packs.tabular.scaffold import next_steps as tabular_steps
+
+        steps = tabular_steps(root)
     return "\n".join(f"  {i}. {st}" for i, st in enumerate(steps, 1))
 
 
@@ -182,12 +264,12 @@ def cmd_label(args: argparse.Namespace) -> int:
     return 0
 
 
-def _summary_table(job: dict) -> str:
+def _summary_table(job: dict, labelling: bool = True) -> str:
     rows = [f"{'head':<18}{'status':<10}{'holdout':>8}{'logloss':>9}{'base':>8}{'BSS':>8}{'ECE':>7}  "
             f"{'skill':<6}verdict(medium)"]
     for name, h in job["heads"].items():
         if h.get("status") != "trained":
-            rows.append(f"{name:<18}{h.get('status', '?'):<10}  {h.get('error', '')}")
+            rows.append(f"{name:<18}{h.get('status', '?'):<10}  {_head_error(name, h.get('error') or '', labelling)}")
             continue
         m = h["metrics"]
 
@@ -200,10 +282,67 @@ def _summary_table(job: dict) -> str:
     return "\n".join(rows)
 
 
+def _head_error(name: str, error: str, labelling: bool = True) -> str:
+    """A failed head's error for the terminal: without the head's name in front (the line already starts with
+    it), and, for a pack with no labelling step, without advice to run `rlcd label ...` (the labels of such a
+    pack are a column of its data)."""
+    text = str(error)
+    while text.startswith(f"{name}: "):
+        text = text[len(name) + 2:]
+    if not labelling and "`rlcd label" in text:
+        text = re.sub(r"(?:(?<=\. )|^)[^.]*\(`rlcd label[^)]*\)\.?", "", text)       # "Audit more rows (`...`)."
+        text = re.sub(r"\s*\([^()]*`rlcd label[^()]*\)", "", text)                   # "(label some first: ...)"
+        text = text.rstrip()
+        text += ("" if text.endswith((".", "!", "?")) else ".") + (" This pack has no labelling step: its labels come from the training data, so add "
+                                "rows (or fix the label column) there.")
+    return text
+
+
+def _notes_block(job: dict, limit: int = 12, width: int = 420) -> list[str]:
+    """What the datasets said while they were built (the same notes MODEL_CARD.md lists), once each: rows that
+    only train, columns that were encoded or left out, how a class was chosen. A note several heads share is
+    printed once with their names; long ones are cut, and past `limit` the rest is counted."""
+    by_note: dict[str, list[str]] = {}
+    for name, h in job["heads"].items():
+        for note in h.get("notes") or []:
+            heads = by_note.setdefault(" ".join(str(note).split()), [])
+            if name not in heads:
+                heads.append(name)
+    lines = []
+    everyone = len([h for h in job["heads"].values() if h.get("notes")])
+    for note, heads in list(by_note.items())[:limit]:
+        who = "all heads" if everyone > 1 and len(heads) == everyone else ", ".join(heads)
+        lines.append(f"  {who}: {note if len(note) <= width else note[:width - 1].rstrip() + '…'}")
+    if len(by_note) > limit:
+        lines.append(f"  … and {len(by_note) - limit} more (MODEL_CARD.md lists every note: `rlcd report`)")
+    return lines
+
+
+def _gate_block(svc: Any, job: dict) -> list[str]:
+    """Per head whose holdout verdict allows act: what the Bernoulli gate will do to live decisions (which
+    cells already pass on holdout evidence, how many correct outcomes the others need), computed by the gate."""
+    from .core.checklist import gate_lines
+
+    lines: list[str] = []
+    if not job.get("model"):
+        return lines
+    for name, h in job["heads"].items():
+        if h.get("status") != "trained":
+            continue
+        try:
+            got = gate_lines(svc.gate_outlook(job["model"], name))
+        except Exception:      # a reading aid: never fail a finished training over it
+            continue
+        lines += [f"  {name}  {line}" for line in got]
+    return lines
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from .core.contract import TrainRequest
 
     svc = _service(args)
+    if not _config_ok(svc, block=True):
+        return 2
     body: dict = {}
     if args.heads:
         body["heads"] = args.heads.split(",")
@@ -212,15 +351,33 @@ def cmd_train(args: argparse.Namespace) -> int:
         if v is not None:
             body[k] = v
     job = svc.trainer.start(TrainRequest(**body), wait=True)
+    attempted = [h for h in job["heads"].values() if h.get("status") in ("trained", "failed")]
+    if not attempted:      # it stopped before any head (a data file that is missing, a provider that cannot start)
+        print(f"rlcd: training did not start: {job.get('error') or 'there is no head to train'}", file=sys.stderr)
+        return 1
+    try:
+        labelling = bool(svc.pack.supports("label_tasks"))     # no labelling step: no advice to run `rlcd label`
+    except Exception:
+        labelling = True
     print(f"model {job.get('model') or '(none saved)'} — job {job['status']}")
-    print(_summary_table(job))
+    print(_summary_table(job, labelling))
     for name, h in job["heads"].items():
         if h.get("status") == "trained" and not (h.get("metrics") or {}).get("has_skill"):
             print(f"\n{name}: no skill over the base rate on the holdout — it will abstain. "
                   f"{(h.get('verdict') or {}).get('medium', {}).get('reason', '')}")
-    if job.get("error") and not job.get("model"):
-        print(f"\n{job['error']}", file=sys.stderr)
+    notes = _notes_block(job)
+    if notes:
+        print("\nData notes:\n" + "\n".join(notes))
+    gate = _gate_block(svc, job)
+    if gate:
+        print("\nLive decisions (verdict act): `act` also needs the Bernoulli gate, which counts right and wrong per "
+              "(class, probability bin), starting from the holdout rows.\n" + "\n".join(gate))
+    failed = [n for n, h in job["heads"].items() if h.get("status") == "failed"]
+    if failed and not job.get("model"):     # the table above says why, head by head
+        print(f"\nrlcd: no head could be trained ({', '.join(failed)}): nothing was saved.", file=sys.stderr)
         return 1
+    if failed:
+        print(f"\nnot trained: {', '.join(failed)} (see the table); the other heads were saved.", file=sys.stderr)
     print("\nNext: `rlcd report` for the reliability page, `rlcd serve` for the API.")
     return 0
 
@@ -269,14 +426,52 @@ def cmd_serve(args: argparse.Namespace) -> int:
     from .serve.api import create_app
 
     svc = _service(args)
+    if not _config_ok(svc, block=True):
+        return 2
     _maybe_demo(svc)
     host = args.host or svc.project.get("serve.host", "127.0.0.1")
     port = int(args.port or svc.project.get("serve.port", 8095))
-    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("RLCD_API_KEY"):
-        print(f"warning: serving on {host} without RLCD_API_KEY: anyone who can reach this port can query and "
-              f"train. Set RLCD_API_KEY.", file=sys.stderr)
+    if not is_loopback(host) and not os.environ.get("RLCD_API_KEY"):
+        admin = bool(os.environ.get("RLCD_ADMIN_KEY"))
+        what = ("RLCD_ADMIN_KEY is set, but it only protects training, the kill switch and confirmations: every "
+                "other route (decide, systemone, feedback, receipts, metrics, ...) would be open to" if admin else
+                "every route, training and the kill switch included, would be open to")
+        if not args.insecure_no_auth:
+            print(f"rlcd: refusing to serve on {host} without RLCD_API_KEY: {what} anyone who can reach port "
+                  f"{port}. Set RLCD_API_KEY (and RLCD_ADMIN_KEY for the operator's routes), serve on 127.0.0.1 "
+                  f"behind a proxy, or pass --insecure-no-auth if this network is trusted.", file=sys.stderr)
+            return 2
+        print(f"warning: --insecure-no-auth: serving on {host} without RLCD_API_KEY: {what} anyone who can reach "
+              f"port {port}.", file=sys.stderr)
+    for line in _startup_notes(svc):
+        print(line, file=sys.stderr)
+    _policy_note(svc)
     uvicorn.run(create_app(svc), host=host, port=port, log_level=args.log_level)
     return 0
+
+
+def is_loopback(host: str) -> bool:
+    """Is `host` a loopback bind address (localhost, 127.0.0.0/8, ::1)? Anything else can be reached by others."""
+    h = str(host).strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def _startup_notes(svc: Any) -> list[str]:
+    """What `rlcd serve` says before it listens when no trained model can decide (GET /ready answers 503 then)."""
+    try:
+        r = svc.readiness()
+    except Exception as e:      # never keep the server from starting: /health and /ready report it
+        return [f"warning: could not check readiness ({type(e).__name__})"]
+    if r["ready"]:
+        return []
+    return [f"warning: serving {r['model']}, which cannot decide yet: {'; '.join(r['reasons'])}. Until then every "
+            f"answer is the uninformed prior, every decision abstains, and GET /ready answers 503 (GET /health "
+            f"stays 200)."]
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
@@ -437,8 +632,11 @@ def cmd_decide(args: argparse.Namespace) -> int:
     from .core.contract import DecideRequest
 
     svc = _service(args)
+    _config_ok(svc, block=False)       # read-only: the findings are printed, the decision is still made
+    _policy_note(svc, args.model)
     state: Any = json.loads(args.state) if args.state else {"query": args.query}
-    _print(svc.decide(DecideRequest(model=args.model, state=state, stakes=args.stakes)))
+    heads = [h.strip() for h in args.heads.split(",") if h.strip()] if args.heads else None
+    _print(svc.decide(DecideRequest(model=args.model, state=state, stakes=args.stakes, heads=heads)))
     return 0
 
 
@@ -465,6 +663,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     from .core.contract import SystemOneRequest
 
     svc = _service(args)
+    _config_ok(svc, block=False)       # read-only: the findings are printed, the questions are still answered
+    _policy_note(svc, args.model)
     state: Any = _read_json_arg(args.state) if args.state else {"query": args.query}
     battery = args.battery
     if not battery and not args.heads and args.query and "preflight" in svc.batteries(svc.resolve(args.model)):
@@ -545,7 +745,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     if not target:
         print("no earlier version to roll back to", file=sys.stderr)
         return 1
-    _print(svc.promote(target, reason=args.reason, by=os.environ.get("USER"),
+    _print(svc.promote(target, reason=args.reason, by=args.by or os.environ.get("USER") or "unknown",
                        kind="promote" if args.cmd == "promote" else "rollback"))
     return 0
 
@@ -618,12 +818,46 @@ def cmd_case(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     from .core.checklist import format_table, run
 
-    res = run(_service(args), model=args.model)
+    svc = _service(args)
+    _config_ok(svc, block=False)       # the findings go to stderr here; the checklist's config.valid item decides
+    res = run(svc, model=args.model)
     if args.json:
         _print(res)
     else:
         print(format_table(res))
     return 0 if res["ok"] else 1
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    from .core import config_check as CC
+
+    if args.config_cmd == "check":
+        project, findings = CC.check_file(args.project)
+        path = project.path if project is not None else args.project
+        n_err, n_warn = len(CC.errors(findings)), len(CC.warnings(findings))
+        if args.json:
+            _print({"config": str(path) if path else None, "ok": n_err == 0, "errors": n_err, "warnings": n_warn,
+                    "findings": findings})
+            return 1 if n_err else 0
+        for line in CC.format_findings(findings):
+            print(line)
+        if path is None:
+            print("no rlcd.yaml here or in a parent folder (and RLCD_PROJECT is not set): the default project is "
+                  "used, there is nothing to check. `rlcd init NAME` writes one.")
+        else:
+            print(f"{path}: {CC.summary(findings)}")
+        return 1 if n_err else 0
+    project = _project(args)
+    view = json.loads(json.dumps(CC.effective(project), default=str))
+    if args.json:
+        _print(view)
+    else:
+        import yaml
+
+        print(yaml.safe_dump(view, sort_keys=False, allow_unicode=True, width=110), end="")
+    for line in CC.format_findings(CC.check_project(project)):
+        print(f"rlcd.yaml: {line}", file=sys.stderr)
+    return 0
 
 
 # ----------------------------------------------------------------------------- parser
@@ -640,6 +874,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--pack", choices=sorted(TEMPLATES), default="documents")
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("config", help="rlcd.yaml: check it key by key, or show what it resolves to")
+    gsub = s.add_subparsers(dest="config_cmd", required=True)
+    g = gsub.add_parser("check", help="unknown keys, wrong types, values out of range, secrets in the file "
+                                      "(exit 1 on an error)")
+    g.add_argument("--json", action="store_true", help="print the findings as JSON")
+    g = gsub.add_parser("show", help="the effective configuration: home, pack, heads, thresholds, rollout")
+    g.add_argument("--json", action="store_true", help="print JSON instead of YAML")
+    s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("ingest", help="documents pack: read a local folder into the corpus (uses the project's "
                                       "encoder)")
@@ -690,6 +933,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host")
     s.add_argument("--port", type=int)
     s.add_argument("--log-level", default="info", dest="log_level")
+    s.add_argument("--insecure-no-auth", action="store_true", dest="insecure_no_auth",
+                   help="serve on a non-loopback host although RLCD_API_KEY is not set. Without this flag `rlcd "
+                        "serve` refuses that (exit 2). RLCD_API_KEY protects every route except /health and /ready; "
+                        "RLCD_ADMIN_KEY protects only POST /v1/train, POST /v1/automation and POST "
+                        "/v1/receipts/{id}/confirm (and is accepted wherever RLCD_API_KEY is), so an admin key "
+                        "without an API key leaves every other route open")
     s.set_defaults(fn=cmd_serve)
 
     s = sub.add_parser("bench", help="latency per stage (p50/p95/p99) on this machine")
@@ -727,6 +976,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--query")
     s.add_argument("--state", help="JSON state")
     s.add_argument("--stakes", choices=["low", "medium", "high"])
+    s.add_argument("--heads", help="comma-separated heads to decide with (default: every head; as `heads` of "
+                                   "POST /v1/decide)")
     s.add_argument("--model")
     s.set_defaults(fn=cmd_decide)
 
@@ -777,11 +1028,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("promote", help="point rlcd-latest at a version (no retrain)")
     s.add_argument("version")
     s.add_argument("--reason")
+    s.add_argument("--by", help="who did it, for the registry history (default: $USER, else \"unknown\")")
     s.set_defaults(fn=cmd_promote)
 
     s = sub.add_parser("rollback", help="point rlcd-latest back at the previous version (or --to VERSION)")
     s.add_argument("--to")
     s.add_argument("--reason")
+    s.add_argument("--by", help="who did it, for the registry history (default: $USER, else \"unknown\")")
     s.set_defaults(fn=cmd_promote)
 
     s = sub.add_parser("metrics", help="operations metrics over the logged decisions, feedback and outcomes")
@@ -841,6 +1094,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        misplaced = _misplaced(args)
+        if misplaced:
+            print(f"rlcd: {misplaced}", file=sys.stderr)
+            return 2
         return int(args.fn(args) or 0)
     except KeyboardInterrupt:
         return 130

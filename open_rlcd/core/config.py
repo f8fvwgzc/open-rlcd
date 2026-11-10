@@ -19,6 +19,9 @@
     regressions: ./regressions.jsonl # regression cases for `rlcd regress` (default: regressions.jsonl in the project)
     owners: {pack: ..., heads: ..., policy: ..., review: ..., incidents: ...}   # read by `rlcd check`
 
+Every key, its type and its default: docs/configuration.md. `rlcd config check` (core/config_check.py) reports
+an unknown key, a wrong type or a value out of range before anything runs; `Project.check()` is the same call.
+
 Environment: RLCD_HOME overrides `home`, RLCD_PROJECT points at a project directory or rlcd.yaml,
 RLCD_API_KEY protects the API, RLCD_ALLOW_REMOTE=1 allows non-loopback connector / judge hosts.
 Secrets (API keys, database passwords) are read from the environment, never from rlcd.yaml.
@@ -76,6 +79,12 @@ class Project:
     def allow_remote(self) -> bool:
         return os.environ.get("RLCD_ALLOW_REMOTE") == "1" or bool(self.section("security").get("allow_remote"))
 
+    def check(self, pack: Any = None) -> list[dict]:
+        """Findings about this configuration, [{level: "error" | "warn", path, message}] (core/config_check.py)."""
+        from .config_check import check_project
+
+        return check_project(self, pack)
+
     def resolve_path(self, p: str | os.PathLike) -> Path:
         p = Path(p).expanduser()
         return (p if p.is_absolute() else self.root / p).resolve()
@@ -90,11 +99,18 @@ class Project:
 
 
 def find_config(start: Path | None = None) -> Path | None:
+    """The rlcd.yaml to use: where RLCD_PROJECT points, else the nearest one in `start` (the current directory) or
+    a parent; None when there is none. RLCD_PROJECT set to a path without an rlcd.yaml is an error, never "no
+    project": a mistyped mount must not end up serving the default project (or the synthetic demo model)."""
     env = os.environ.get("RLCD_PROJECT")
     if env:
         p = Path(env).expanduser()
         p = p / CONFIG_NAME if p.is_dir() else p
-        return p if p.is_file() else None
+        if not p.is_file():
+            raise FileNotFoundError(f"RLCD_PROJECT={env} but there is no {CONFIG_NAME} at {p} (a mistyped path or a "
+                                    f"missing mount?). Point RLCD_PROJECT at a project directory or its "
+                                    f"{CONFIG_NAME}, or unset it")
+        return p
     cur = (start or Path.cwd()).resolve()
     for d in (cur, *cur.parents):
         if (d / CONFIG_NAME).is_file():

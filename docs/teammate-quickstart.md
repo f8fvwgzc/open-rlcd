@@ -49,8 +49,13 @@ the holdout be the most recent period. A few thousand queries is plenty; a few h
 ## 3. Weak labels from an LLM judge (20–60 minutes, unattended)
 
 ```bash
+export RLCD_ALLOW_REMOTE=1                                   # claude-cli and anthropic send item text to Anthropic
 rlcd label bootstrap --judge claude-cli:claude-haiku-5-5     # or: anthropic | ollama:qwen2.5:7b-instruct
 ```
+
+`claude-cli` and `anthropic` are refused without that opt-in (or `security: {allow_remote: true}` in rlcd.yaml),
+because the queries and document chunks being labelled leave your machine. `ollama:<model>` needs no opt-in:
+it runs locally.
 
 The judge labels every head for every query: response type, route, multi-hop, which retrieved chunks are
 relevant, whether the evidence is enough. It is resumable (rerun it after an interruption) and never touches

@@ -1,4 +1,5 @@
-"""Feature layer: text encoders (`text`), lexical signals (`lexical`) and retrieval signals (`retrieval`).
+"""Feature layer: text encoders (`text`), lexical signals (`lexical`), retrieval signals (`retrieval`) and text
+feature blocks for a pack of your own (`textblocks`: `HashedNgrams`, `TextEmbeddings`, `text_block`).
 
 Importing this package is cheap: it needs numpy only. The ONNX encoder imports onnxruntime / tokenizers /
 huggingface_hub lazily, when one is constructed.
@@ -29,10 +30,12 @@ from .text import (
     make_encoder,
     mean_pool,
 )
+from .textblocks import HashedNgrams, TextEmbeddings, text_block
 
 __all__ = [
     "BM25", "CHUNK_FEATURES", "PAIR_FEATURES", "QUERY_FEATURES", "RETRIEVAL_FEATURES", "CachedEncoder", "Encoder",
-    "EncoderError", "EncoderMismatch", "EncoderUnavailable", "HashingEncoder", "OnnxEncoder", "bm25_scores",
+    "EncoderError", "EncoderMismatch", "EncoderUnavailable", "HashedNgrams", "HashingEncoder", "OnnxEncoder",
+    "TextEmbeddings", "bm25_scores",
     "chunk_features", "coverage", "encoder_config", "l2_normalize", "make_encoder", "mean_pool", "number_support",
-    "numbers", "pair_features", "query_features", "retrieval_features", "tokens",
+    "numbers", "pair_features", "query_features", "retrieval_features", "text_block", "tokens",
 ]

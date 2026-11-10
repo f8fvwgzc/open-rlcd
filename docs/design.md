@@ -313,6 +313,7 @@ and out-of-scope queries, perturbed drafts with unsupported numbers) gives groun
   containment) and parses every LightGBM member in a short-lived subprocess, refusing the bundle if it fails.
   Policy caps (verdict, conformal threshold, set quantile) are read from each head's hash-checked `head.json`.
 * Connectors and judges refuse non-loopback hosts unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1`.
+  The `claude-cli` and `anthropic` judges count as non-loopback: they send item text to Anthropic.
   Unix sockets are only explicit paths, `unix://`-style schemes without a network host, and libpq `?host=/dir`;
   a name ending in `.sock` is a host name.
 * The `claude-cli` judge runs Claude Code with every tool and MCP server disabled (`--tools "" --strict-mcp-config
