@@ -33,6 +33,7 @@ import os
 import re
 import threading
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,19 @@ class TabularPack(BasePack):
         """The parsed pack_config and every target (pack_config targets merged with rlcd.yaml head overrides)."""
         cfg = self.config(project)
         return cfg, merged_targets(cfg, project.head_overrides)
+
+    def switched_off(self, project: Project, trained: Iterable[str] = ()) -> set[str]:
+        """The pack serves its enabled targets only. Switched off: every target with `enabled: false` (in
+        `pack_config.targets` or under `heads:`, the override winning field by field as in `merged_targets`), every
+        head `heads:` switches off, and every trained head that is no longer a target. Removing a target therefore
+        stops serving its head at once, as `enabled: false` does, while each train keeps carrying the trained head
+        over as long as the feature version is unchanged: listing the target again serves it again without a
+        retrain. Reads rlcd.yaml only, never the data file."""
+        _, merged = self.targets(project)
+        off = super().switched_off(project, trained)
+        off |= {name for name, d in merged.items() if d.get("enabled", True) is False}
+        off |= {str(name) for name in trained if name not in merged}
+        return off
 
     # ------------------------------------------------------------------ Pack protocol
     def heads(self, project: Project) -> dict[str, HeadSpec]:

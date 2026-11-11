@@ -206,6 +206,11 @@ class _Ctx:
         return self._get("specs", lambda: dict(self.service.specs(self.version)))
 
     @property
+    def off(self) -> set:
+        """The heads the project switches off (Service.switched_off): not served even when this version has them."""
+        return self._get("off", lambda: set(self.service.switched_off(self.version)))
+
+    @property
     def policy(self) -> PL.PolicyConfig:
         return self._get("policy", lambda: self.service.policy(self.version))
 
@@ -680,10 +685,9 @@ def _routes(ctx: _Ctx) -> Outcome:
                         "tool, declare what it may receive (allowed_data), needs (requires) and falls back to, so "
                         "deterministic filters run before the choice")
     specs = ctx.specs
-    # a head switched off in rlcd.yaml is not served (Service.specs leaves it out), so its contracts are kept and
-    # never consulted, as config check says too
-    off = {n for n, o in ctx.project.head_overrides.items()
-           if isinstance(o, dict) and o.get("enabled") is False and n not in specs}
+    # a head the project switches off is not served (Service.specs leaves it out), so its contracts are kept and
+    # never consulted, as config check says too (a pack that serves such a head anyway has it in specs: checked)
+    off = {n for n in ctx.off if n not in specs}
     served = [h for h in book.routes if h not in off]
     missing, refused = [], []
     for head in served:
@@ -714,7 +718,7 @@ def _routes(ctx: _Ctx) -> Outcome:
         text += f"; options without a contract (never filtered): {_names(uncovered[:10])}"
     kept = [h for h in book.routes if h in off]
     if kept:
-        text += f"; kept but not consulted while the head is disabled in rlcd.yaml: {_names(kept)}"
+        text += f"; kept but not consulted while the head is switched off in rlcd.yaml: {_names(kept)}"
     return "pass", text
 
 
@@ -899,7 +903,9 @@ def _rollout(ctx: _Ctx) -> Outcome:
     if ro.head_modes:
         text += "; per head: " + ", ".join(f"{h} {m}" for h, m in ro.head_modes)
     try:
-        known = set(ctx.service.specs(ctx.service.resolve(None)))
+        # a head the project switches off is not served at all, so a mode set for it holds nothing back
+        latest = ctx.service.resolve(None)
+        known = set(ctx.service.specs(latest)) | ctx.service.switched_off(latest)
     except Exception:
         known = set()
     named = {h for h, _ in ro.head_modes} | set(ro.limited_heads or ())

@@ -343,6 +343,7 @@ error  pack_config.txt: unknown key. Did you mean 'text'?
 | `label_tasks(project, provider)` | `rlcd label bootstrap`: the items an LLM judge and humans label. |
 | `synth(seed, n)` | synthetic data for tests and demos (with known answers). |
 | `rank_head` (attribute) | the default head of `POST /v1/rank`. |
+| `switched_off(project, trained)` | The service (which heads of a trained version it serves), `rlcd check` and `rlcd config check` (whose route contracts, rollout modes and policy overrides they keep without comparing them with the head): the heads the project switches off, given a version's trained heads. The default is `heads.<head>.enabled: false`; extend it when your `pack_config` can switch a head off too (the tabular pack adds `pack_config.targets.<head>.enabled: false` and every trained head that is no longer a target). |
 
 The example needs none of them to train, serve and take feedback; it has `synth` only to write its demo data.
 

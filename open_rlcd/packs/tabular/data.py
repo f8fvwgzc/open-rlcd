@@ -465,7 +465,8 @@ def config_keys() -> dict:
 def merged_targets(cfg: TabularConfig, overrides: dict) -> dict[str, dict]:
     """pack_config targets merged with rlcd.yaml `heads:` overrides (the override wins field by field). An
     override that names a head without a target must bring its own `label`. Disabled heads stay in the result
-    (with enabled: false) because their label columns must still be kept out of the features."""
+    (with enabled: false): their label columns must still be kept out of the features, and
+    `TabularPack.switched_off` names them, so a trained version does not serve them."""
     out: dict[str, dict] = {}
     for name in [*cfg.targets, *[n for n in overrides if n not in cfg.targets]]:
         d = {**(cfg.targets.get(name) or {}), **(overrides.get(name) or {})}

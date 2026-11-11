@@ -136,6 +136,19 @@ class BasePack:
         """Fields a `heads.<head>` override may set for this pack beyond the HeadSpec fields and `enabled`."""
         return set()
 
+    def switched_off(self, project: Project, trained: Iterable[str] = ()) -> set[str]:
+        """The heads this project switches off. The service does not serve them, even when a trained version has
+        them (`Service.specs`), and `rlcd check` and `rlcd config check` keep their route contracts, rollout modes
+        and policy overrides without comparing them with a head: all three read this one list (through
+        `switched_off` below). A switched-off head stays in the bundle, so switching it on again needs no retrain.
+        `trained`: the heads of the trained version in question (none when no model is involved).
+
+        Here, what rlcd.yaml switches off with `heads.<head>.enabled: false` (`heads()` leaves those heads out
+        too). Every other trained head is served, one the pack no longer defines included. A pack whose
+        configuration lists the heads it serves also names the trained heads it no longer lists (the tabular pack:
+        a target removed from `pack_config.targets`). Reads the configuration only, never the pack's data."""
+        return {str(n) for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
+
     def check_config(self, project: Project) -> list[dict]:
         """Findings only the pack can make about rlcd.yaml: [{level: "error" | "warn", path, message}]. Called
         by `rlcd config check` after the key and type checks passed; must not need the network."""
@@ -143,6 +156,14 @@ class BasePack:
 
     def supports(self, hook: str) -> bool:
         return getattr(type(self), hook, None) is not getattr(BasePack, hook, None)
+
+
+def switched_off(pack: Any, project: Project, trained: Iterable[str] = ()) -> set[str]:
+    """`pack.switched_off(project, trained)`, the heads the project switches off; a pack that does not subclass
+    BasePack (and so has no such hook) gets BasePack's rule, `heads.<head>.enabled: false`."""
+    fn = getattr(pack, "switched_off", None)
+    names = fn(project, tuple(trained)) if callable(fn) else BasePack.switched_off(pack, project, trained)
+    return {str(n) for n in names}
 
 
 def spec_from_yaml(name: str, d: dict) -> HeadSpec:

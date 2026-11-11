@@ -219,17 +219,25 @@ applies them to every head it decides; the documents pack's decide applies them 
 `route`.
 
 A contract under a name that is not a head of the project is only a warning, because the served model may still
-have that head. A tabular target you removed from `pack_config.targets`, or switched off there with
-`enabled: false`, stays served: each train carries over the trained heads it does not retrain while the feature
-version is unchanged, and drops them once it changes. Removing a target under `features: auto` usually changes it
-(the label column becomes a feature), so the next train drops the head. When the column does not become a feature
-(it is under `exclude`, outside an explicit `features` list, or no longer in the file), the removed head is
-carried over like a switched-off one, until a train whose features differ (for example after a new value enters
-a categorical feature column's vocabulary, its `max_categories` most frequent values). The generic decide still decides such a head and applies its contracts: a valid one filters its options, and one
-under an option the head lacks answers 500 `bad_config`, which `rlcd check` reports under `routes.contracts`.
-`heads.<head>.enabled: false` stops serving a head without a retrain. When the served model has no head of that
-name either, no decision consults the contract, and `rlcd check` fails `routes.contracts` until the model has
-that head or the contract is gone.
+have that head: a head the pack stops defining stays in the bundle, and each train carries over the heads it does
+not retrain while the feature version is unchanged. The documents pack (and a custom pack, unless its
+`switched_off` hook says otherwise) keeps serving such a head, and applies its contracts as any served head's,
+which `rlcd check` compares with the head under `routes.contracts`. The tabular pack serves only the targets
+rlcd.yaml lists (in `pack_config`, or under `heads:` with a `label`): a target removed from there is not served,
+at once and without a retrain.
+
+A switched-off head keeps its contracts, and no decision consults them: a head switched off with
+`heads.<head>.enabled: false`, in the tabular pack also with `pack_config.targets.<head>.enabled: false`, and a
+removed tabular target the served model still has. `rlcd check` does not compare them with the head and names
+them under `routes.contracts`; config check does not compare them either, and warns that a removed target is not
+a head of the project (it sees no model). A removed target stays in the model while the feature version is
+unchanged, which needs its label column to stay out of the features (under `exclude`, outside an explicit
+`features` list, or no longer in the file). Switching the head on again, or listing the target again, serves the
+trained head and its contracts again without a retrain. A name that is neither served nor switched off (the
+model has no head of that name, and rlcd.yaml does not switch it off) has contracts no decision consults either,
+and `rlcd check` fails `routes.contracts` until the model has that head or the contracts are gone. That is what
+becomes of a target removed under `features: auto`: its label column becomes a feature, so the next train has
+other features and drops the head.
 
 | key | type | default | what it does |
 |---|---|---|---|
@@ -343,7 +351,7 @@ any of the target keys) directly under `pack_config`. Not both.
 | `pack_config.targets.<head>.description` | text | empty | As `heads.<head>.description`; how the type and the classes were chosen is appended. |
 | `pack_config.targets.<head>.params` | mapping | empty | As `heads.<head>.params`. |
 | `pack_config.targets.<head>.input` | mapping | empty | As `heads.<head>.input`. |
-| `pack_config.targets.<head>.enabled` | true / false | true | `false`: the head is not trained, and its label column still stays out of the features. A head of that name the model already has is still served: a train carries it over while the feature version is unchanged, and drops it once the features change (for example after a new value enters a categorical feature column's vocabulary, its `max_categories` most frequent values). Set `heads.<head>.enabled: false` as well to stop serving it. |
+| `pack_config.targets.<head>.enabled` | true / false | true | `false` switches the head off as `heads.<head>.enabled: false` does: it is not trained, and not served even when the model has it trained, at once and without a retrain. Its route contracts, rollout modes and policy overrides are kept and not compared with it. Its label column still stays out of the features, so a train carries the trained head over while the feature version is unchanged (a train whose features differ drops it, for example after a new value enters a categorical feature column's vocabulary, its `max_categories` most frequent values), and `true` serves it again without a retrain while the model has it. A `heads.<head>.enabled` written for the same head wins. Removing the target from `targets` stops serving the head at once too (see [`routes`](#routes-what-an-option-of-a-choice-head-commits-you-to)). |
 | `pack_config.label` | column | none | Shorthand: the label column of the only head. |
 | `pack_config.question` | text | `outcome` | Shorthand: the name of that head. |
 | `pack_config.type` | `noul`, `choice`, `score` | inferred | Shorthand for `targets.<head>.type`. |
@@ -412,7 +420,7 @@ the server next to it. `GET /health` shows what the server runs with (`model`, `
 |---|---|---|
 | `policy.*` (thresholds, `abstain`, `min_verify_rows`, `gate_min_p_above`, `overrides`) | after `rlcd train`: a version serves the policy stored in its bundle, the one its holdout verified | after a retrain that read the edited file: `rlcd train`, or a restart followed by `POST /v1/train` (the server trains with the file it read at start). The new version is then served without another restart |
 | `heads.<head>.stakes` and the other head fields (`type`, `classes`, `model`, `decision`, `conformal`, ...) | after `rlcd train`: a trained head is served as it was trained | after `rlcd train`, as above |
-| `heads.<head>.enabled` | at once | restart |
+| `heads.<head>.enabled` (in the tabular pack also `pack_config.targets.<head>.enabled`, and removing a target) | at once | restart |
 | `train.*` | the next `rlcd train` | restart, then the next `POST /v1/train` |
 | `pack_config`: what features are built from (tabular: the table and its columns; documents: the encoder, chunking) | after `rlcd train` (documents: `rlcd ingest` first): the trained schema and encoder are stored in the bundle | after `rlcd train`, as above |
 | `pack_config`: decide-time settings of the documents pack (`retrieve_k`, `max_evidence_age_days`, `require_evidence_dates`, `feature_cache`, and what opening the corpus reads: `rrf_k`, `vector.backend`, `graph.terms`, `graph.max_fanout`, `graph.hub_share`, `graph.hub_min`, `on_encoder_change`; new `graph.terms` link chunks only after a re-ingest) | at once | restart |

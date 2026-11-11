@@ -335,6 +335,34 @@ def test_the_tabular_key_list_is_the_one_parse_config_uses():
     assert set(keys["targets"].each.keys) == set(TARGET_KEYS) | set(SPEC_KEYS)
 
 
+def test_a_tabular_target_switched_off_in_pack_config_is_kept_like_a_switched_off_head(tmp_path):
+    """`pack_config.targets.<head>.enabled: false` switches a head off as `heads.<head>.enabled: false` does, and
+    config check reads the list the service reads (`switched_off`): the head's route contracts, rollout modes and
+    policy overrides are kept, not compared with the head. (It used to know only the `heads:` switch, so it warned
+    "not a head of this project" about a switched-off target's contract.) Switched on again under `heads:`, the
+    override winning field by field, they are compared with the head; a target removed from `targets` is not a head
+    of the project. `rlcd config show` lists the switched-off head as `enabled: false`."""
+    (tmp_path / "data.csv").write_text(TABLE, encoding="utf-8")
+    targets = {"churned": {"label": "churned"}, "upsell": {"label": "plan", "enabled": False}}
+    data = {"pack": "tabular", "pack_config": {"data": "data.csv", "targets": targets},
+            "routes": {"upsell": {"true": {}}},                           # a contract on a noul head
+            "rollout": {"heads": {"upsell": "shadow"}},
+            "policy": {"overrides": {"upsell": {"maybe": {"*": {"act": 0.99}}}}}}   # a class it does not have
+    assert check(tmp_path, data) == []
+    view = CC.effective(Project(root=tmp_path, data=data))
+    assert set(view["heads"]) == {"churned", "upsell"} and view["heads"]["upsell"] == {"enabled": False}
+    f = check(tmp_path, {**data, "heads": {"upsell": {"enabled": True}}})
+    assert "is a noul head" in at(f, "routes.upsell")
+    assert "is not a class of head 'upsell'" in at(f, "policy.overrides.upsell.maybe")
+    assert len(CC.errors(f)) == 2 and CC.warnings(f) == []
+    gone = copy.deepcopy(data)
+    del gone["pack_config"]["targets"]["upsell"]
+    f = check(tmp_path, gone)
+    assert "not a head of this project" in at(f, "routes.upsell", "warn")
+    assert "not a head of this project" in at(f, "rollout.heads.upsell", "warn")
+    assert "is not a head of this project" in at(f, "policy.overrides.upsell")
+
+
 def test_a_custom_pack_is_checked_only_for_the_keys_it_declares(tmp_path):
     data = {"pack_config": {"anything": 1, "windw_days": 3}, "heads": {"good": {"extra": 1}}}
     f = check(tmp_path, data, ToyPack())                                   # declares nothing: pack_config is its own

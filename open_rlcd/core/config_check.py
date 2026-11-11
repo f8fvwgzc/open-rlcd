@@ -687,18 +687,34 @@ def _resolve_heads(project: Project, pack: Any, levels: list[str], out: list[dic
     return specs
 
 
-def _overrides(project: Project, specs: dict | None, out: list[dict]) -> None:
+def _switched_off(project: Project, pack: Any, specs: dict | None, out: list[dict]) -> set[str]:
+    """The heads the pack switches off for this file (`packs.base.switched_off`, the list the service and `rlcd
+    check` read): never served, so their policy overrides, rollout modes and route contracts are kept unchecked.
+    Only when the pack's heads are known (`specs`)."""
+    from ..packs.base import BasePack, switched_off
+
+    if specs is None:
+        return set()
+    try:
+        return switched_off(pack, project)
+    except Exception as e:
+        out.append(_finding("warn", "heads", f"the pack could not say which heads this file switches off "
+                                             f"({type(e).__name__}: {str(e)[:300]})"))
+        return BasePack.switched_off(pack, project)
+
+
+def _overrides(project: Project, specs: dict | None, off: set[str], out: list[dict]) -> None:
     """`policy.overrides.<head>.<class>`: the head must be one of the project's and the class one the head can
     commit to. An override under a name nothing matches is silently never applied, so the stricter threshold
     somebody wrote for `refund_approved` would simply not exist: an error, with a suggestion. Only when the
-    pack's heads are known (`specs`); a head switched off with `enabled: false` keeps its overrides unchecked."""
+    pack's heads are known (`specs`); a head the pack switches off (`off`: `heads.<head>.enabled: false`, or a
+    tabular target switched off in `pack_config`) keeps its overrides unchecked."""
     raw = project.section("policy").get("overrides")
     if not specs or not isinstance(raw, dict) or _has_error(out, "policy"):
         return          # no heads resolved (e.g. the tabular pack before its data file exists): nothing to compare with
-    disabled = {n for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
     for head, by_class in raw.items():
         name = str(head)
-        if name in disabled:
+        if name in off:
             continue
         spec = specs.get(name)
         if spec is None:
@@ -726,18 +742,18 @@ def _overrides(project: Project, specs: dict | None, out: list[dict]) -> None:
                                     f"{commits[0]!r}, so thresholds for {c!r} are never used"))
 
 
-def _cross(project: Project, specs: dict | None, ro: Rollout | None, book: RouteBook | None,
+def _cross(project: Project, specs: dict | None, off: set[str], ro: Rollout | None, book: RouteBook | None,
            out: list[dict]) -> None:
     """Names that must match a head: warnings, because a trained model may still carry a head the file no longer
-    lists (`rlcd check` compares routes against the model). Route contracts on a head of the project are stricter:
-    one under an option the head does not have, or on a head that is not a choice head, fails `rlcd check`
-    (routes.contracts), and RouteBook.check_head refuses every /v1/decide that applies route contracts to the head
-    (500 bad_config). The generic decide applies them to every head it decides; the documents pack's decide only to
-    response_type and route. So that is an error."""
+    lists (`rlcd check` compares routes against the model). A head the pack switches off (`off`) is a head of the
+    project, never served: its names are kept and not compared with it. Route contracts on a head of the project
+    are stricter: one under an option the head does not have, or on a head that is not a choice head, fails `rlcd
+    check` (routes.contracts), and RouteBook.check_head refuses every /v1/decide that applies route contracts to
+    the head (500 bad_config). The generic decide applies them to every head it decides; the documents pack's
+    decide only to response_type and route. So that is an error."""
     if specs is None:
         return
-    disabled = {n for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
-    known = set(specs) | disabled
+    known = set(specs) | off
 
     def unknown(path: str, name: str, what: str) -> None:
         hint = _suggest(name, known)
@@ -892,8 +908,9 @@ def check_project(project: Project, pack: Any = None) -> list[dict]:
     _evaluate(project, out)
     _regressions(project, out)
     specs = _resolve_heads(project, pack, levels, out)
-    _overrides(project, specs, out)
-    _cross(project, specs, ro, book, out)
+    off = _switched_off(project, pack, specs, out)
+    _overrides(project, specs, off, out)
+    _cross(project, specs, off, ro, book, out)
     _secrets(data, out)
     return out
 
@@ -967,6 +984,8 @@ def effective(project: Project, pack: Any = None) -> dict:
             return {"error": f"{type(e).__name__}: {e}"}
 
     def heads() -> dict:
+        from ..packs.base import switched_off
+
         if pack is None:
             return {"error": "the pack is not loaded"}
         overrides = project.head_overrides
@@ -977,9 +996,8 @@ def effective(project: Project, pack: Any = None) -> dict:
             o = overrides.get(name)
             d["from_rlcd_yaml"] = sorted(o) if isinstance(o, dict) else []
             res[name] = d
-        for name, o in overrides.items():
-            if isinstance(o, dict) and o.get("enabled") is False:
-                res[str(name)] = {"enabled": False}
+        for name in sorted(switched_off(pack, project)):     # what the service does not serve, trained or not
+            res[name] = {"enabled": False}
         return res
 
     def policy() -> dict:

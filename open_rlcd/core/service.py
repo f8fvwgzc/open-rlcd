@@ -247,17 +247,26 @@ class Service:
                             f"with", kind="bad_bundle", status=422, version=version)
 
     def specs(self, version: str) -> dict[str, HeadSpec]:
-        """The pack's current heads, overlaid by the heads this version was trained with. A head rlcd.yaml disables
-        (`heads.<name>.enabled: false`) is not served even when the version has it trained: disabling a question is a
-        switch, not a retrain (the trained head stays in the bundle, so enabling it again needs no retrain)."""
+        """The pack's current heads, overlaid by the heads this version was trained with. A head the project switches
+        off (`switched_off`: `heads.<name>.enabled: false`; in the tabular pack also a target switched off in
+        `pack_config` or no longer listed there) is not served even when the version has it trained: switching a
+        question off is not a retrain (the trained head stays in the bundle, so switching it on again needs none)."""
         out = dict(self.pack_for(version).heads(self.project))
         b = self.bundle(version)
-        disabled = {n for n, o in self.project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
         if b is not None:
+            off = self.switched_off(version)
             for name in b.names():
-                if name not in disabled:
+                if name not in off:
                     out[name] = b.head(name).spec
         return out
+
+    def switched_off(self, version: str) -> set[str]:
+        """The heads the project switches off (`packs.base.switched_off`, asked of the pack `version` was trained
+        with, given the heads it trained): not served even when `version` has them. `rlcd check` reads the same."""
+        from ..packs.base import switched_off
+
+        b = self.bundle(version)
+        return switched_off(self.pack_for(version), self.project, b.names() if b is not None else ())
 
     def untrained_hint(self, version: str) -> str:
         """What to add to an error when `version` is the untrained service ('' for a trained version)."""
@@ -948,7 +957,7 @@ class Service:
         specs = self.specs(version)
         names = req.heads or list(specs)
         if not names:
-            why = self.untrained_hint(version) or (f" {version} serves no head: every head is disabled in rlcd.yaml, "
+            why = self.untrained_hint(version) or (f" {version} serves no head: every head is switched off in rlcd.yaml, "
                                                    f"or the pack defines none.")
             raise ContractError("no heads to decide with." + why)
         extra = req.model_extra or {}
@@ -1512,7 +1521,7 @@ class Service:
                 reasons.append(f"no model is trained ({version} is the untrained service): run `rlcd train` or "
                                f"import a bundle")
             elif not any(self.loaded(version, n) is not None for n in specs):
-                reasons.append(f"{version} serves no trained head (every trained head is disabled in rlcd.yaml)")
+                reasons.append(f"{version} serves no trained head (every trained head is switched off in rlcd.yaml)")
             else:
                 try:
                     self.policy(version)

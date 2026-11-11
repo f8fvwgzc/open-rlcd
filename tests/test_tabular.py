@@ -3,11 +3,13 @@ reload the bundle, take feedback, abstain on noise. Offline; logistic regression
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from open_rlcd.core import checklist as CL
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError, DecideRequest, FeedbackRequest, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import lightgbm_available
@@ -267,3 +269,106 @@ def test_hashed_categories_train_serve_and_carry_over(tmp_path):
     meta = svc.bundle(v2).meta
     assert set(meta["heads"]) == set(HEADS) and meta["feature_version"] == b.meta["feature_version"]
     assert not any("not carried over" in n for n in meta.get("notes") or [])
+
+
+# ----------------------------------------------------------------------------- targets the project switches off
+
+ROUTES = {"next_plan": {"up": {"requires": ["upsell_api"]}}}
+ROW = {"x": 0.9, "y": 0.5, "plan": "a"}
+
+
+def small_table(path: Path, n: int = 600) -> Path:
+    """Two label columns: churned (noul, from x) and next_plan (choice up / same / down, from y)."""
+    rnd = random.Random(0)
+    lines = ["x,y,plan,churned,next_plan"]
+    for i in range(n):
+        x, y = rnd.random(), rnd.random()
+        churned = "yes" if x + rnd.random() * 0.3 > 0.7 else "no"
+        lines.append(f"{x:.3f},{y:.3f},{'ab'[i % 2]},{churned},{('up', 'same', 'down')[int(y * 3)]}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def small(tmp: Path, next_plan: dict | None, pack_config: dict | None = None, **extra) -> Service:
+    """A service on the small table with the target `churned`, and `next_plan` (with these fields) unless None."""
+    targets = {"churned": {"label": "churned", "model": "logreg"}}
+    if next_plan is not None:
+        targets["next_plan"] = {"label": "next_plan", "model": "logreg", **next_plan}
+    pc = {"data": "small.csv", "targets": targets, **(pack_config or {})}
+    return Service(Project(root=tmp, data={"pack": "tabular", "pack_config": pc, **extra}), home=tmp / "var")
+
+
+def checked(svc: Service) -> dict:
+    """`rlcd check` on rlcd-latest: {check id: {status, detail, ...}}."""
+    return {c["id"]: c for c in CL.run(svc)["checks"]}
+
+
+def kept(svc: Service, version: str) -> None:
+    """next_plan is trained in `version` and switched off: the service does not serve it, and `rlcd check` keeps its
+    route contract (and any rollout mode) as a switched-off head's."""
+    assert set(svc.specs(version)) == {"churned"} and svc.switched_off(version) == {"next_plan"}
+    assert "next_plan" in svc.bundle(version).names()
+    with pytest.raises(ContractError) as e:
+        svc.systemone(SystemOneRequest(state=ROW, questions={"next_plan": {"type": "choice"}}, model=version))
+    assert e.value.kind == "unknown_head"
+    assert set(svc.generic_decide(DecideRequest(state=ROW, model=version))["heads"]) == {"churned"}
+    c = checked(svc)
+    assert c["routes.contracts"]["status"] == "pass" and c["rollout.mode"]["status"] == "info"
+    assert c["routes.contracts"]["detail"] == ("no contracts for a served head; kept but not consulted while the "
+                                               "head is switched off in rlcd.yaml: next_plan")
+
+
+def test_a_target_switched_off_in_pack_config_is_not_served_before_or_after_a_retrain(tmp_path):
+    """`pack_config.targets.<head>.enabled: false` switches the head off as `heads.<head>.enabled: false` does: not
+    served, at once and without a retrain, nor after a retrain, although each train carries the trained head over
+    (its label column stays out of the features, so the feature version does not change). A partial train still
+    carries the heads it does not retrain. `rlcd check` and config check read the list the service reads
+    (`switched_off`): the head's route contract and rollout mode are kept, compared with nothing, and fail
+    nothing. Switched on again, the trained head is served at once."""
+    small_table(tmp_path / "small.csv")
+    svc = small(tmp_path, {})
+    v1 = train(svc)["model"]
+    job = train(svc, heads=["churned"])
+    v2 = job["model"]
+    assert set(job["heads"]) == {"churned"} and set(svc.specs(v2)) == {"churned", "next_plan"}
+    assert svc.bundle(v2).meta["heads"]["next_plan"]["trained_in"] == v1
+    off = small(tmp_path, {"enabled": False}, routes=ROUTES, rollout={"heads": {"next_plan": "shadow"}})
+    assert off.project.check(off.pack) == []
+    kept(off, v2)                                            # before a retrain
+    job = train(off)
+    v3 = job["model"]
+    assert set(job["heads"]) == {"churned"}
+    assert off.bundle(v3).meta["heads"]["next_plan"]["trained_in"] == v1      # carried over, never retrained
+    kept(off, v3)                                            # after it
+    assert checked(off)["config.valid"]["status"] == "pass"
+    on = small(tmp_path, {}, routes=ROUTES)
+    assert on.specs(v3)["next_plan"] == on.bundle(v3).head("next_plan").spec
+    assert checked(on)["routes.contracts"]["detail"].startswith("contracts for next_plan")
+
+
+@pytest.mark.parametrize("keep_out", [{"exclude": ["next_plan"]}, {"features": ["x", "y", "plan"]}, None],
+                         ids=["exclude", "features", "auto"])
+def test_a_target_removed_from_pack_config_is_not_served_either(tmp_path, keep_out):
+    """Removing a target switches its head off the same way, at once. While its column stays out of the features
+    (under `exclude`, outside an explicit `features` list) the feature version does not change, so each train
+    carries the trained head over, `rlcd check` keeps its contract as a switched-off head's, and listing the target
+    again serves it again without a retrain. Under `features: auto` the column becomes a feature: the next train
+    drops the head, and its contract fails `rlcd check` (no model has that head). Config check, which sees no
+    model, warns either way that the name is not a head of this project."""
+    small_table(tmp_path / "small.csv")
+    v1 = train(small(tmp_path, {}, keep_out))["model"]
+    gone = small(tmp_path, None, keep_out, routes=ROUTES)
+    findings = gone.project.check(gone.pack)
+    assert [(f["level"], f["path"]) for f in findings] == [("warn", "routes.next_plan")]
+    assert "not a head of this project" in findings[0]["message"]
+    kept(gone, v1)
+    v2 = train(gone)["model"]
+    assert set(gone.specs(v2)) == {"churned"}
+    if keep_out is not None:
+        kept(gone, v2)
+        back = small(tmp_path, {}, keep_out)
+        assert back.specs(v2)["next_plan"] == back.bundle(v2).head("next_plan").spec
+    else:
+        assert gone.bundle(v2).names() == ["churned"] and gone.switched_off(v2) == set()
+        c = checked(gone)["routes.contracts"]
+        assert c["status"] == "fail" and f"{v2} has no head 'next_plan'" in c["detail"]

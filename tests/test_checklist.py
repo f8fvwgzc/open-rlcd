@@ -333,18 +333,31 @@ def test_route_contracts_of_a_disabled_head_are_kept_not_failed(trained_home, tm
     assert "color" not in svc.specs(svc.registry.latest_id()) and "good" not in svc.specs(svc.registry.latest_id())
     c = checks(svc)["routes.contracts"]
     assert c["status"] == "pass", c
-    assert c["detail"] == ("no contracts for a served head; kept but not consulted while the head is disabled in "
-                           "rlcd.yaml: color, good")
+    assert c["detail"] == ("no contracts for a served head; kept but not consulted while the head is switched off "
+                           "in rlcd.yaml: color, good")
     assert not [f for f in check_project(svc.project, svc.pack) if f["path"].startswith("routes")]
     # with one head served again, its contracts are checked and summarised as before
     svc = make(tmp_path, trained_home, {"heads": {"good": {"enabled": False}}, "routes": routes}, pack=Switchable())
     c = checks(svc)["routes.contracts"]
     assert c["status"] == "pass" and c["detail"] == (
         "contracts for color; options without a contract (never filtered): color.green, color.blue; kept but not "
-        "consulted while the head is disabled in rlcd.yaml: good")
+        "consulted while the head is switched off in rlcd.yaml: good")
     # a pack that serves the head anyway (it ignores `enabled`) has its contracts checked like any other
     c = checks(make(tmp_path, trained_home, {"heads": {"good": {"enabled": False}}, "routes": routes}))
     assert c["routes.contracts"]["status"] == "fail" and "is a noul head" in c["routes.contracts"]["detail"]
+
+
+def test_a_rollout_mode_for_a_switched_off_head_is_not_a_failure(trained_home, tmp_path):
+    """A head switched off in rlcd.yaml is not served, so a rollout mode set for it holds nothing back: config check
+    knows the name, and so does `rlcd check` (rollout.mode used to fail, saying the model had no such head). A name
+    that is no head at all still fails."""
+    data = {"heads": {"good": {"enabled": False}}, "rollout": {"heads": {"good": "shadow"}}}
+    svc = make(tmp_path, trained_home, data, pack=Switchable())
+    c = checks(svc)["rollout.mode"]
+    assert c["status"] == "info" and "per head: good shadow" in c["detail"]
+    assert check_project(svc.project, svc.pack) == []
+    c = checks(make(tmp_path, trained_home, {**data, "rollout": {"heads": {"godo": "shadow"}}}, pack=Switchable()))
+    assert c["rollout.mode"]["status"] == "fail" and "['godo']" in c["rollout.mode"]["detail"]
 
 
 @pytest.mark.parametrize(("option", "escape"), [
