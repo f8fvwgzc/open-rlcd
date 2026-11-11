@@ -12,6 +12,7 @@ import pytest
 
 from open_rlcd.core import checklist as CL
 from open_rlcd.core.config import Project
+from open_rlcd.core.config_check import check_project
 from open_rlcd.core.contract import ContractError, DecideRequest, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import HeadSpec
 from open_rlcd.core.service import Service
@@ -89,7 +90,7 @@ def test_an_untrained_service_fails_on_its_heads_and_still_runs_every_check(tmp_
         assert set(x) == {"id", "status", "title", "detail"} and x["status"] in CL.STATUSES and x["title"]
         assert x["detail"]
     assert set(res["counts"]) == set(CL.STATUSES) and sum(res["counts"].values()) == len(res["checks"])
-    assert {"heads.trained", "thresholds.holdout", "thresholds.config", *CONTRACT_CHECKS, "inputs.required",
+    assert {"config.valid", "heads.trained", "thresholds.holdout", "thresholds.config", *CONTRACT_CHECKS, "inputs.required",
             "deterministic.first", "routes.contracts", "security.api_key", "security.allow_remote",
             "security.admin_key", "secrets.redact", "secrets.log_states", "receipts.chain", "receipts.mode",
             "model.bundle", "rollback.ready", "rollout.mode", "automation.switch", "batteries.bound",
@@ -305,12 +306,58 @@ def test_route_contracts_must_match_the_heads(trained_home, tmp_path):
     assert c["status"] == "pass"
     assert c["detail"] == ("contracts for color; accept every data class (no allowed_data): color.green; options "
                            "without a contract (never filtered): color.blue")
-    for routes, why in (({"color": {"purple": {"llm": "small"}}}, "purple"),
-                        ({"good": {"true": {"llm": "small"}}}, "is a noul head"),
-                        ({"nope": {"a": {}}}, "has no head 'nope'")):
+    for routes, why, refused in (({"color": {"purple": {"llm": "small"}}}, "purple", True),
+                                 ({"good": {"true": {"llm": "small"}}}, "is a noul head", True),
+                                 ({"nope": {"a": {}}}, "has no head 'nope'", False)):
         res = CL.run(make(tmp_path, trained_home, {"routes": routes}))
         c = by_id(res)["routes.contracts"]
         assert c["status"] == "fail" and why in c["detail"] and res["ok"] is False
+        # the 500 is what a decide applying the contract runs into; a head the model lacks is never decided
+        assert ("500 bad_config" in c["detail"]) is refused, c["detail"]
+
+
+class Switchable(ToyPack):
+    """The toy pack, honouring `heads.<name>.enabled: false` the way every BasePack does."""
+
+    def heads(self, project):
+        off = {n for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
+        return {n: s for n, s in super().heads(project).items() if n not in off}
+
+
+def test_route_contracts_of_a_disabled_head_are_kept_not_failed(trained_home, tmp_path):
+    """A head switched off in rlcd.yaml is not served, so no decision consults its contracts: config check passes
+    them, and so does `rlcd check` (it used to fail, saying the trained model had no such head)."""
+    routes = {"color": {"red": {"llm": "small", "allowed_data": ["public"]}}, "good": {"true": {"llm": "small"}}}
+    svc = make(tmp_path, trained_home, {"heads": {"color": {"enabled": False}, "good": {"enabled": False}},
+                                        "routes": routes}, pack=Switchable())
+    assert "color" not in svc.specs(svc.registry.latest_id()) and "good" not in svc.specs(svc.registry.latest_id())
+    c = checks(svc)["routes.contracts"]
+    assert c["status"] == "pass", c
+    assert c["detail"] == ("no contracts for a served head; kept but not consulted while the head is switched off "
+                           "in rlcd.yaml: color, good")
+    assert not [f for f in check_project(svc.project, svc.pack) if f["path"].startswith("routes")]
+    # with one head served again, its contracts are checked and summarised as before
+    svc = make(tmp_path, trained_home, {"heads": {"good": {"enabled": False}}, "routes": routes}, pack=Switchable())
+    c = checks(svc)["routes.contracts"]
+    assert c["status"] == "pass" and c["detail"] == (
+        "contracts for color; options without a contract (never filtered): color.green, color.blue; kept but not "
+        "consulted while the head is switched off in rlcd.yaml: good")
+    # a pack that serves the head anyway (it ignores `enabled`) has its contracts checked like any other
+    c = checks(make(tmp_path, trained_home, {"heads": {"good": {"enabled": False}}, "routes": routes}))
+    assert c["routes.contracts"]["status"] == "fail" and "is a noul head" in c["routes.contracts"]["detail"]
+
+
+def test_a_rollout_mode_for_a_switched_off_head_is_not_a_failure(trained_home, tmp_path):
+    """A head switched off in rlcd.yaml is not served, so a rollout mode set for it holds nothing back: config check
+    knows the name, and so does `rlcd check` (rollout.mode used to fail, saying the model had no such head). A name
+    that is no head at all still fails."""
+    data = {"heads": {"good": {"enabled": False}}, "rollout": {"heads": {"good": "shadow"}}}
+    svc = make(tmp_path, trained_home, data, pack=Switchable())
+    c = checks(svc)["rollout.mode"]
+    assert c["status"] == "info" and "per head: good shadow" in c["detail"]
+    assert check_project(svc.project, svc.pack) == []
+    c = checks(make(tmp_path, trained_home, {**data, "rollout": {"heads": {"godo": "shadow"}}}, pack=Switchable()))
+    assert c["rollout.mode"]["status"] == "fail" and "['godo']" in c["rollout.mode"]["detail"]
 
 
 @pytest.mark.parametrize(("option", "escape"), [

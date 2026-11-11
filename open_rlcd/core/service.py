@@ -198,7 +198,7 @@ class Service:
         if name not in self._packs:
             from ..packs.base import load_pack
 
-            pack = load_pack(name)
+            pack = load_pack(name, root=self.project.root)
             self._packs[name] = pack
             self._packs.setdefault(str(getattr(pack, "name", name)), pack)
         return self._packs[name]
@@ -247,24 +247,41 @@ class Service:
                             f"with", kind="bad_bundle", status=422, version=version)
 
     def specs(self, version: str) -> dict[str, HeadSpec]:
-        """The pack's current heads, overlaid by the heads this version was trained with. A head rlcd.yaml disables
-        (`heads.<name>.enabled: false`) is not served even when the version has it trained: disabling a question is a
-        switch, not a retrain (the trained head stays in the bundle, so enabling it again needs no retrain)."""
+        """The pack's current heads, overlaid by the heads this version was trained with. A head the project switches
+        off (`switched_off`: `heads.<name>.enabled: false`; in the tabular pack also a target switched off in
+        `pack_config` or no longer listed there) is not served even when the version has it trained: switching a
+        question off is not a retrain (the trained head stays in the bundle, so switching it on again needs none)."""
         out = dict(self.pack_for(version).heads(self.project))
         b = self.bundle(version)
-        disabled = {n for n, o in self.project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
         if b is not None:
+            off = self.switched_off(version)
             for name in b.names():
-                if name not in disabled:
+                if name not in off:
                     out[name] = b.head(name).spec
         return out
+
+    def switched_off(self, version: str) -> set[str]:
+        """The heads the project switches off (`packs.base.switched_off`, asked of the pack `version` was trained
+        with, given the heads it trained): not served even when `version` has them. `rlcd check` reads the same."""
+        from ..packs.base import switched_off
+
+        b = self.bundle(version)
+        return switched_off(self.pack_for(version), self.project, b.names() if b is not None else ())
+
+    def untrained_hint(self, version: str) -> str:
+        """What to add to an error when `version` is the untrained service ('' for a trained version)."""
+        if self.bundle(version) is not None:
+            return ""
+        return (f" No model is trained yet ({version} is the untrained service): run `rlcd train` in the project "
+                f"(or POST /v1/train), then ask again; `rlcd check` says what is missing.")
 
     def spec(self, head: str, version: str, question: str | None = None) -> HeadSpec:
         specs = self.specs(version)
         if head not in specs:
             raise ContractError(
                 f"no head named {head!r}. RLCD only answers questions bound to a trained head: set the "
-                f"question's `head` field (or use a head name as the question id).", kind="unknown_head",
+                f"question's `head` field (or use a head name as the question id)."
+                + (self.untrained_hint(version) if not specs else ""), kind="unknown_head",
                 question=question, available_heads=list(specs))
         return specs[head]
 
@@ -286,9 +303,20 @@ class Service:
         return self._providers[version]
 
     def policy(self, version: str) -> PL.PolicyConfig:
+        """The policy `version` serves: the one stored in its bundle (the thresholds it was verified with), else
+        rlcd.yaml's. A stored policy that cannot be served (a bundle trained before `rlcd config check` existed, with
+        `abstain: act`, or a damaged model.json) fails closed: the version refuses to decide (422 `bad_bundle`)
+        instead of handing a caller an abstention named `act`."""
         b = self.bundle(version)
         if b is not None and b.meta.get("policy"):
-            return PL.PolicyConfig.from_dict(b.meta["policy"])
+            try:
+                return PL.PolicyConfig.from_dict(b.meta["policy"])
+            except (ValueError, TypeError) as e:
+                raise ContractError(
+                    f"model {version} cannot decide: the policy stored in its bundle is not usable ({e}). It was "
+                    f"trained before rlcd.yaml was checked: fix `policy` in rlcd.yaml (`rlcd config check`) and "
+                    f"retrain with `rlcd train`, or point rlcd-latest at a sound version (`rlcd rollback`)",
+                    kind="bad_bundle", status=422, version=version) from None
         return self.policy_config()
 
     def policy_config(self) -> PL.PolicyConfig:
@@ -502,6 +530,15 @@ class Service:
                        f"training row had ({', '.join(shown[:6])}; e.g. {', '.join(missing[:4])}): the probabilities "
                        f"were calibrated on inputs that had them and may not hold. Send the same fields as in "
                        f"training (GET /v1/heads describes them)")
+                if msg not in warnings:
+                    warnings.append(msg)
+        if warnings is not None:
+            # a provider may say more about raw inputs than "missing" (a value that is not a number, a category
+            # no training row had): optional hook `input_warnings(view, states) -> list[str]`
+            hook = getattr(self.provider(version), "input_warnings", None)
+            raw = [s for s in states if not is_precomputed(s)]
+            for w in (hook(spec.view, raw) if callable(hook) and raw else []):
+                msg = f"head '{spec.name}': {w}"
                 if msg not in warnings:
                     warnings.append(msg)
         return head.ensemble.predict_proba(X), True
@@ -920,7 +957,9 @@ class Service:
         specs = self.specs(version)
         names = req.heads or list(specs)
         if not names:
-            raise ContractError("no heads to decide with")
+            why = self.untrained_hint(version) or (f" {version} serves no head: every head is switched off in rlcd.yaml, "
+                                                   f"or the pack defines none.")
+            raise ContractError("no heads to decide with." + why)
         extra = req.model_extra or {}
         strict = bool(extra.get("strict"))
         hspecs = {name: self.spec(name, version) for name in names}
@@ -1402,6 +1441,95 @@ class Service:
             out.append(d)
         return {"model": version, "batteries": out}
 
+    def gate_outlook(self, version: str, head: str) -> dict:
+        """Where a trained head stands with the Bernoulli gate, per stakes level whose holdout verdict is `act`.
+
+        The gate keeps counts per (committed class, probability bin), seeded from the holdout. A cell the holdout
+        filled well passes at once; a cell it never (or rarely) reached starts at confirm, and needs correct
+        outcomes posted to /v1/feedback before it acts. Computed with the gate itself (`bernoulli.posterior` against
+        the level's `min_accuracy` and `policy.gate_min_p_above`), on the evidence a decision would be gated on now:
+
+            {level: {"act": 0.85, "min_accuracy": 0.75, "threshold": 0.9, "from_empty": 8,
+                     "cells": [{"class", "bin", "lo", "hi", "wins", "losses", "passes", "needed"}]}}
+
+        `needed`: correct outcomes in a row until the cell passes (0 when it passes; None when 10,000 would not
+        do); `from_empty`: the same number for a cell without any evidence. {} for an untrained head, or one whose
+        verdict allows `act` at no level."""
+        from . import bernoulli as B
+
+        loaded = self.loaded(version, head)
+        if loaded is None:
+            return {}
+        spec, cfg = loaded.spec, self.policy(version)
+        bcfg = cfg.bernoulli()
+        table = self.gate_table(version, head, loaded) or {}
+        bins = table.get("bins") or {}
+        labels = (spec.labels[1],) if spec.decision == "gate" else tuple(spec.labels)
+        conformal = loaded.conformal_threshold if spec.decision == "gate" else None
+
+        def needed(wins: float, losses: float, required: float) -> int | None:
+            def ok(n: int) -> bool:
+                return (B.posterior(wins + n, losses, required, bcfg)["p_above_required"] or 0.0) >= bcfg.min_p_above
+            if ok(0):
+                return 0
+            hi = 1
+            while not ok(hi):
+                hi *= 2
+                if hi > 10_000:
+                    return None
+            lo = hi // 2          # not ok(lo), ok(hi): more wins only ever raise the posterior mass above `required`
+            while hi - lo > 1:
+                mid = (lo + hi) // 2
+                lo, hi = (lo, mid) if ok(mid) else (mid, hi)
+            return hi
+
+        out: dict[str, dict] = {}
+        for level in cfg.stakes:
+            v = (loaded.verdict or {}).get(level) or {}
+            if v.get("tier") != 2:
+                continue
+            cells = []
+            for c in labels:
+                lv = cfg.level_for(spec.name, c, level)
+                act = max(lv.act, conformal) if conformal is not None else lv.act
+                for k in range(B.bin_of(act), B.BINS):
+                    w, l_ = (bins.get(c) or [[0, 0]] * B.BINS)[k]
+                    n = needed(w, l_, lv.min_accuracy)
+                    cells.append({"class": c, "bin": k, "lo": round(k / B.BINS, 2), "hi": round((k + 1) / B.BINS, 2),
+                                  "wins": int(w), "losses": int(l_), "passes": n == 0, "needed": n})
+            base = cfg.level(level)
+            out[level] = {"act": base.act, "min_accuracy": base.min_accuracy, "threshold": bcfg.min_p_above,
+                          "from_empty": needed(0, 0, base.min_accuracy), "cells": cells}
+        return out
+
+    def readiness(self) -> dict:
+        """Can this process decide? {"ready", "model", "reasons"}: ready when the pack loads, the served version has
+        at least one trained head and its policy can be served. `/health` says the process is up; this says a
+        decision would come from a trained model (GET /ready answers 503 until then)."""
+        version = self.registry.latest_id()
+        reasons: list[str] = []
+        try:
+            specs = self.specs(version)
+        except Exception as e:      # the text can carry paths or a DSN: it goes to the log, as in health()
+            import logging
+
+            logging.getLogger("open_rlcd").error("readiness: the pack cannot load: %s", e)
+            specs = None
+            reasons.append(f"the pack cannot load ({type(e).__name__}; details are in the server log)")
+        if specs is not None:
+            if self.bundle(version) is None:
+                reasons.append(f"no model is trained ({version} is the untrained service): run `rlcd train` or "
+                               f"import a bundle")
+            elif not any(self.loaded(version, n) is not None for n in specs):
+                reasons.append(f"{version} serves no trained head (every trained head is switched off in rlcd.yaml)")
+            else:
+                try:
+                    self.policy(version)
+                except ContractError as e:
+                    reasons.append(e.message if e.kind == "bad_bundle" else
+                                   "the policy cannot be served (details: GET /v1/check)")
+        return {"ready": not reasons, "model": version, "reasons": reasons}
+
     def health(self) -> dict:
         version = self.registry.latest_id()
         running = self.trainer.running()
@@ -1423,4 +1551,4 @@ class Service:
                 "pack": ((b.meta.get("pack") or {}).get("name") if b else self._default_pack),
                 "heads": heads, "training": running["job_id"] if running else None, "home": str(self.home),
                 "untrained_id": f"{MODEL_PREFIX}0", "rollout": rollout,
-                "automation": self.switch.state().enabled}
+                "automation": self.switch.state().enabled, "ready": self.readiness()["ready"]}

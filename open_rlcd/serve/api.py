@@ -3,10 +3,14 @@
     rlcd serve --port 8095                     (or: uvicorn open_rlcd.serve.api:app --port 8095)
 
 Errors are `{"error": "...", "kind": "...", "retryable": bool}`: 401 (only when RLCD_API_KEY is set; with
-RLCD_ADMIN_KEY set, POST /v1/train, POST /v1/automation and POST /v1/receipts/{id}/confirm need that key instead), 404 an
+RLCD_ADMIN_KEY set, POST /v1/train, POST /v1/automation and POST /v1/receipts/{id}/confirm need that key instead —
+RLCD_ADMIN_KEY alone protects only those three routes, every other route stays open until RLCD_API_KEY is set,
+which is why `rlcd serve` refuses a non-loopback host without RLCD_API_KEY), 404 an
 unknown receipt, 413 a request body larger than RLCD_MAX_BODY_BYTES (default 16 MiB), 422 validation / unknown
 head / unknown model / feature version mismatch / missing evidence, 409 a training job is already running or the
-kill switch is locked by the environment, 503 a connector or the encoder is unreachable, 500 `internal`.
+kill switch is locked by the environment, 503 a connector or the encoder is unreachable (and GET /ready while no
+trained model can decide: `not_ready`), 500 `internal`. GET /health (liveness) and GET /ready (readiness) never
+need a key.
 `retryable` says whether the same request may succeed later unchanged (409 busy, 503): a client retries those
 with backoff (a `Retry-After` header gives the delay) and never retries the others — a 422 needs a different
 request, not another attempt. A 500 or 503 body never carries exception text (it can hold absolute paths or a
@@ -59,6 +63,7 @@ def max_body_bytes() -> int:
 
 RETRYABLE = {409: 5, 429: 1, 503: 2}     # status -> Retry-After seconds
 ADMIN_PATHS = {"/v1/train", "/v1/automation"}   # write routes that need RLCD_ADMIN_KEY when it is set
+OPEN_PATHS = {"/health", "/ready"}              # probes: never need a key, never reveal the server's paths
 # a person's confirmation of a confirm decision: a caller holding only the decision key must not confirm its own
 _CONFIRM = re.compile(r"/v1/receipts/[^/]+/confirm")
 
@@ -182,7 +187,7 @@ def create_app(service: Service | None = None, project: Project | None = None, h
             # caller's key can neither retrain nor switch automation back on
             if not hmac.compare_digest(got.encode(), admin.encode()):
                 return error(401, f"{request.url.path} needs the admin key (RLCD_ADMIN_KEY)", "unauthorized")
-        elif key and path != "/health" and not (
+        elif key and path not in OPEN_PATHS and not (
                 hmac.compare_digest(got.encode(), key.encode())
                 or (admin and hmac.compare_digest(got.encode(), admin.encode()))):
             return error(401, "missing or wrong API key (send `Authorization: Bearer <key>`)", "unauthorized")
@@ -203,6 +208,17 @@ def create_app(service: Service | None = None, project: Project | None = None, h
         if os.environ.get("RLCD_API_KEY"):   # /health is open: with a key set it does not reveal the server's paths
             h.pop("home", None)
         return h
+
+    @app.get("/ready")
+    def ready():
+        """Readiness: 200 when a trained model can decide, 503 `not_ready` (with `reasons`) until then. /health
+        stays the liveness probe: it answers 200 whenever the process is up."""
+        r = svc.readiness()
+        if r["ready"]:
+            return {"status": "ready", **r}
+        body = {"error": "not ready to decide: " + "; ".join(r["reasons"]), "kind": "not_ready", "retryable": True,
+                "status": "not_ready", **r}
+        return JSONResponse(body, status_code=503, headers=_headers(503, "not_ready"))
 
     @app.get("/v1/models")
     def models():

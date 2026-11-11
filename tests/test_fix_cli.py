@@ -74,6 +74,7 @@ def fake_claude(tmp_path, monkeypatch):
     log = tmp_path / "claude-calls.jsonl"
     monkeypatch.setenv("PATH", f"{bindir}:{__import__('os').environ.get('PATH', '')}")
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(log))
+    monkeypatch.setenv("RLCD_ALLOW_REMOTE", "1")     # the claude-cli judge is refused without the opt-in
     return log
 
 
@@ -139,8 +140,8 @@ def test_label_audit_and_next_through_the_cli(docs_project, fake_claude, monkeyp
     assert res["labelled"] == 2 and res["accepted_judge"] == 1 and res["overruled"] == 1 and res["quit"] is True
     head = res["heads"]["answerable"]
     # F36: how many trusted rows the head still needs, to train and for a 30-row holdout
-    assert head["trusted"] == 2 and head["for_verified_holdout"] == 150
-    assert head["more_for_verified_holdout"] == 148 and "28 more trusted rows needed" in head["status"]
+    assert head["trusted"] == 2 and head["for_verified_holdout"] == 146
+    assert head["more_for_verified_holdout"] == 144 and "about 44 more trusted rows needed" in head["status"]
     assert run(root, "label", "next", "--head", "answerable", "--n", "3") == 0
     out = capsys.readouterr().out
     left = len(LabelStore(load_project(root).home).items("query_evidence")) - 2

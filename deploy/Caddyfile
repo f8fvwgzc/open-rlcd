@@ -1,0 +1,42 @@
+# TLS termination for open-rlcd (compose.yaml mounts this file).
+#
+#   RLCD_DOMAIN   the name clients use                        default: localhost
+#   RLCD_TLS      internal                                    Caddy's own CA (default; clients must trust its root:
+#                                                             /data/caddy/pki/authorities/local/root.crt in the proxy)
+#                 you@example.com                             a public certificate by ACME (the name must resolve to
+#                                                             this host and ports 80/443 must be reachable)
+#                 /certs/fullchain.pem /certs/privkey.pem     your own certificate (mount it into the proxy)
+
+{
+	admin off
+}
+
+{$RLCD_DOMAIN:localhost} {
+	tls {$RLCD_TLS:internal}
+
+	# the service's own limit is RLCD_MAX_BODY_BYTES (default 16 MiB = 16777216 bytes): refuse larger bodies here
+	# first. MiB, not MB: Caddy reads "16MB" as 16000000 bytes, which would refuse bodies the service accepts.
+	request_body {
+		max_size 16MiB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	# The interactive API pages are not needed on a server (they sit behind the API key anyway).
+	@docs path /docs /docs/* /redoc /openapi.json
+	respond @docs 404
+
+	reverse_proxy rlcd:8095 {
+		health_uri /health
+		health_interval 15s
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

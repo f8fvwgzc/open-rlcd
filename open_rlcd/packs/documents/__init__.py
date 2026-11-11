@@ -31,7 +31,7 @@ from ...features.text import EncoderError, EncoderMismatch, make_encoder
 from ...labeling.store import LabelItem, LabelStore
 from ..base import BasePack, dataset_from_labels
 from .provider import VIEWS, DocumentsProvider
-from .settings import DEFAULT_ENCODER, corpus_settings, encoder_settings
+from .settings import DEFAULT_ENCODER, config_keys, corpus_settings, encoder_settings
 
 PROVIDER_CONFIG_VERSION = 1
 
@@ -53,12 +53,16 @@ class DocumentsPack(BasePack):
             self._defaults = super().defaults()
         return self._defaults
 
+    def config_keys(self) -> dict:
+        return config_keys()
+
     # ------------------------------------------------------------------ features
     def provider(self, project: Project, config: dict | None = None) -> DocumentsProvider:
         """Without `config`: the encoder of pack_config.encoder (default ONNX multilingual-e5-small). With a bundle's
         `config`: the exact encoder the bundle was trained with, refused when its sha256 or the feature schema
         differs (the trained weights would be meaningless on other features)."""
-        opts = {"cache_size": project.pack_config.get("feature_cache", 1024)}
+        cache = project.pack_config.get("feature_cache")
+        opts = {"cache_size": 1024 if cache is None else cache}     # `feature_cache:` with no value is the default
         try:
             if not config:
                 return DocumentsProvider(make_encoder(encoder_settings(project.pack_config), project.home), opts)

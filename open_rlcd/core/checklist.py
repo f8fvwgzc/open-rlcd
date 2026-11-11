@@ -15,6 +15,7 @@ item, each with a status:
 
 Check ids (stable, for scripts and CI):
 
+    config.valid           fail when rlcd.yaml has an error (`rlcd config check`), warn on its warnings
     heads.trained          fail when no head is trained, warn when some are not
     skill.<head>           per trained head: warn without skill over the base rate; its verdict per stakes level
     thresholds.holdout     fail when a head has no holdout verdict for a stakes level the version serves, or was
@@ -205,6 +206,11 @@ class _Ctx:
         return self._get("specs", lambda: dict(self.service.specs(self.version)))
 
     @property
+    def off(self) -> set:
+        """The heads the project switches off (Service.switched_off): not served even when this version has them."""
+        return self._get("off", lambda: set(self.service.switched_off(self.version)))
+
+    @property
     def policy(self) -> PL.PolicyConfig:
         return self._get("policy", lambda: self.service.policy(self.version))
 
@@ -283,6 +289,33 @@ def _time(value: Any) -> datetime | None:
     return t if t.tzinfo is not None else t.replace(tzinfo=UTC)
 
 
+# ----------------------------------------------------------------------------- configuration
+
+@_check("config.valid", "rlcd.yaml is valid")
+def _config_valid(ctx: _Ctx) -> Outcome:
+    """The findings of `rlcd config check` (core/config_check.py), against the pack this service runs."""
+    from .config_check import check_project, errors, warnings
+
+    project = ctx.project
+    if getattr(project, "path", None) is None and not project.data:
+        return "info", "no rlcd.yaml: the default project is used (pack and home from the environment or defaults)"
+    findings = check_project(project, ctx.service.pack)
+    bad, odd = errors(findings), warnings(findings)
+
+    def listed(items: list[dict]) -> str:
+        # without error_text only the keys are named: a message can quote a value or a path of the server
+        shown = [f"{f['path']}: {f['message']}" if ctx.error_text else str(f["path"]) for f in items[:5]]
+        more = f"; and {len(items) - 5} more" if len(items) > 5 else ""
+        return "; ".join(shown) + more
+
+    if bad:
+        return "fail", (f"{len(bad)} error{'' if len(bad) == 1 else 's'} in rlcd.yaml: {listed(bad)}. `rlcd config "
+                        f"check` lists every finding; `rlcd train` and `rlcd serve` refuse to start until it is clean")
+    if odd:
+        return "warn", f"{len(odd)} warning{'' if len(odd) == 1 else 's'} in rlcd.yaml: {listed(odd)}"
+    return "pass", "every key of rlcd.yaml is known and every value is of its type and in its range"
+
+
 # ----------------------------------------------------------------------------- heads and thresholds
 
 @_check("heads.trained", "Heads are trained")
@@ -321,7 +354,41 @@ def _head_skill(ctx: _Ctx, name: str, h: Any) -> Outcome:
                         f"retrain shows skill; {verdict}")
     bss = m.get("brier_skill_score")
     bss_text = f" (Brier skill score {bss:.3f})" if isinstance(bss, (int, float)) else ""
-    return "pass", f"skill over the base rate on {rows}{bss_text}; {verdict}"
+    try:
+        gate = gate_lines(ctx.service.gate_outlook(ctx.version, name))
+    except Exception:       # a reading aid: the verdict above is the check
+        gate = []
+    gate_text = (". Live decisions also pass the Bernoulli gate, per (class, probability bin): " + "; ".join(gate)
+                 if gate else "")
+    return "pass", f"skill over the base rate on {rows}{bss_text}; {verdict}{gate_text}"
+
+
+def gate_lines(outlook: dict, shown: int = 4) -> list[str]:
+    """`Service.gate_outlook` as one line per stakes level whose holdout verdict is act: how many of the cells
+    that can act already pass the Bernoulli gate on holdout evidence, and how many correct outcomes (POST
+    /v1/feedback with the decision_id) each of the others needs before its decisions move from confirm to act."""
+    lines: list[str] = []
+    for level, o in outlook.items():
+        cells = o.get("cells") or []
+        waiting = [c for c in cells if not c["passes"]]
+        empty = o.get("from_empty")
+        fresh = (f"a cell with no evidence yet needs {empty} correct outcomes in a row" if empty is not None
+                 else "a cell with no evidence yet cannot pass")
+        if not waiting:
+            lines.append(f"{level}: all {len(cells)} cells that can act (p >= {o['act']:g}) pass on holdout evidence")
+            continue
+
+        def one(c: dict) -> str:
+            need = (f"needs {c['needed']} correct" if c["needed"] is not None
+                    else "cannot pass on correct outcomes alone")
+            return f"{c['class']} at p {c['lo']:g}-{c['hi']:g} {need} ({c['wins']} of {c['wins'] + c['losses']} right)"
+
+        more = f", and {len(waiting) - shown} more" if len(waiting) > shown else ""
+        lines.append(f"{level}: {len(cells) - len(waiting)} of {len(cells)} cells that can act (p >= {o['act']:g}) "
+                     f"pass on holdout evidence; the others start at confirm until correct outcomes arrive via "
+                     f"POST /v1/feedback: {', '.join(one(c) for c in waiting[:shown])}{more} ({fresh}; the gate "
+                     f"wants P(accuracy > {o['min_accuracy']:g}) >= {o['threshold']:g})")
+    return lines
 
 
 def _verdict_text(verdict: dict, served: list[str]) -> str:
@@ -420,12 +487,39 @@ def _policy_config(ctx: _Ctx) -> Outcome:
     b = ctx.service.bundle(ctx.version)
     if b is None or not b.meta.get("policy"):
         return "info", f"{ctx.version} records no policy of its own: rlcd.yaml `policy` is served as written"
-    served, configured = ctx.policy.to_dict(), ctx.service.policy_config().to_dict()
-    if digest(served) == digest(configured):
+    drift = policy_drift(ctx.service, ctx.version)
+    if drift is None:
         return "pass", f"rlcd.yaml `policy` is the policy {ctx.version} was trained and verified with"
-    return "warn", (f"rlcd.yaml `policy` differs from the policy {ctx.version} serves (served -> rlcd.yaml: "
-                    f"{_diff(served, configured)}): a version keeps the thresholds it was verified with, so the new "
-                    f"ones apply only after `rlcd train` verifies them on a holdout")
+    return "warn", (f"rlcd.yaml differs from what {ctx.version} serves (served -> rlcd.yaml: {drift}): a version "
+                    f"keeps the thresholds it was verified with, so the new ones apply only after `rlcd train` "
+                    f"verifies them on a holdout")
+
+
+def policy_drift(service: Any, version: str) -> str | None:
+    """How rlcd.yaml differs from what `version` serves, as 'key served -> configured; ...': its `policy`, and the
+    `stakes` and `conformal` of each trained head (a version serves the policy stored in its bundle and its heads
+    as they were trained). None when they agree, or when the version stores no policy (rlcd.yaml is then served as
+    written). `rlcd check` (thresholds.config), `rlcd decide`, `rlcd ask` and `rlcd serve` all report this one
+    text."""
+    b = service.bundle(version)
+    if b is None or not b.meta.get("policy"):
+        return None
+    served, configured = service.policy(version).to_dict(), service.policy_config().to_dict()
+    parts = [_diff(served, configured)] if digest(served) != digest(configured) else []
+    try:
+        wanted = service.pack_for(version).heads(service.project)
+    except Exception:       # the pack cannot build its heads from this file: `config.valid` reports that
+        wanted = {}
+    for name in b.names():
+        spec = wanted.get(name)
+        if spec is None:
+            continue
+        trained = b.head(name).spec
+        for field in ("stakes", "conformal"):
+            was, now = getattr(trained, field), getattr(spec, field)
+            if now != was:
+                parts.append(f"heads.{name}.{field} {was!r} -> {now!r}")
+    return "; ".join(parts) or None
 
 
 def _flat(d: Any, prefix: str = "") -> dict[str, Any]:
@@ -591,26 +685,40 @@ def _routes(ctx: _Ctx) -> Outcome:
                         "tool, declare what it may receive (allowed_data), needs (requires) and falls back to, so "
                         "deterministic filters run before the choice")
     specs = ctx.specs
-    problems = []
-    for head in book.routes:
+    # a head the project switches off is not served (Service.specs leaves it out), so its contracts are kept and
+    # never consulted, as config check says too (a pack that serves such a head anyway has it in specs: checked)
+    off = {n for n in ctx.off if n not in specs}
+    served = [h for h in book.routes if h not in off]
+    missing, refused = [], []
+    for head in served:
         spec = specs.get(head)
         if spec is None:
-            problems.append(f"routes.{head}: {ctx.version} has no head {head!r}")
+            missing.append(f"routes.{head}: {ctx.version} has no head {head!r}")
             continue
         try:
             book.check_head(head, spec)
         except ContractError as e:
-            problems.append(e.message)
-    if problems:
-        return "fail", "; ".join(problems) + " (every /v1/decide call that consults them is a 500 bad_config)"
-    any_data = [f"{h}.{o}" for h, opts in book.routes.items() for o, c in opts.items()
+            refused.append(e.message)
+    if missing or refused:
+        parts = []
+        if refused:
+            parts.append("; ".join(refused) + " (a /v1/decide that applies route contracts to the head answers "
+                                              "500 bad_config)")
+        if missing:
+            parts.append("; ".join(missing) + " (no decision consults these contracts: train the head or remove "
+                                              "them)")
+        return "fail", "; ".join(parts)
+    any_data = [f"{h}.{o}" for h in served for o, c in book.routes[h].items()
                 if "allowed_data" not in c and c.get("enabled") is not False]
-    uncovered = [f"{h}.{o}" for h in book.routes for o in specs[h].classes if o not in book.routes[h]]
-    text = f"contracts for {_names(list(book.routes))}"
+    uncovered = [f"{h}.{o}" for h in served for o in specs[h].classes if o not in book.routes[h]]
+    text = f"contracts for {_names(served)}" if served else "no contracts for a served head"
     if any_data:
         text += f"; accept every data class (no allowed_data): {_names(any_data[:10])}"
     if uncovered:
         text += f"; options without a contract (never filtered): {_names(uncovered[:10])}"
+    kept = [h for h in book.routes if h in off]
+    if kept:
+        text += f"; kept but not consulted while the head is switched off in rlcd.yaml: {_names(kept)}"
     return "pass", text
 
 
@@ -641,9 +749,10 @@ def _allow_remote(ctx: _Ctx) -> Outcome:
         sources.append("pack_config.allow_remote")
     if sources:
         return "warn", (f"remote hosts are allowed ({_names(sources)}): connectors and LLM judges may send documents, "
-                        f"queries and labels to non-loopback hosts. Make sure every such host is an approved route for "
+                        f"queries and labels to non-loopback hosts, and the claude-cli / anthropic judges to Anthropic. Make sure every such host is an approved route for "
                         f"the data it receives")
-    return "pass", "connectors and LLM judges only talk to loopback hosts and unix sockets"
+    return "pass", ("connectors and LLM judges only talk to loopback hosts and unix sockets (the claude-cli and "
+                    "anthropic judges are refused)")
 
 
 @_check("security.admin_key", "The operator's controls need their own key")
@@ -794,7 +903,9 @@ def _rollout(ctx: _Ctx) -> Outcome:
     if ro.head_modes:
         text += "; per head: " + ", ".join(f"{h} {m}" for h, m in ro.head_modes)
     try:
-        known = set(ctx.service.specs(ctx.service.resolve(None)))
+        # a head the project switches off is not served at all, so a mode set for it holds nothing back
+        latest = ctx.service.resolve(None)
+        known = set(ctx.service.specs(latest)) | ctx.service.switched_off(latest)
     except Exception:
         known = set()
     named = {h for h, _ in ro.head_modes} | set(ro.limited_heads or ())

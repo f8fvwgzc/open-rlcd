@@ -39,3 +39,58 @@ jobs:
       - run: uv sync ${{ matrix.extras }}
       - name: tests (offline, CPU only)
         run: uv run pytest -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build the image (core only, pinned by uv.lock)
+        run: docker build -t open-rlcd:ci .
+      - name: compose file is valid and refuses to start without keys
+        run: |
+          RLCD_API_KEY=x RLCD_ADMIN_KEY=y docker compose config -q
+          if docker compose config -q 2>/dev/null; then echo "compose accepted missing keys"; exit 1; fi
+      - name: smoke test (demo model, read-only root, non-root)
+        run: |
+          set -euo pipefail
+          KEY="ci-$(openssl rand -hex 16)"
+          ADMIN="ci-admin-$(openssl rand -hex 16)"
+          docker run -d --name rlcd --read-only --tmpfs /tmp --cap-drop ALL \
+            -p 127.0.0.1:8095:8095 -e RLCD_API_KEY="$KEY" -e RLCD_ADMIN_KEY="$ADMIN" open-rlcd:ci
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:8095/health >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "no /health after 60 s"; exit 1; }
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8095/health | tee health.json
+          grep -q '"status":"ok"' health.json
+          grep -q '"model":"rlcd-0.1.1"' health.json          # the demo bundle was imported
+          BODY='{"state": {"query": "Who leads the team that owns the K-200 scanner?"},
+                 "questions": {"kind": {"type": "choice", "head": "response_type"},
+                               "multi_hop": {"type": "noul", "head": "needs_graph"}}}'
+          # with the key: answered
+          curl -fsS http://127.0.0.1:8095/v1/systemone -H "authorization: Bearer $KEY" \
+            -H 'content-type: application/json' -d "$BODY" | tee answer.json
+          grep -q '"choice":' answer.json
+          # without the key: refused
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8095/v1/systemone \
+            -H 'content-type: application/json' -d "$BODY")
+          [ "$code" = 401 ] || { echo "expected 401 without a key, got $code"; exit 1; }
+          # the decision key cannot use the operator's routes
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8095/v1/automation \
+            -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"enabled": false}')
+          [ "$code" = 401 ] || { echo "expected 401 for the decision key on /v1/automation, got $code"; exit 1; }
+          # non-root, home writable, receipts verify
+          [ "$(docker exec rlcd id -u)" = 10001 ]
+          docker exec rlcd sh -c 'touch "$RLCD_HOME/.probe" && rm "$RLCD_HOME/.probe"'
+          docker exec rlcd rlcd receipts verify
+          # the container's own HEALTHCHECK agrees
+          for i in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' rlcd)" = healthy ] && break
+            [ "$i" = 30 ] && { echo "container never became healthy"; exit 1; }
+            sleep 1
+          done
+      - name: container log
+        if: always()
+        run: docker logs rlcd || true

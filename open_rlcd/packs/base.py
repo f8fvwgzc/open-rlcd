@@ -7,15 +7,21 @@ A custom pack is referenced from rlcd.yaml by a dotted path, `pack: my_pkg.my_pa
 
 Only rlcd.yaml (the project's own configuration) may name code to import. A bundle's `pack.name` is data: the
 service maps it to the project's configured pack (by the pack's `.name`) or to a built-in pack, never to an import.
+A custom pack may live next to rlcd.yaml: `load_pack(name, root=project.root)` makes the project folder importable
+while the pack's module is imported (see `load_pack`); that folder is the one rlcd.yaml is in, never a bundle's.
 
 Every head also accepts a precomputed state `{x, feature_names, feature_version}`; the service checks it
 against the bundle and refuses a mismatch with a 422.
 """
 from __future__ import annotations
 
+import functools
 import importlib
 import json
-from collections.abc import Callable, Iterable
+import os
+import sys
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -23,7 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 import numpy as np
 import yaml
 
-from ..core.config import Project
+from ..core.config import Project, find_config
 from ..core.contract import ContractError
 from ..core.dataset import Dataset
 from ..core.head import HeadSpec
@@ -72,6 +78,14 @@ class BasePack:
     abstain = "escalate"
     rank_head: str | None = None          # default head of /v1/rank
 
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """A pack's own `datasets()` is wrapped so that feedback it was given and did not use is never silent
+        (see `_note_unused_feedback`)."""
+        super().__init_subclass__(**kwargs)
+        own = cls.__dict__.get("datasets")
+        if callable(own):
+            cls.datasets = _note_unused_feedback(own)
+
     def defaults(self) -> dict:
         if self.yaml_path is None:
             return {}
@@ -111,8 +125,45 @@ class BasePack:
     def synth(self, seed: int = 7, n: int = 1000) -> dict:
         raise NotImplementedError
 
+    # ------------------------------------------------------------------ rlcd.yaml validation (core/config_check.py)
+    def config_keys(self) -> dict | None:
+        """The `pack_config` keys this pack reads: {key: core.config_check.Key(...)} (a value that is not a Key
+        means "known, any value"). With it, `rlcd config check` reports an unknown `pack_config` key as an error,
+        with a suggestion, and checks the declared types. None (the default): `pack_config` is not checked."""
+        return None
+
+    def head_override_keys(self) -> set[str]:
+        """Fields a `heads.<head>` override may set for this pack beyond the HeadSpec fields and `enabled`."""
+        return set()
+
+    def switched_off(self, project: Project, trained: Iterable[str] = ()) -> set[str]:
+        """The heads this project switches off. The service does not serve them, even when a trained version has
+        them (`Service.specs`), and `rlcd check` and `rlcd config check` keep their route contracts, rollout modes
+        and policy overrides without comparing them with a head: all three read this one list (through
+        `switched_off` below). A switched-off head stays in the bundle, so switching it on again needs no retrain.
+        `trained`: the heads of the trained version in question (none when no model is involved).
+
+        Here, what rlcd.yaml switches off with `heads.<head>.enabled: false` (`heads()` leaves those heads out
+        too). Every other trained head is served, one the pack no longer defines included. A pack whose
+        configuration lists the heads it serves also names the trained heads it no longer lists (the tabular pack:
+        a target removed from `pack_config.targets`). Reads the configuration only, never the pack's data."""
+        return {str(n) for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
+
+    def check_config(self, project: Project) -> list[dict]:
+        """Findings only the pack can make about rlcd.yaml: [{level: "error" | "warn", path, message}]. Called
+        by `rlcd config check` after the key and type checks passed; must not need the network."""
+        return []
+
     def supports(self, hook: str) -> bool:
         return getattr(type(self), hook, None) is not getattr(BasePack, hook, None)
+
+
+def switched_off(pack: Any, project: Project, trained: Iterable[str] = ()) -> set[str]:
+    """`pack.switched_off(project, trained)`, the heads the project switches off; a pack that does not subclass
+    BasePack (and so has no such hook) gets BasePack's rule, `heads.<head>.enabled: false`."""
+    fn = getattr(pack, "switched_off", None)
+    names = fn(project, tuple(trained)) if callable(fn) else BasePack.switched_off(pack, project, trained)
+    return {str(n) for n in names}
 
 
 def spec_from_yaml(name: str, d: dict) -> HeadSpec:
@@ -130,19 +181,95 @@ def spec_from_yaml(name: str, d: dict) -> HeadSpec:
                     levels=tuple(str(x) for x in (levels or ())), **{k: v for k, v in d.items() if k != "name"})
 
 
-def load_pack(name: str) -> BasePack:
-    """A built-in pack by name, or a custom one by dotted path `module:Class`."""
+def _note_unused_feedback(fn: Callable) -> Callable:
+    """Wrap a pack's `datasets()`: when feedback rows for a head were passed in and the head's dataset has no row
+    of source "feedback" (and no note of the pack's own about feedback), a note on that dataset says so. The note
+    is printed by `rlcd train` and stored with the head. Without it, POST /v1/feedback answers "used as an
+    up-weighted training row at the next train" while a `datasets()` that ignores its `feedback` argument drops
+    every row."""
+
+    @functools.wraps(fn)
+    def datasets(self: Any, project: Any, provider: Any, heads: Any, *args: Any, **kwargs: Any) -> Any:
+        out = fn(self, project, provider, heads, *args, **kwargs)
+        feedback = kwargs.get("feedback", args[0] if args else None)
+        if not feedback or not isinstance(out, dict):
+            return out
+        for name, ds in out.items():
+            if not isinstance(ds, Dataset):
+                continue
+            n = sum(1 for r in feedback if isinstance(r, dict) and r.get("head") == name
+                    and r.get("state") is not None)
+            if not n or "feedback" in ds.source.tolist() or any("feedback" in str(x) for x in ds.notes):
+                continue
+            ds.notes.append(
+                f"{n} feedback rows for head '{name}' were passed to {type(self).__name__}.datasets() but none is "
+                f"in the training set (no row has source \"feedback\"): the pack ignores its `feedback` argument or "
+                f"dropped every row. Build the dataset with open_rlcd.packs.base.dataset_from_labels, which adds "
+                f"them (docs/writing-a-pack.md, \"Labels\")")
+        return out
+
+    return datasets
+
+
+@contextmanager
+def _importable(root: Path | None, module: str) -> Iterator[None]:
+    """Make `root` importable while the body runs, when the top-level package of `module` is a file or folder
+    there. The folder goes to the END of sys.path, so it can never shadow the standard library or an installed
+    package, and it is taken out again afterwards: the imported pack stays in sys.modules, sys.path is left as it
+    was. (A pack that is a package keeps importing its own submodules after that, through the package.)"""
+    top = module.partition(".")[0]
+    entry = None if root is None else str(root)
+    if entry is None or entry in sys.path or not ((root / top).is_dir() or (root / f"{top}.py").is_file()):
+        yield
+        return
+    sys.path.append(entry)
+    importlib.invalidate_caches()
+    try:
+        yield
+    finally:
+        with suppress(ValueError):
+            sys.path.remove(entry)
+
+
+def load_pack(name: str, root: str | os.PathLike | None = None) -> BasePack:
+    """A built-in pack by name, or a custom one by dotted path `module:Class`.
+
+    `root` is the project folder (the folder of rlcd.yaml, `project.root`): a custom pack whose module lives
+    there is importable without installing it or setting PYTHONPATH. Without `root`, the folder of the rlcd.yaml
+    that `load_project()` would find is used (RLCD_PROJECT, else the nearest one from the current folder). An
+    installed module of the same name wins over the one in the project folder. `name` must come from rlcd.yaml
+    (or the caller's own code), never from a bundle."""
     target = BUILTIN.get(name, name)
     if ":" not in target:
         raise ValueError(f"unknown pack {name!r}; built-in packs: {sorted(BUILTIN)}, or give 'module:Class'")
     mod, _, cls = target.partition(":")
+    where: Path | None = None
+    if name not in BUILTIN:
+        if root is not None:
+            where = Path(root).expanduser().resolve()
+        else:
+            cfg = find_config()
+            where = cfg.parent.resolve() if cfg is not None else None
     try:
-        return getattr(importlib.import_module(mod), cls)()
+        with _importable(where, mod):
+            module = importlib.import_module(mod)
     except ImportError as e:
         extra = EXTRAS.get(name)
-        hint = (f" Install the pack's extra: `uv sync --extra {extra}` (or `pip install 'open-rlcd[{extra}]'`)."
-                if extra else "" if name in BUILTIN else " Check that the module is importable (PYTHONPATH).")
+        if extra:
+            hint = f" Install the pack's extra: `uv sync --extra {extra}` (or `pip install 'open-rlcd[{extra}]'`)."
+        elif name in BUILTIN:
+            hint = ""
+        else:
+            hint = (f" Put the module next to rlcd.yaml (looked in {where}) or install it."
+                    if where is not None else " Put the module next to rlcd.yaml or install it (PYTHONPATH).")
         raise ImportError(f"pack {name!r} needs a module that is not installed ({e}).{hint}") from e
+    try:
+        return getattr(module, cls)()
+    except AttributeError as e:
+        if hasattr(module, cls):
+            raise
+        raise ImportError(f"pack {name!r}: module {mod!r} ({getattr(module, '__file__', '?')}) has no "
+                          f"{cls!r}") from e
 
 
 # ----------------------------------------------------------------------------- shared dataset building

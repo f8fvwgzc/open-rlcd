@@ -259,6 +259,40 @@ def test_export_and_import_register_a_new_version(heads, tmp_path):
     assert quiet == "rlcd-0.1.3" and dst.latest_id() == vid
 
 
+def test_a_rollback_after_an_import_returns_to_the_version_that_was_serving(heads, tmp_path):
+    """An import that becomes rlcd-latest is recorded in the history, so `rlcd rollback` brings back the version
+    that served before it: not the newest older version, which may be one the operator demoted or an import kept
+    out of service with --keep-latest."""
+    src = Registry(tmp_path / "src")
+    out = src.export(commit(src, heads), tmp_path / "exported")
+    # a demoted version: v1 and v2 trained, v1 promoted back, then an import
+    reg = Registry(tmp_path / "a")
+    v1, v2 = commit(reg, heads), commit(reg, heads)
+    reg.set_latest(v1, kind="promote")
+    v3 = reg.import_(out)
+    assert reg.latest_id() == v3 and reg.previous_latest() == v1 != v2
+    assert reg.registry()["history"][-1] == {**reg.registry()["history"][-1], "from": v1, "to": v3, "kind": "import"}
+    # an import kept out of service, then a plain one: the kept import never served, so it is not the way back
+    reg = Registry(tmp_path / "b")
+    v1 = commit(reg, heads)
+    kept = reg.import_(out, make_latest=False)
+    assert reg.latest_id() == v1 and [h["kind"] for h in reg.registry()["history"]] == ["train"]
+    v3 = reg.import_(out)
+    assert reg.latest_id() == v3 and reg.previous_latest() == v1 != kept
+    # a version rolled back from, then made latest again (`rlcd promote`, or `rlcd rollback --to`), is the way back
+    # too; the version the operator moved away from is not
+    for kind, after in (("promote", "rlcd-0.1.1"), ("rollback", None)):
+        reg = Registry(tmp_path / f"c-{kind}")
+        v1, v2 = commit(reg, heads), commit(reg, heads)
+        reg.set_latest(v1, kind="rollback")
+        reg.set_latest(v2, kind=kind)
+        reg.import_(out)
+        assert reg.previous_latest() == v2, kind
+        reg.set_latest(v2, kind="rollback")             # the import was bad
+        # promote: v1 served before v2 again. rollback --to: v1 was rolled back from, so there is nothing earlier
+        assert reg.previous_latest() == after, kind
+
+
 def test_import_refuses_an_invalid_bundle(heads, bundle_dir, tmp_path):
     reg = Registry(tmp_path / "home")
     bad = corrupt_copy(bundle_dir, tmp_path)

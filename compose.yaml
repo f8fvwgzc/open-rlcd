@@ -1,0 +1,63 @@
+# open-rlcd behind a TLS-terminating proxy. Guide: docs/deployment.md
+#
+#   export RLCD_API_KEY=$(openssl rand -hex 32) RLCD_ADMIN_KEY=$(openssl rand -hex 32)   # or an .env file, git-ignored
+#   docker compose up -d --build
+#   curl --cacert <(docker compose exec -T proxy cat /data/caddy/pki/authorities/local/root.crt) https://localhost/health
+#
+# As written this serves the bundled synthetic demo model on https://localhost with a certificate from Caddy's
+# internal CA. For your own model add the project overlay through COMPOSE_FILE in .env, so that no command runs
+# without it (deploy/compose.project.yaml says how), and set RLCD_DOMAIN / RLCD_TLS (deploy/Caddyfile).
+#
+# One `rlcd` container per home volume: do not scale this service (docs/deployment.md, "Concurrency").
+
+name: rlcd
+
+services:
+  rlcd:
+    image: ${RLCD_IMAGE:-open-rlcd:local}
+    build:
+      context: .
+      args:
+        RLCD_EXTRAS: ${RLCD_EXTRAS:-}          # "" = core only; "documents" adds onnxruntime, faiss, ...
+    environment:
+      # Required, never defaulted: compose refuses to start without them.
+      RLCD_API_KEY: ${RLCD_API_KEY:?set RLCD_API_KEY (decision callers)}
+      RLCD_ADMIN_KEY: ${RLCD_ADMIN_KEY:?set RLCD_ADMIN_KEY (train, kill switch, confirmations)}
+      # Optional. RLCD_AUTOMATION=off locks the kill switch off; HF_HUB_OFFLINE=1 forbids encoder downloads.
+      RLCD_AUTOMATION: ${RLCD_AUTOMATION:-}
+      RLCD_MAX_BODY_BYTES: ${RLCD_MAX_BODY_BYTES:-}
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-}
+    volumes:
+      - rlcd-home:/var/lib/rlcd                # RLCD_HOME: models, receipts, feedback, ledger, caches
+    read_only: true                            # the only writable paths are the home volume and /tmp
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    expose:
+      - "8095"                                 # reachable by the proxy only; not published on the host
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  proxy:
+    image: caddy:2.10-alpine
+    depends_on:
+      rlcd:
+        condition: service_healthy
+    environment:
+      RLCD_DOMAIN: ${RLCD_DOMAIN:-localhost}
+      RLCD_TLS: ${RLCD_TLS:-internal}
+    ports:
+      - "${RLCD_HTTPS_PORT:-443}:443"
+      - "${RLCD_HTTP_PORT:-80}:80"             # redirect to HTTPS, and ACME HTTP-01 when RLCD_TLS is an e-mail
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data                       # certificates and the internal CA: keep it
+      - caddy-config:/config
+    restart: unless-stopped
+
+volumes:
+  rlcd-home:
+  caddy-data:
+  caddy-config:

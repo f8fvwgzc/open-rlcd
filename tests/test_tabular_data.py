@@ -15,7 +15,7 @@ from open_rlcd.core import splits as S
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError
 from open_rlcd.core.service import Service
-from open_rlcd.packs.base import load_pack
+from open_rlcd.packs.base import load_pack, switched_off
 from open_rlcd.packs.tabular import (
     TabularConfigError,
     TabularPack,
@@ -189,6 +189,33 @@ def test_heads_without_the_data_file(tmp_path):
     assert list(pack.heads(project(tmp_path, pc))) == ["known"]
     with pytest.raises(DataUnavailable, match="not found"):
         pack.provider(project(tmp_path, pc))
+
+
+def test_switched_off_names_every_head_the_project_does_not_serve(tmp_path, synth):
+    """`TabularPack.switched_off`, the one list the service, `rlcd check` and config check read: a target switched
+    off in pack_config or under `heads:` (the override wins field by field, as in `merged_targets`), a head `heads:`
+    switches off, and a trained head that is no longer a target. `heads()` serves none of them, and the list needs
+    rlcd.yaml only, not the data file."""
+    pack = TabularPack()
+    pc = synthetic_pack_config(synth)
+    pc["targets"]["plan_tier_next"]["enabled"] = False
+    pr = project(tmp_path, pc)
+    assert set(pack.heads(pr)) == {"churned", "satisfaction"} and pack.switched_off(pr) == {"plan_tier_next"}
+    trained = ["churned", "plan_tier_next", "satisfaction", "renewed"]       # "renewed": a target since removed
+    assert pack.switched_off(pr, trained) == {"plan_tier_next", "renewed"}
+    heads = {"churned": {"enabled": False}, "plan_tier_next": {"enabled": True}, "ghost": {"enabled": False}}
+    pr = project(tmp_path, pc, heads=heads)
+    assert set(pack.heads(pr)) == {"plan_tier_next", "satisfaction"}
+    assert pack.switched_off(pr, trained) == {"churned", "ghost", "renewed"}
+    # a pack without the hook (not a BasePack) gets BasePack's rule: what `heads:` switches off
+    assert switched_off(object(), pr, trained) == {"churned", "ghost"}
+    # the shorthand's `enabled` switches its one head off; a head trained under the shorthand's old name is gone
+    one = project(tmp_path, {"data": str(synth), "label": "churned", "question": "churn", "enabled": False})
+    assert pack.heads(one) == {} and pack.switched_off(one, ["churn", "outcome"]) == {"churn", "outcome"}
+    synth.unlink()
+    pr = project(tmp_path, pc)
+    assert pack.switched_off(pr, trained) == {"plan_tier_next", "renewed"}
+    assert list(pack.heads(pr)) == ["satisfaction"]       # churned's classes come from the file: back with it
 
 
 def test_policy_holds_by_default_and_rlcd_yaml_overrides(tmp_path, synth):

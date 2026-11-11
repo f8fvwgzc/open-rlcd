@@ -1,0 +1,10 @@
+# A project with a pack of its own: support-ticket triage.
+# `pack:` names code to import (ticketpack/pack.py, next to this file): point it only at code you trust.
+name: ticket-triage
+pack: ticketpack.pack:TicketsPack
+home: ./var
+pack_config:
+  data: data/tickets.jsonl        # written by `python make_tickets.py`
+  text: ngrams                    # ngrams (readable reasons, no model) | embedding (pack_config.encoder)
+  dim: 2048                       # n-gram columns (more columns: fewer n-grams share one)
+owners: {pack: support-tools, heads: support-tools, policy: support-lead, review: support-lead, incidents: on-call}

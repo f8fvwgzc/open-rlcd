@@ -14,12 +14,15 @@ from __future__ import annotations
 import json
 import math
 import threading
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import numpy as np
 from scipy import stats
+
+from .locks import FileLock, write_atomic
 
 BINS = 10
 
@@ -87,11 +90,17 @@ def bin_of(p: float) -> int:
 
 class Ledger:
     """Right/wrong counts per head: `bins[class][k]` for decisions whose probability of the chosen class fell
-    in bin k. Stored as bernoulli.json under RLCD_HOME; one table per head, tied to one model version."""
+    in bin k. Stored as bernoulli.json under RLCD_HOME; one table per head, tied to one model version.
+
+    Several processes share the file (the server scores outcomes while `rlcd train` / `promote` restart tables).
+    Nothing is cached here: every call reads the file, and every read-modify-write (`reset`, `update`) holds the
+    inter-process lock bernoulli.json.lock from its read to its atomic replace, so no writer works on a stale copy.
+    The archive file is written under the same lock. Readers take no file lock: they see a whole file, old or new."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = threading.RLock()
+        self._file_lock = FileLock(self.path)
 
     def _read(self) -> dict:
         if self.path.exists():
@@ -103,9 +112,14 @@ class Ledger:
 
     def _write(self, data: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(self.path)
+        write_atomic(self.path, json.dumps(data))
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """Hold the ledger over several calls that belong together (read a table, then `reset` it from what was
+        read): no other thread or process writes in between. `reset` and `update` take the same lock themselves."""
+        with self._lock, self._file_lock:
+            yield
 
     @staticmethod
     def empty(classes: Sequence[str] = (), model_version: str | None = None) -> dict:
@@ -121,7 +135,7 @@ class Ledger:
         """Start a head's table again from the holdout of a freshly trained model. The table it replaces is kept in
         bernoulli.archive.json under every version it was valid for, so a version that is pinned or rolled back to
         later gates on its own evidence (holdout + the outcomes scored for it), not on its bare holdout."""
-        with self._lock:
+        with self._lock, self._file_lock:
             data = self._read()
             old = data.get(head)
             if isinstance(old, dict):
@@ -145,9 +159,7 @@ class Ledger:
             return {}
 
     def _archive_write(self, data: dict) -> None:
-        tmp = self._archive_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        tmp.replace(self._archive_path)
+        write_atomic(self._archive_path, json.dumps(data))
 
     def archived(self, head: str, version: str) -> dict | None:
         """The last live table of `head` that was valid for `version`, if one was archived."""
@@ -160,7 +172,7 @@ class Ledger:
         A later outcome for the same decision_id with a different label is a correction: its count moves from the
         old cell (win / loss) to the new one, so the ledger keeps the latest outcome, as training does (the latest
         feedback row per decision_id). The same outcome posted again changes nothing."""
-        with self._lock:
+        with self._lock, self._file_lock:
             data = self._read()
             t = data.get(head)
             if t is None or chosen not in t["bins"]:

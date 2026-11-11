@@ -1,0 +1,23 @@
+# Overlay: serve your own project instead of the demo.
+#
+# Name both files in COMPOSE_FILE in the .env next to compose.yaml, so that every `docker compose` command run
+# from there includes this overlay (docs/deployment.md, "Run your project"):
+#
+#   COMPOSE_FILE=compose.yaml:deploy/compose.project.yaml
+#   RLCD_PROJECT_DIR=/srv/acme
+#
+# RLCD_PROJECT_DIR is the directory that holds rlcd.yaml (and what it points at). A container created or recreated
+# without this file (a key rotation, an upgrade, a one-off `run`) has no project. It serves the home's model on
+# the code defaults (rollout full, redaction of secrets only, none of rlcd.yaml's routes or batteries), and on an
+# empty home it imports the demo model.
+#
+# The project is mounted read-only; everything the service writes goes to the home volume. `home:` in rlcd.yaml
+# is ignored here (RLCD_HOME wins), and so are serve.host / serve.port (the image passes --host and --port).
+
+services:
+  rlcd:
+    environment:
+      RLCD_PROJECT: /project
+      RLCD_ALLOW_REMOTE: ${RLCD_ALLOW_REMOTE:-}
+    volumes:
+      - ${RLCD_PROJECT_DIR:?set RLCD_PROJECT_DIR to the directory that holds rlcd.yaml}:/project:ro

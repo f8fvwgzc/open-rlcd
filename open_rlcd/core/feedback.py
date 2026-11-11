@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from .digest import decode, encode
+from .locks import FileLock
 from .receipts import CONFIRMATION_FORMAT, ChainedLog
 from .training import now_iso
 
@@ -37,11 +38,15 @@ class JsonlLog:
     def __init__(self, path: Path):
         self.path = Path(path)
         self._lock = threading.RLock()
+        self._file_lock = FileLock(self.path)
 
     def append(self, row: dict) -> None:
+        """Append one row. The look at the last byte and the write are one step across processes too (the sidecar
+        lock `<name>.lock`): two writers never both terminate a torn line, and a row is never added to a line
+        another writer is still writing."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = encode(json.dumps(row, separators=(",", ":"), ensure_ascii=False, default=str) + "\n")
-        with self._lock, open(self.path, "a+b") as f:
+        with self._lock, self._file_lock, open(self.path, "a+b") as f:
             f.seek(0, os.SEEK_END)
             if f.tell():
                 f.seek(-1, os.SEEK_END)

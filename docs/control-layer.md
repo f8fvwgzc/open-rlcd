@@ -235,7 +235,8 @@ so abstention keeps meaning "the model cannot vouch for this".
   training, the switch and confirmations need that key, so a decision caller can neither retrain, re-enable
   automation nor confirm its own decisions.
 * **Rollback**: `rlcd rollback` (or `rlcd promote VERSION`) points `rlcd-latest` at another version — no retrain,
-  no code change; the version's heads gate on their own evidence again.
+  no code change; the version's heads gate on their own evidence again. `--by NAME` and `--reason` go into the
+  registry history (`--by` defaults to `$USER`, else `unknown`).
 * **Measure**: `GET /v1/metrics` / `rlcd metrics`: automatic-action, review and abstention rates, false automation
   and false rejection from feedback, online reliability next to the holdout, uncertainty sources, binding links
   (`binding.latency_only_candidates`: heads that never change an action), task success, cost and retries from
@@ -248,7 +249,8 @@ so abstention keeps meaning "the model cannot vouch for this".
   reasons a reviewer needs. Feedback with `tags: ["regression"]` turns the corrected
   case into a regression fixture; `missing_evidence` and `note` record what the reviewer found.
 * **Before launch**: `rlcd check` (or `GET /v1/check`; `--json` for CI, exit code 1 when an item fails) runs the
-  guide's pre-launch checklist mechanically: heads trained with skill and
+  guide's pre-launch checklist mechanically: an `rlcd.yaml` without errors (item `config.valid`, the findings of
+  `rlcd config check`; every key is in [configuration.md](configuration.md)), heads trained with skill and
   verified thresholds, no-match options, observable score anchors, security settings, redaction, a verifying
   receipt chain, a rollback target, the rollout and kill-switch state, battery versions, regression cases, review
   capacity and named owners (`owners:` in rlcd.yaml).
