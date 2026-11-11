@@ -680,26 +680,41 @@ def _routes(ctx: _Ctx) -> Outcome:
                         "tool, declare what it may receive (allowed_data), needs (requires) and falls back to, so "
                         "deterministic filters run before the choice")
     specs = ctx.specs
-    problems = []
-    for head in book.routes:
+    # a head switched off in rlcd.yaml is not served (Service.specs leaves it out), so its contracts are kept and
+    # never consulted, as config check says too
+    off = {n for n, o in ctx.project.head_overrides.items()
+           if isinstance(o, dict) and o.get("enabled") is False and n not in specs}
+    served = [h for h in book.routes if h not in off]
+    missing, refused = [], []
+    for head in served:
         spec = specs.get(head)
         if spec is None:
-            problems.append(f"routes.{head}: {ctx.version} has no head {head!r}")
+            missing.append(f"routes.{head}: {ctx.version} has no head {head!r}")
             continue
         try:
             book.check_head(head, spec)
         except ContractError as e:
-            problems.append(e.message)
-    if problems:
-        return "fail", "; ".join(problems) + " (every /v1/decide call that consults them is a 500 bad_config)"
-    any_data = [f"{h}.{o}" for h, opts in book.routes.items() for o, c in opts.items()
+            refused.append(e.message)
+    if missing or refused:
+        parts = []
+        if refused:
+            parts.append("; ".join(refused) + " (a /v1/decide that applies route contracts to the head answers "
+                                              "500 bad_config)")
+        if missing:
+            parts.append("; ".join(missing) + " (no decision consults these contracts: train the head or remove "
+                                              "them)")
+        return "fail", "; ".join(parts)
+    any_data = [f"{h}.{o}" for h in served for o, c in book.routes[h].items()
                 if "allowed_data" not in c and c.get("enabled") is not False]
-    uncovered = [f"{h}.{o}" for h in book.routes for o in specs[h].classes if o not in book.routes[h]]
-    text = f"contracts for {_names(list(book.routes))}"
+    uncovered = [f"{h}.{o}" for h in served for o in specs[h].classes if o not in book.routes[h]]
+    text = f"contracts for {_names(served)}" if served else "no contracts for a served head"
     if any_data:
         text += f"; accept every data class (no allowed_data): {_names(any_data[:10])}"
     if uncovered:
         text += f"; options without a contract (never filtered): {_names(uncovered[:10])}"
+    kept = [h for h in book.routes if h in off]
+    if kept:
+        text += f"; kept but not consulted while the head is disabled in rlcd.yaml: {_names(kept)}"
     return "pass", text
 
 

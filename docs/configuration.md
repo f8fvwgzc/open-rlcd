@@ -44,18 +44,24 @@ The tables below are the keys the code reads. They are kept equal to the checker
 
 A key written with no value (`timeout:`, or `timeout: null`) usually means the default too. The exceptions:
 
-* **An empty value is an error** for every `train.*` key, `policy.min_verify_rows`, `policy.gate_min_p_above`,
-  `policy.miscalibration_p`, `policy.stakes.<level>` and its `act`, `confirm` and `min_accuracy`,
-  `labeling.batch`, `serve.host`, `serve.port`, `rollout.mode`, `rollout.heads.<head>`, `routes.<head>`,
-  `batteries.<battery>`, `evaluate.max_revisions`, and in the tabular pack `pack_config.data`,
-  `pack_config.max_categories` and `pack_config.na_values`. `rlcd train` and `rlcd serve` refuse to start until
-  the key has a value or the line is gone.
-* **Under `heads.<head>`, an empty field does not bring back the pack's value: it replaces it.** `type:`,
-  `model:` and `decision:` are errors. `conformal:` (like `conformal: null`) removes the pack's promise, such as
-  the 0.05 on `answerable` and `grounded` in the documents pack. `stakes:` passes the check, but `rlcd train` then
-  stops on that head ("stakes None is not a level the policy defines"). To keep the pack's value, remove the line.
+* **An empty value is an error** for every `train.*` key, `policy.abstain`, `policy.min_verify_rows`,
+  `policy.gate_min_p_above`, `policy.miscalibration_p`, `policy.stakes.<level>` and its `act`, `confirm` and
+  `min_accuracy`, `labeling.batch`, `serve.host`, `serve.port`, `rollout.mode`, `rollout.heads.<head>`,
+  `routes.<head>`, a route contract's `routes.<head>.<option>.enabled`, `requires`, `allowed_data` and
+  `latency_ms`, `batteries.<battery>`, `evaluate.max_revisions`, and in the tabular pack `pack_config.data`,
+  `pack_config.max_categories`, `pack_config.na_values`, `pack_config.targets` (next to the shorthand's `label`
+  an empty one is ignored), a target `pack_config.targets.<head>`, and the shorthand's `pack_config.label`.
+  `rlcd train` and `rlcd serve` refuse to start until the key has a value or the line is gone. (A key the tables
+  mark required, such as a battery's version, is refused empty just as it is when missing. So is
+  `pack_config.targets` without the shorthand, and the shorthand's `label` without `targets`: removing the line
+  does not help there.)
+* **Under `heads.<head>`, an empty field keeps the pack's value** (in the tabular pack, the target's), as if the
+  line were not there. The exception is `conformal:` (like `conformal: null`): it removes the pack's promise,
+  such as the 0.05 on `answerable` and `grounded` in the documents pack.
 * **`rollout.limited.stakes:` with no value means no level**, not the default `[low]`: mode `limited` then
   automates nothing (the check warns).
+* **`routes.<head>.<option>:` with no value is an empty contract**, not a missing one: the option has no limits,
+  and a `fallback` may name it.
 
 ## Top level
 
@@ -78,9 +84,9 @@ column.
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. A battery that asks the head then fails as a whole (422 `unknown_head`, and `rlcd check` fails `batteries.bound`): give the battery a version without that question (worked example 1). |
+| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. A battery that asks the head then fails as a whole (422 `unknown_head`, and `rlcd check` fails `batteries.bound`): give the battery a version without that question (worked example 1). Its route contracts are kept and not consulted, so neither check compares them with the head; a malformed contract (such as `requires: 5`) is still an error, because every decide reads the whole `routes` section. |
 | `heads.<head>.stakes` | a stakes level | the pack's (`medium`; documents `grounded`: `high`) | Which thresholds of `policy.stakes` its decisions use when the request names none. Must be a level the policy has. |
-| `heads.<head>.conformal` | number in (0, 0.5) | the pack's (documents: 0.05 on `answerable` and `grounded`, none on the others; tabular: none) | A promised error rate. For a `gate` head, the error among its yeses: the threshold is chosen on the calibration blocks and checked on the holdout. Too few calibration rows (45 at 0.05 with the default `train.conformal_delta`) or a holdout that breaks the promise caps the head at confirm. For other heads, the miscoverage of a prediction set returned with each answer; it never caps a decision. |
+| `heads.<head>.conformal` | number in (0, 0.5) | the pack's (documents: 0.05 on `answerable` and `grounded`, none on the others; tabular: none) | A promised error rate. For a `gate` head, the error among its yeses: the threshold is chosen on the calibration blocks and checked on the holdout. Too few calibration rows (45 at 0.05 with the default `train.conformal_delta`) or a holdout that breaks the promise caps the head at confirm. For a choice or score head, the miscoverage of the `prediction_set` returned next to the answer in each decision (`/v1/decide`, `/v1/evaluate`, `rlcd decide`); System One answers (`/v1/systemone`, `rlcd ask`) and `/v1/rank` carry none. A noul head with decision `argmax` gets no set: its coverage is only measured, in the training report (`rlcd calibration <head>`). It never caps a decision. |
 | `heads.<head>.model` | `logreg`, `lightgbm`, `auto` | the pack's (`logreg`) | The base model. `auto` is LightGBM when it can be imported, else logistic regression. |
 | `heads.<head>.decision` | `argmax`, `gate` | the pack's (`argmax`) | `gate` (noul heads only): the decision is about `true` ("proceed"), never about the more likely class. |
 | `heads.<head>.type` | `noul`, `choice`, `score` | the pack's | The question type. Changing it changes the question: retrain. |
@@ -207,9 +213,23 @@ filter that runs before the head chooses; every other key in a contract is yours
 the decision (so the check only warns when one looks like a misspelling of these five).
 
 A contract under an option the head does not have (a misspelt option), or on a head that is not a `choice` head,
-is an error: the service would refuse every decision that consults that head (500 `bad_config`). A contract
-under a name that is not a head of the project is only a warning, since no decision consults it, but `rlcd check`
-fails `routes.contracts` until the model has that head or the contract is gone.
+is an error: `rlcd check` fails `routes.contracts`, and a `/v1/decide` that applies route contracts to that head
+answers 500 `bad_config`. The generic decide (the tabular pack, and a custom pack without its own `decide`)
+applies them to every head it decides; the documents pack's decide applies them only to `response_type` and
+`route`.
+
+A contract under a name that is not a head of the project is only a warning, because the served model may still
+have that head. A tabular target you removed from `pack_config.targets`, or switched off there with
+`enabled: false`, stays served: each train carries over the trained heads it does not retrain while the feature
+version is unchanged, and drops them once it changes. Removing a target under `features: auto` usually changes it
+(the label column becomes a feature), so the next train drops the head. When the column does not become a feature
+(it is under `exclude`, outside an explicit `features` list, or no longer in the file), the removed head is
+carried over like a switched-off one, until a train whose features differ (for example after a new value enters
+a categorical feature column's vocabulary, its `max_categories` most frequent values). The generic decide still decides such a head and applies its contracts: a valid one filters its options, and one
+under an option the head lacks answers 500 `bad_config`, which `rlcd check` reports under `routes.contracts`.
+`heads.<head>.enabled: false` stops serving a head without a retrain. When the served model has no head of that
+name either, no decision consults the contract, and `rlcd check` fails `routes.contracts` until the model has
+that head or the contract is gone.
 
 | key | type | default | what it does |
 |---|---|---|---|
@@ -323,7 +343,7 @@ any of the target keys) directly under `pack_config`. Not both.
 | `pack_config.targets.<head>.description` | text | empty | As `heads.<head>.description`; how the type and the classes were chosen is appended. |
 | `pack_config.targets.<head>.params` | mapping | empty | As `heads.<head>.params`. |
 | `pack_config.targets.<head>.input` | mapping | empty | As `heads.<head>.input`. |
-| `pack_config.targets.<head>.enabled` | true / false | true | `false`: no head, and its label column still stays out of the features. |
+| `pack_config.targets.<head>.enabled` | true / false | true | `false`: the head is not trained, and its label column still stays out of the features. A head of that name the model already has is still served: a train carries it over while the feature version is unchanged, and drops it once the features change (for example after a new value enters a categorical feature column's vocabulary, its `max_categories` most frequent values). Set `heads.<head>.enabled: false` as well to stop serving it. |
 | `pack_config.label` | column | none | Shorthand: the label column of the only head. |
 | `pack_config.question` | text | `outcome` | Shorthand: the name of that head. |
 | `pack_config.type` | `noul`, `choice`, `score` | inferred | Shorthand for `targets.<head>.type`. |

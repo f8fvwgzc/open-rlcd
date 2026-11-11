@@ -373,6 +373,8 @@ def parse_config(pc: dict, resolve_path: Any) -> TabularConfig:
         bad = sorted(set(t) - set(TARGET_KEYS) - set(SPEC_KEYS))
         if bad:
             raise TabularConfigError(f"target {name!r}: unknown keys {bad}; known: {sorted({*TARGET_KEYS, *SPEC_KEYS})}")
+    # a target field written with no value (`model:`) means its default, as if the line were not there
+    targets = {name: {k: v for k, v in t.items() if v is not None} for name, t in targets.items()}
     mc = pc.get("max_categories", 50)
     if not isinstance(mc, int) or isinstance(mc, bool) or not 1 <= mc <= 10000:
         raise TabularConfigError(f"pack_config.max_categories must be an integer in 1..10000, got {mc!r}")

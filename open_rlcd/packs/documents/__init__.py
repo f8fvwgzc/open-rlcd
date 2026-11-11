@@ -61,7 +61,8 @@ class DocumentsPack(BasePack):
         """Without `config`: the encoder of pack_config.encoder (default ONNX multilingual-e5-small). With a bundle's
         `config`: the exact encoder the bundle was trained with, refused when its sha256 or the feature schema
         differs (the trained weights would be meaningless on other features)."""
-        opts = {"cache_size": project.pack_config.get("feature_cache", 1024)}
+        cache = project.pack_config.get("feature_cache")
+        opts = {"cache_size": 1024 if cache is None else cache}     # `feature_cache:` with no value is the default
         try:
             if not config:
                 return DocumentsProvider(make_encoder(encoder_settings(project.pack_config), project.home), opts)

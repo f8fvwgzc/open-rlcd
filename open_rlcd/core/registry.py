@@ -200,12 +200,17 @@ class Registry:
 
     def previous_latest(self) -> str | None:
         """The version to roll back to (`rlcd rollback` without --to): the version that was latest before the
-        current one became latest, skipping every version that was itself rolled back from (a second rollback
-        must not re-promote the version the first one removed). Without history: the newest older version."""
+        current one became latest, skipping every version that was rolled back from and not made latest again
+        since (a second rollback must not re-promote the version the first one removed, but a version promoted back
+        after a rollback is a good one again). Without history: the newest older version."""
         reg = self.registry()
         hist = reg.get("history") or []
         latest = reg["latest"]
-        rolled_back = {h.get("from") for h in hist if h.get("kind") == "rollback"}
+        rolled_back: set = set()
+        for h in hist:                      # in order: a version made latest again no longer counts as rolled back
+            rolled_back.discard(h.get("to"))
+            if h.get("kind") == "rollback":
+                rolled_back.add(h.get("from"))
         cur, seen = latest, {latest}
         for h in reversed(hist):
             if h.get("to") != cur:
@@ -260,6 +265,12 @@ class Registry:
             self._register(reg, vid, meta, {"imported_from": meta["imported_from"], "imported_at": now_iso()})
             if not make_latest:
                 reg["latest"] = latest_before
+            if reg["latest"] == vid and latest_before != vid:
+                # recorded like a train or a promote, so `rlcd rollback` returns to the version that was serving
+                # (without it, previous_latest falls back to the newest older version: a demoted one, or an
+                # import kept out of service with --keep-latest)
+                reg.setdefault("history", []).append({"at": now_iso(), "from": latest_before, "to": vid,
+                                                      "reason": None, "by": None, "kind": "import"})
             self._write(reg)
             bundle = BD.Bundle(dest, meta)
             for name in bundle.names():

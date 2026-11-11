@@ -21,8 +21,9 @@ tabular pack calls it `hold`). It never writes text and never authorises anythin
 
 It is the wrong tool when:
 
-* **You have no outcomes and cannot label any.** A head needs at least 30 trusted rows to train at all, and
-  usually several hundred before automatic action can be verified (section 4).
+* **You have no outcomes and cannot label any.** A head needs about 45 trusted rows to train at all (at least 30,
+  enough that 10 land in its holdout, and enough for the calibration folds), and usually several hundred before
+  automatic action can be verified (section 4).
 * **The decision is rare or one-off.** Calibration is a statement about frequencies; a decision made a few times
   a month never accumulates the evidence.
 * **An exact rule decides it.** Limits, eligibility, permissions and allowlists belong in your code, before any
@@ -112,23 +113,38 @@ no permission. Access is two shared keys: `RLCD_API_KEY` for every route but `/h
 
 ## 4. Labelling plan
 
-**How many rows, and why.** The numbers come from three defaults: a head needs 30 trusted rows to train
-(`min_trusted`), the holdout is 20 % of the trusted rows (`train.holdout_fraction`: the latest 20 % when rows
-have a time column, or the groups that appear latest when they also have a group; otherwise a fixed hashed 20 %),
-and `act` is verified only with at least 30 holdout rows and 30 holdout rows the policy would act on
-(`policy.min_verify_rows`). For a gate head (`decision: gate`) those are the rows with P(yes) at or above `act`.
+**How many rows, and why.** The numbers come from three defaults and a few fixed floors. A head needs 30 trusted
+rows (`train.min_trusted`), and training refuses it with fewer than 10 of them in the holdout, so it takes about 45
+to train at the default 20 %: 42 when the holdout is cut by time (a time column and no group, or
+`train.ordering: time`) and rows rarely share a timestamp, 46 with no time column or with groups of one row each. A
+time cut's calibration folds also need at least 15 distinct trusted timestamps among the development rows, and folds
+of at least 20 training rows, so rows that share timestamps three or more at a time need more: about 58 with three
+rows per timestamp (the items of one documents query all carry its time). Documents heads always have groups under
+the default ordering (each distinct query is a group of its own when the row has no `group` field), so
+`response_type`, `route` and `needs_graph` need 46 even with `time` logged; heads with several items per query, and
+larger groups, shift it. The holdout is 20 % of the trusted rows (`train.holdout_fraction`: the latest 20 % when
+rows have a time column, or the groups that appear latest, added until they hold 20 % of the rows, when they also
+have a group; otherwise a fixed hashed 20 %). And `act` is verified only with at least 30 holdout rows and 30
+holdout rows the policy would act on (`policy.min_verify_rows`). For a gate head (`decision: gate`) those are the
+rows with P(yes) at or above `act`, and also at or above its conformal threshold when it promises an error rate
+(`conformal`; the `conformal threshold` column of the model card). Where that threshold is above a level's `act`,
+only rows at or above it count, so the head needs more rows at that level; where it is at or below `act`, the
+act-tier rows are the same. Without a threshold, or with a holdout that breaks the promise, the head is capped at
+`confirm` at every level (section 5).
 
 | trusted rows per head | what you get |
 |---|---|
-| under 30 | the head does not train |
-| 30 – ~150 | calibrated, but the holdout is under 30 rows: decisions are capped at `confirm` |
+| under ~45 (timestamps and groups move it: see above) | the head does not train: fewer than 10 of its rows would be in the holdout, or too few for the calibration folds |
+| ~45 – ~150 | calibrated, but the holdout is under 30 rows: decisions are capped at `confirm` |
 | ~150 | a 30-row holdout: the floor below which `act` is impossible. `act` needs every one of those 30 rows to clear the act threshold, so expect `confirm` |
 | ~300 (recommended) | a holdout of about 60 rows and usable reliability bins; `act` needs half of them to clear the threshold |
 
 So the trusted rows `act` needs are about 30 / (holdout fraction × the share of holdout rows that clear the act
 threshold): with 20 % and a third of the rows clearing it, about 450. High stakes need more: at `act: 0.95`
-fewer rows clear the threshold. The report's verdict lines give the act-tier row count per head and stakes level
-(also `policy.holdout.<stakes>.act.n` in `calibration_<head>.json`).
+fewer rows clear the threshold. `calibration_<head>.json`, which `rlcd report` writes next to `MODEL_CARD.md`,
+has `policy.holdout.<stakes>.act` (`n`, `accuracy`, `wilson_95`) for every head and stakes level. A verdict line
+of `MODEL_CARD.md` repeats all three only when the verdict is `act`, and gives the count alone when the head is
+capped for too few act-tier rows.
 
 **Where labels come from.**
 
@@ -139,8 +155,8 @@ fewer rows clear the threshold. The report's verdict lines give the act-tier row
 | your own | `source: ground_truth` rows, or the audit if the pack implements `label_tasks` | the judge, if the pack implements `label_tasks` |
 
 What a documents query log yields: every query gives items for `response_type`, `route` and `needs_graph`.
-`chunk_relevant` and `answerable` need retrieved chunks, so an ingested corpus (`rlcd ingest`), or `evidence`
-logged with the query. `grounded`, `complete` and `risk_tier` get an item only for a `queries.jsonl` row that
+`chunk_relevant` needs an ingested corpus (`rlcd ingest`): one item per retrieved chunk. `answerable` needs
+retrieved chunks or `evidence` logged with the query. `grounded`, `complete` and `risk_tier` get an item only for a `queries.jsonl` row that
 carries the drafted `answer`. Logged `evidence` is optional there: without it the top retrieved chunks stand in.
 A plain question log therefore yields no `grounded` labels at all.
 
@@ -216,7 +232,8 @@ policy:
 ```
 
 **Who signs off.** The `policy` owner, after reading `rlcd report` with the `review` owner: for each head and
-stakes level, the holdout's act-tier accuracy with its interval (the verdict lines of `MODEL_CARD.md`), and how
+stakes level, the holdout's act-tier accuracy with its interval (`policy.holdout.<stakes>.act` in
+`calibration_<head>.json`; the verdict line of `MODEL_CARD.md` shows it when the verdict is `act`), and how
 many decisions would land in `confirm` per day at these thresholds. The report has no per-day number. Estimate
 it from `calibration_<head>.json`, which `rlcd report` writes next to it. `policy.holdout.<stakes>.tiers` counts
 holdout rows per tier before any cap. The confirm share is `confirm`, plus `act` where

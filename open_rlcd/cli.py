@@ -199,7 +199,8 @@ def next_steps(pack: str, root: Path) -> str:
         steps = [
             f"cd {root}",
             "put your documents in ./data (.md .txt .html .pdf .json .jsonl)",
-            "write ./queries.jsonl: real questions, one {\"query\": \"...\"} per line (bootstrap labels these)",
+            "write ./queries.jsonl: real questions, one {\"query\": \"...\", \"answer\": \"...\", \"evidence\": [...]} "
+            "per line (bootstrap labels these; grounded needs the answer your LLM drafted, evidence what it was shown)",
             "the encoder in rlcd.yaml is ONNX: it needs the documents extra (`uv sync --extra documents`) and "
             "downloads ~135 MB on the first ingest; offline, set pack_config.encoder to {kind: hashing, dim: 256}",
             "rlcd ingest ./data",

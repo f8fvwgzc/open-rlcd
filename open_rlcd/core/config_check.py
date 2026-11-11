@@ -520,7 +520,7 @@ def _new_heads(project: Project, pack: Any, out: list[dict]) -> None:
     except Exception:
         return
     for name, o in raw.items():
-        if name in base or (isinstance(o, dict) and "type" in o) or _has_error(out, f"heads.{name}"):
+        if name in base or (isinstance(o, dict) and o.get("type") is not None) or _has_error(out, f"heads.{name}"):
             continue
         hint = _suggest(name, base)
         out.append(_finding("error", f"heads.{name}",
@@ -730,8 +730,10 @@ def _cross(project: Project, specs: dict | None, ro: Rollout | None, book: Route
            out: list[dict]) -> None:
     """Names that must match a head: warnings, because a trained model may still carry a head the file no longer
     lists (`rlcd check` compares routes against the model). Route contracts on a head of the project are stricter:
-    one under an option the head does not have, or on a head that is not a choice head, makes the service refuse
-    every decision that consults the head (RouteBook.check_head, 500 bad_config), so that is an error."""
+    one under an option the head does not have, or on a head that is not a choice head, fails `rlcd check`
+    (routes.contracts), and RouteBook.check_head refuses every /v1/decide that applies route contracts to the head
+    (500 bad_config). The generic decide applies them to every head it decides; the documents pack's decide only to
+    response_type and route. So that is an error."""
     if specs is None:
         return
     disabled = {n for n, o in project.head_overrides.items() if isinstance(o, dict) and o.get("enabled") is False}
@@ -757,11 +759,12 @@ def _cross(project: Project, specs: dict | None, ro: Rollout | None, book: Route
             spec = specs.get(head)
             if spec is None:
                 continue
-            refused = f"every decision that consults head {head!r} would fail (500 bad_config)"
+            refused = (f"`rlcd check` fails routes.contracts, and a /v1/decide that applies route contracts to head "
+                       f"{head!r} answers 500 bad_config")
             if spec.type != "choice":
                 out.append(_finding("error", f"routes.{head}", f"head {head!r} is a {spec.type} head; contracts "
-                                                                f"belong to the options of a choice head, and "
-                                                                f"{refused}"))
+                                                                f"belong to the options of a choice head, so remove "
+                                                                f"them. Until then {refused}"))
                 continue
             for opt in options:
                 if opt not in spec.classes:

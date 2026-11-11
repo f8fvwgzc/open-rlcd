@@ -73,7 +73,11 @@ class Project:
 
     @property
     def head_overrides(self) -> dict:
-        return self.section("heads")
+        """`heads:` of rlcd.yaml. A field written with no value (`model:`) is left out, so the pack's value stays, as
+        if the line were not there (most keys read an empty value as their default; docs/configuration.md lists the
+        main exceptions). `conformal:` is kept: an empty one is how a pack's promise is removed."""
+        return {name: ({k: v for k, v in o.items() if v is not None or k == "conformal"} if isinstance(o, dict) else o)
+                for name, o in self.section("heads").items()}
 
     @property
     def allow_remote(self) -> bool:

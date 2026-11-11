@@ -88,8 +88,8 @@ def test_scripted_session_writes_exactly_the_expected_labels(project, store):
     assert out["accepted_judge"] == 1 and out["overruled"] == 1 and out["agreed"] == 1
     assert out["planned"] == 6 and out["remaining"] == 2
     kind = out["heads"]["kind"]
-    assert kind["trusted"] == 3 and kind["minimum"] == 30 and kind["recommended"] == 300
-    assert "27 more" in kind["status"]
+    assert kind["trusted"] == 3 and kind["minimum"] == 46 and kind["recommended"] == 300
+    assert "43 more" in kind["status"]
     agr = kind["judge_agreement"]
     assert agr["n"] == 3 and agr["accuracy"] == pytest.approx(2 / 3, abs=1e-6)
     text = "\n".join(printed)
@@ -160,8 +160,9 @@ def test_unknown_strategy_and_heads(project, store):
 
 
 def test_head_summary_says_how_many_rows_a_verified_holdout_needs(home):
-    """F36: 30 trusted rows let a head train, but its 20 % holdout then has ~6 rows, under the 30 that `verify`
-    needs: the summary says so and how many more rows are missing (it follows train.holdout_fraction)."""
+    """F36: a head trains from about 46 trusted rows (at least 30, and enough that 10 land in its 20 % holdout), but
+    that holdout is under the 30 rows that `verify` needs: the summary says so and how many more rows are missing
+    (it follows train.holdout_fraction). Both counts are where a hashed split first holds out 10 and 30 rows."""
     from open_rlcd.labeling.audit import head_summary
 
     store = LabelStore(home)
@@ -169,11 +170,43 @@ def test_head_summary_says_how_many_rows_a_verified_holdout_needs(home):
     for i in range(40):
         store.add_human(f"t{i}", "polite", "true" if i % 2 else "false")
     s = head_summary(store, POLITE)
-    assert s["for_verified_holdout"] == 150 and s["more_for_verified_holdout"] == 110
-    assert "capped at confirm" in s["status"] and "110 more" in s["status"]
+    assert s["for_verified_holdout"] == 146 and s["more_for_verified_holdout"] == 106
+    assert "capped at confirm" in s["status"] and "106 more" in s["status"]
+    assert s["minimum"] == 46 and s["status"].startswith(
+        "about 6 more trusted rows needed before this head can train (10 must land in its holdout)"), s["status"]
     s = head_summary(store, POLITE, holdout_fraction=0.25)
-    assert s["for_verified_holdout"] == 120 and s["more_for_verified_holdout"] == 80
-    for i in range(40, 155):
+    assert s["for_verified_holdout"] == 117 and s["more_for_verified_holdout"] == 77 and s["minimum"] == 37
+    for i in range(40, 45):
+        store.add_human(f"t{i}", "polite", "true")
+    assert head_summary(store, POLITE)["status"].startswith("about 1 more trusted rows needed before this head can train")
+    store.add_human("t45", "polite", "true")                 # 46: a hashed split holds out 10 rows, enough to train
+    assert head_summary(store, POLITE)["status"].startswith("can train, but its holdout (~10 rows) is under 30")
+    for i in range(46, 145):
+        store.add_human(f"t{i}", "polite", "true")
+    assert "(~29 rows) is under 30" in head_summary(store, POLITE)["status"]
+    store.add_human("t145", "polite", "true")                # 146: the hashed holdout has 30 rows
+    assert "can train with a 30-row holdout" in head_summary(store, POLITE)["status"]
+    for i in range(146, 155):
         store.add_human(f"t{i}", "polite", "true")
     s = head_summary(store, POLITE)
     assert s["more_for_verified_holdout"] == 0 and "can train with a 30-row holdout" in s["status"]
+
+
+def test_the_summary_follows_train_min_trusted(home, tmp_path):
+    """A project that raises train.min_trusted needs that many trusted rows before a head trains: the summary uses
+    the project's value (it used to say "can train" from 30 rows whatever the setting) and names the rule that
+    binds."""
+    from open_rlcd.labeling.audit import head_summary
+
+    store = LabelStore(home)
+    store.add_items([LabelItem(f"t{i}", "text", {"i": i}) for i in range(60)])
+    for i in range(50):
+        store.add_human(f"t{i}", "polite", "true" if i % 2 else "false")
+    s = head_summary(store, POLITE, min_trusted=60)
+    assert s["minimum"] == 60, s
+    assert s["status"].startswith("about 10 more trusted rows needed before this head can train (train.min_trusted "
+                                  "is 60)"), s["status"]
+    assert head_summary(store, POLITE)["status"].startswith("can train, but its holdout (~10 rows)")
+    out = audit(Project(root=tmp_path, data={"train": {"min_trusted": 60}}), AuditPack(), heads=["polite"],
+                input_fn=scripted([]), print_fn=lambda *a: None, store=store)
+    assert out["heads"]["polite"]["minimum"] == 60

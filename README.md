@@ -133,7 +133,8 @@ uv sync --extra documents --extra labeling
 uv run rlcd init my-business --pack documents && cd my-business
 uv run rlcd config check                           # after every edit of rlcd.yaml: typos and bad values, by key
 uv run rlcd ingest ./data                          # your folder of .md / .txt / .html / .pdf / .json
-# write queries.jsonl: real questions people ask, one {"query": ..., "time": ..., "group": ...} per line
+# write queries.jsonl: real questions people ask, one {"query": ..., "time": ..., "group": ..., "answer": ...,
+# "evidence": [...]} per line: the answer your LLM drafted and what it was shown (grounded needs the answer)
 export RLCD_ALLOW_REMOTE=1                         # claude-cli / anthropic (item text goes to Anthropic) or a judge off loopback
 uv run rlcd label bootstrap --judge claude-cli     # or: anthropic | ollama:<model> (stays local) | openai:<url>|<model>
 uv run rlcd label audit --heads answerable,grounded --n 600   # your labels: these calibrate the model
@@ -145,10 +146,11 @@ uv run rlcd bench
 uv run rlcd export ./bundle                        # open weights: JSON + safetensors + LightGBM text
 ```
 
-How many human labels? A head needs at least 30 trusted rows to train at all, and its holdout (20 %) needs about
-30 rows the policy would act on before `act` can be verified — roughly **150–300 trusted rows per head**. Fewer
-still gives calibrated `confirm`-level decisions, and the report says exactly what is missing. Audit the heads
-that gate actions first.
+How many human labels? A head needs about 45 trusted rows to train (at least 30, enough that 10 land in its 20 %
+holdout, and enough for the calibration folds). `act` is verified only with 30 holdout rows the policy would act on,
+so usually **several hundred trusted rows per head**: about 300 if half the holdout clears the act threshold, 450 if
+a third does ([docs/adoption.md](docs/adoption.md), section 4). In between, decisions are calibrated but capped at
+`confirm`, and the report says exactly what is missing. Audit the heads that gate actions first.
 
 Production outcomes posted to `/v1/feedback` update the Beta-Bernoulli posteriors at once and become
 up-weighted training rows at the next train. That is the whole "reinforcement" — described as modestly as it is.

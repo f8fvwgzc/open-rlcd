@@ -228,8 +228,8 @@ built-in pack ['documents', 'tabular']. A bundle never names code to import: set
 pack it was trained with
 ```
 
-In a project that was already serving a model, `rlcd rollback` brings the previous version back. Import a
-bundle of unknown origin with `--keep-latest` and look at it before you promote it.
+In a project that was already serving a model, `rlcd rollback` brings back the version that served before the
+import. Import a bundle of unknown origin with `--keep-latest` and look at it before you promote it.
 
 ## Embeddings instead of n-grams
 

@@ -41,10 +41,17 @@ image built under another name is not the one compose runs.
 `RLCD_EXTRAS` is a space-separated list of the extras in `pyproject.toml` (`documents`, `qdrant`, `pgvector`,
 `neo4j`, `parquet`, ...). Build the image with the extras the model was trained with: a bundle whose encoder is
 ONNX needs `documents`; a tabular project that reads Parquet needs `parquet`. The demo bundle and a documents
-project with the hashing encoder run on the core image. `docker compose up` builds only when `open-rlcd:local`
-does not exist yet, so after changing `RLCD_EXTRAS` run `docker compose build` again (or `up -d --build`), or
-the old image keeps serving. An ONNX model on a core-only image answers `/health` and `/ready` as usual and
-fails every decision with 503 `encoder_unavailable`.
+project with the hashing encoder run on the core image. `docker compose up` builds only when the image it names
+(`RLCD_IMAGE`, default `open-rlcd:local`) does not exist yet, so after changing `RLCD_EXTRAS` run
+`docker compose build` again (or `up -d --build`), or the old image keeps serving. An ONNX model on a core-only
+image answers `/health` and `/ready` as usual and fails every decision that runs a trained head with 503
+`encoder_unavailable`.
+
+Compose builds from the checkout it runs in and tags the result with whatever `RLCD_IMAGE` names. Keep the
+compose directory on the release that `RLCD_IMAGE` names: after an upgrade or an image rollback (see
+[Upgrades and rollback](#upgrades-and-rollback)) the two can differ, and then `docker compose build` or
+`up --build` puts this checkout's code under the other release's tag. While they differ, change the extras with
+`docker build -t <that tag> --build-arg RLCD_EXTRAS=... .` in that release's checkout instead.
 
 ### Try it (the demo model)
 
@@ -193,12 +200,18 @@ What the keys do not do: there is one API key for all callers (no per-caller key
 `/health` and `/ready` are always open. `/health` shows the model version, the head names, the rollout mode and the kill-switch state;
 with a key set it hides the home path. Keep it off the public internet if that is too much.
 
-**Rotation.** Keys are read from the process environment, so a new key takes effect on restart:
+**Rotation.** Keys are read from the process environment, so a new key takes effect when the container is
+recreated. With the keys exported from a secret store:
 
 ```bash
 export RLCD_API_KEY=$(openssl rand -hex 32)      # update your secret store first
 docker compose up -d rlcd                        # recreates the container with the new value
 ```
+
+With the keys in `.env`, change the `RLCD_API_KEY=` line there instead, then run `docker compose up -d rlcd`.
+An `export` overrides `.env` only in the shell that ran it: the next `docker compose up` from another shell or
+session (an upgrade, an image rollback, a restore) reads the old key from `.env`, so the rotated-out key works
+again and callers holding the new one get 401.
 
 On a project deployment the recreated container gets the project only through `COMPOSE_FILE` in `.env` (see
 [Run your project](#run-your-project)). Without it, the container comes back on the code defaults.
@@ -214,7 +227,7 @@ root filesystem read-only, with a tmpfs `/tmp`).
 
 | path | what | written | class |
 |---|---|---|---|
-| `registry.json` | the versions, which one `rlcd-latest` points at, the promote / rollback history | on train, import, promote, rollback (whole file, atomic replace) | **precious** |
+| `registry.json` | the versions, which one `rlcd-latest` points at, and the history of what made each version latest (train, import, promote, rollback), which `rlcd rollback` follows | on train, import, promote, rollback (whole file, atomic replace) | **precious** |
 | `models/<version>/` | one bundle per version: `model.json`, weights, calibrators, reports | once per version, never changed after | **precious** (re-importable only if you kept the exported bundle) |
 | `decisions.jsonl` | the receipts: one hash-chained line per decision, with the logged state | appended per decision | **precious**, the audit trail; cannot be rebuilt |
 | `feedback.jsonl` | labels posted to `/v1/feedback`; training rows for the next model | appended | **precious** |
@@ -439,6 +452,11 @@ image: a key rotation, a `run --rm` for verify, prune or a restore. A command wi
 `open-rlcd:local`. `up` then recreates the service on the old image, or builds one from whatever the checkout
 holds, and a one-off `run` executes old code against a home the new code wrote.
 
+Switch the compose directory to the new release's checkout in step 3 as well. Compose builds from that checkout
+into the tag `RLCD_IMAGE` names, so while the two differ a `docker compose build` or `up --build` (after an
+extras change, say) puts the old code under the new release's tag, and `up` serves it against a home the new
+code wrote.
+
 What can stop an old model from answering under new code:
 
 | check | where it is recorded | on mismatch |
@@ -452,8 +470,11 @@ There is no migration step and no schema version on the home: a release either r
 the checks above say why not. That is why step 2 runs against a copy.
 
 **Rolling back the image:** set `RLCD_IMAGE` in `.env` back to the previous image (remove the line to return to
-`open-rlcd:local`), then `docker compose up -d rlcd`. If the new image trained or imported models, or you are
-unsure the old code reads what the new one wrote, restore the backup from step 1 instead.
+`open-rlcd:local`), switch the compose directory back to that release's checkout, then
+`docker compose up -d rlcd`. Without the checkout switch, a later `docker compose build` or `up --build` rebuilds
+the new release's code under the previous image's tag and silently undoes the rollback. If the new image trained
+or imported models, or you are unsure the old code reads what the new one wrote, restore the backup from step 1
+instead.
 
 **Rolling back the model** is independent of the image: `rlcd rollback` (above).
 
@@ -462,7 +483,7 @@ unsure the old code reads what the new one wrote, restore the backup from step 1
 | endpoint | key | use |
 |---|---|---|
 | `GET /health` | none | liveness: 200 whenever the process is up. The image's `HEALTHCHECK` and the proxy's upstream check call it |
-| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served. It builds no encoder and opens no corpus: a missing extra, encoder files missing under `HF_HUB_OFFLINE=1`, or an unreadable corpus still answer 200 here and fail each decision with a 503 |
+| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served. It builds no encoder and opens no corpus, so it still answers 200 when a missing extra or encoder files missing under `HF_HUB_OFFLINE=1` fail every decision that runs a trained head with 503 `encoder_unavailable`, and when a broken corpus fails retrieval (a `/v1/decide` sent without `candidates`: see the smoke decisions below) |
 | `GET /v1/check` | API | the pre-launch checklist as JSON: `ok`, and per item pass / warn / fail |
 | `GET /v1/metrics?since=2026-11-01` | API | action mix, false automation, online reliability against the holdout, review load, latency. JSON, not Prometheus format |
 | `GET /v1/calibration?head=answerable` | API | the holdout numbers a head was accepted on |
@@ -473,8 +494,25 @@ unsure the old code reads what the new one wrote, restore the backup from step 1
 model. Use `/ready` (or the `ready` field of `/health`) for "send traffic or not": a Kubernetes `readinessProbe`,
 a load balancer's health check, a deploy script that waits for the import. Keep the liveness probe on `/health`:
 an untrained service is alive, and restarting it does not train it. Neither endpoint touches the encoder or the
-corpus, so after every deploy, upgrade and import, and as a periodic probe, also send one smoke decision:
-`POST /v1/systemone` with a state you know, expecting 200.
+corpus, so also send smoke decisions:
+
+* `POST /v1/systemone` with a state you know, expecting 200. It needs the encoder, never the corpus. It writes
+  no receipt unless the request sets `"receipt": true` or `serve.receipts` is `all`, so it can also run as a
+  periodic probe.
+* If your callers rely on open-rlcd's retrieval (a `/v1/decide` without `candidates`), `POST /v1/decide` with a
+  known query and no candidates, expecting 200 and `"candidates_from": "corpus"` with no warning about
+  retrieval. The corpus is opened only for such a decide: an unreadable corpus fails it with 503
+  `connector_unavailable`, and a corpus it cannot use (built with another encoder, an unknown format) answers
+  200 with `"candidates_from": "none"` and the warning that retrieval is unavailable.
+
+  A decide is a real decision. It writes a receipt and counts in `/v1/metrics`. Unless its action is `act` (and
+  none is while the kill switch is off, or while `rollout.mode` is `shadow` or `assist` and no `rollout.heads`
+  entry sets a head to `full` or `limited`; `/health` shows only `rollout.mode`), it also waits in
+  `GET /v1/review` and in `review_load.pending` until a `POST /v1/feedback` names it; a confirmation does not
+  take it out. That feedback is a training row for the next model and updates the head's Bernoulli table, so
+  post it only with a label you know is right. Neither endpoint filters on tags. So run this probe after each
+  deploy, upgrade, import and ingest rather than as a frequent poll, and tag it (`"tags": ["smoke"]`): the tag is
+  kept in the receipt's `audit` and shown on its review item.
 
 | alert when | where | why |
 |---|---|---|
@@ -487,7 +525,7 @@ corpus, so after every deploy, upgrade and import, and as a periodic probe, also
 | `drift_suspected` is non-empty | `/v1/metrics` | online act-tier accuracy is below what the holdout promised: retrain or roll back |
 | `review_load.review_over_capacity` is true | `/v1/metrics` | more confirm decisions per day than `serve.review_capacity_per_day` |
 | the automatic share (`actions.automatic`) drops or the abstain share jumps | `/v1/metrics` | inputs changed, or a cap was applied |
-| `rlcd receipts verify` exits 1, or its `receipts` count is lower than the last recorded one | scheduled job | the audit trail was edited or truncated |
+| `rlcd receipts verify` exits 1, or its `receipts` or `confirmations.receipts` count is lower than the last recorded one | scheduled job | the audit trail (decisions or confirmations) was edited or truncated. Compare counts, not the head digests, which every new decision or confirmation changes |
 | `ok` is false | `/v1/check` | an item fails: the receipt chain does not verify (`receipts.chain`), the bundle does not validate (`model.bundle`), a regression case fails (`regressions.cases`), rlcd.yaml has an error (`config.valid`), ... |
 | `counts.warn` rises, or `secrets.redact`, `rollback.ready` or `automation.switch` turns to `warn` | `/v1/check` | warnings never make `ok` false: redaction off, no rollback target and the kill switch off are warnings |
 | rate of 5xx; rate of 401 | proxy log | failures, including the per-request 503s that `/health` and `/ready` cannot see (`encoder_unavailable`, `connector_unavailable`: the kind is only in the response body, and the documents pack's own 503s are not logged); a caller with an old key |
@@ -536,8 +574,8 @@ with `docker compose up -d rlcd` (`docker compose restart` keeps the old environ
 - [ ] The home is on encrypted storage: `decisions.jsonl` and `feedback.jsonl` hold request contents. Redaction
       (`serve.redact`) is pattern-based; set `[secrets, pii]` if states can hold e-mail addresses or card
       numbers, or `serve.log_states: false` to keep states out of the receipts entirely.
-- [ ] Backups run on a schedule, a restore has been rehearsed, and the receipt head digest is recorded outside
-      the home.
+- [ ] Backups run on a schedule, a restore has been rehearsed, and both receipt head digests (decisions and
+      confirmations) are recorded outside the home.
 - [ ] A retention period is decided and `rlcd receipts prune` is scheduled for it.
 - [ ] `RLCD_ALLOW_REMOTE` is unset unless a connector needs a remote host, and then egress is limited to that
       host. With `HF_HUB_OFFLINE=1` and a pre-seeded `encoders/`, the service needs no egress at all.
@@ -560,4 +598,5 @@ with `docker compose up -d rlcd` (`docker compose restart` keeps the old environ
 * **No published image.** You build it from the repository; the build was verified on linux/arm64 and is built
   on linux/amd64 in CI.
 * **No home migrations.** Upgrades are verified by trying the new image on a copy.
-* **No tamper-proof audit trail** without your help: anchor the receipt head digest outside the home.
+* **No tamper-proof audit trail** without your help: anchor both receipt head digests (decisions and
+  confirmations) outside the home.

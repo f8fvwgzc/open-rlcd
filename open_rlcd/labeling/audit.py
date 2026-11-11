@@ -20,8 +20,9 @@ already have a human label are not asked again. The note on each label records t
 the human accepted, agreed with or overruled the judge.
 
 At the end the judge-vs-human agreement per head (accuracy, Cohen's kappa, confusion) is printed and returned, with
-how many trusted rows each head now has against the 30 a head needs to train at all, the ~150 that give a 30-row
-holdout (fewer, and its decisions stay capped at confirm), and the ~300 recommended.
+how many trusted rows each head now has against the ~46 a head needs to train at all (at least train.min_trusted, 30
+by default, and enough that 10 land in its holdout), the ~150 that give a 30-row holdout (fewer, and its decisions
+stay capped at confirm), and the ~300 recommended.
 Plain prompts (no curses); ANSI colour only when printing to a terminal.
 """
 from __future__ import annotations
@@ -42,7 +43,8 @@ from .bootstrap import select_heads
 from .prompts import label_index
 from .store import LabelItem, LabelStore
 
-MIN_TRUSTED = 30            # TrainConfig.min_trusted: fewer trusted rows and a head cannot train
+MIN_TRUSTED = 30            # train.min_trusted default: fewer trusted rows and a head cannot train
+MIN_HOLDOUT = 10            # core/training.py: fewer trusted rows in the holdout and a head cannot train
 RECOMMENDED_TRUSTED = 300   # enough for a holdout of ~60 rows and usable reliability bins
 HOLDOUT_FRACTION = 0.2      # train.holdout_fraction default
 MIN_VERIFY_ROWS = 30        # policy.min_verify_rows default: holdout (and act-tier) rows needed to verify `act`
@@ -188,13 +190,20 @@ def parse_answer(raw: str, spec: HeadSpec) -> int | None:
 # ----------------------------------------------------------------------------- summary
 
 def head_summary(store: LabelStore, spec: HeadSpec, holdout_fraction: float = HOLDOUT_FRACTION,
-                 min_verify_rows: int = MIN_VERIFY_ROWS) -> dict:
+                 min_verify_rows: int = MIN_VERIFY_ROWS, min_trusted: int = MIN_TRUSTED) -> dict:
     """Trusted rows of one head vs the minimum / recommended counts, and the judge's agreement with humans.
 
-    `for_verified_holdout` is how many trusted rows give a holdout of `min_verify_rows` (policy.min_verify_rows,
-    30) at `holdout_fraction` (train.holdout_fraction, 0.2): about 150. Below it the head can train, but every
-    verdict stays at confirm at best; acting also needs that many act-tier rows on the holdout, so treat it as a
-    floor. `more_for_verified_holdout` is what is still missing."""
+    Both counts follow a split that holds out the first count of at least `holdout_fraction` * n rows (a hashed
+    split, or groups of one row). A time split needs a few rows fewer. Groups move the counts either way, and not
+    monotonically: whole groups overshoot the fraction, so small groups (such as the documents pack's chunk items,
+    up to label_top_k per query) often train from fewer rows, while a few large groups can leave too few
+    development rows for the calibration folds. So the counts are estimates.
+
+    `minimum` is how many trusted rows let the head train: `min_trusted` (train.min_trusted, 30 by default), and
+    enough that MIN_HOLDOUT of them land in the holdout, 46 at `holdout_fraction` (train.holdout_fraction) 0.2. `for_verified_holdout` is how many
+    trusted rows give a holdout of `min_verify_rows` (policy.min_verify_rows, 30): 146 at 0.2. Below it the head
+    can train, but every verdict stays at confirm at best; acting also needs that many act-tier rows on the
+    holdout, so treat it as a floor. `more_for_verified_holdout` is what is still missing."""
     ids = {str(it.id) for it in store.items(spec.view)}
     human = {k: v for k, v in store.human_labels(spec.name).items() if k[0] in ids}
     judge = store.judge_labels(spec.name)
@@ -214,35 +223,45 @@ def head_summary(store: LabelStore, spec: HeadSpec, holdout_fraction: float = HO
         jy.append(ji)
     n = len(human)
     frac = min(max(float(holdout_fraction), 1e-6), 1.0)
-    verified = max(MIN_TRUSTED, math.ceil(int(min_verify_rows) / frac - 1e-9))
+
+    def rows_for(holdout_rows: int) -> int:    # the fewest rows whose first count >= frac * n is holdout_rows
+        return math.floor((holdout_rows - 1) / frac + 1e-9) + 1
+
+    trainable = max(int(min_trusted), rows_for(MIN_HOLDOUT))
+    verified = max(trainable, rows_for(int(min_verify_rows)))
     more = max(0, verified - n)
     holdout = f"a {int(min_verify_rows)}-row holdout"
-    if n < MIN_TRUSTED:
-        status = (f"{MIN_TRUSTED - n} more trusted rows needed before this head can train, {more} more for "
-                  f"{holdout} (below that, decisions are capped at confirm)")
+    if n < trainable:
+        why = (f"{MIN_HOLDOUT} must land in its holdout" if rows_for(MIN_HOLDOUT) > int(min_trusted)
+               else f"train.min_trusted is {int(min_trusted)}")
+        status = (f"about {trainable - n} more trusted rows needed before this head can train ({why}), about {more} "
+                  f"more for {holdout} (below that, decisions are capped at confirm)")
     elif more:
-        status = (f"can train, but its holdout (~{int(n * frac)} rows) is under {int(min_verify_rows)}: decisions "
-                  f"stay capped at confirm; {more} more trusted rows for {holdout}")
+        status = (f"can train, but its holdout (~{math.ceil(n * frac - 1e-9)} rows) is under {int(min_verify_rows)}: "
+                  f"decisions stay capped at confirm; about {more} more trusted rows for {holdout}")
     elif n < RECOMMENDED_TRUSTED:
         status = (f"can train with {holdout}; ~{RECOMMENDED_TRUSTED} trusted rows recommended for tight holdout "
                   f"metrics")
     else:
         status = "recommended number of trusted rows reached"
     agr = agreement(np.asarray(jy, int), np.asarray(hy, int), spec.labels)
-    return {"trusted": n, "by_source": by_source, "minimum": MIN_TRUSTED, "recommended": RECOMMENDED_TRUSTED,
+    return {"trusted": n, "by_source": by_source, "minimum": trainable, "recommended": RECOMMENDED_TRUSTED,
             "for_verified_holdout": verified, "more_for_verified_holdout": more, "status": status,
             "judge_agreement": agr}
 
 
-def _verify_settings(project: Any) -> tuple[float, int]:
-    """(train.holdout_fraction, policy.min_verify_rows) from rlcd.yaml, defaults when unset or unreadable."""
+def _verify_settings(project: Any) -> tuple[float, int, int]:
+    """(train.holdout_fraction, policy.min_verify_rows, train.min_trusted) from rlcd.yaml, defaults when unset or
+    unreadable."""
     get = getattr(project, "get", None)
     try:
         frac = float(get("train.holdout_fraction", HOLDOUT_FRACTION)) if callable(get) else HOLDOUT_FRACTION
         k = int(get("policy.min_verify_rows", MIN_VERIFY_ROWS)) if callable(get) else MIN_VERIFY_ROWS
+        mt = int(get("train.min_trusted", MIN_TRUSTED)) if callable(get) else MIN_TRUSTED
     except (TypeError, ValueError):
-        return HOLDOUT_FRACTION, MIN_VERIFY_ROWS
-    return (frac if 0.0 < frac <= 1.0 else HOLDOUT_FRACTION), (k if k > 0 else MIN_VERIFY_ROWS)
+        return HOLDOUT_FRACTION, MIN_VERIFY_ROWS, MIN_TRUSTED
+    return ((frac if 0.0 < frac <= 1.0 else HOLDOUT_FRACTION), (k if k > 0 else MIN_VERIFY_ROWS),
+            (mt if mt > 0 else MIN_TRUSTED))
 
 
 # ----------------------------------------------------------------------------- the session
@@ -347,8 +366,8 @@ def audit(project: Any, pack: Any, heads: list[str] | None = None, n: int = 300,
         outcome[i] = how
         i += 1
 
-    frac, k = _verify_settings(project)
-    summary = {name: head_summary(store, spec, frac, k) for name, spec in specs.items()}
+    frac, k, mt = _verify_settings(project)
+    summary = {name: head_summary(store, spec, frac, k, mt) for name, spec in specs.items()}
     print_fn("")
     print_fn(style("== trusted rows and judge agreement ==", "1"))
     for name, s in summary.items():

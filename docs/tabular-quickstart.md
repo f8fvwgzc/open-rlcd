@@ -36,7 +36,9 @@ C00001,E0209,2025-01-06T11:41:00Z,226.90,training,engineering,cash,30,no,osaka s
 | known only afterwards | `rejection_reason`, `review_level` | Must **not** be features: they are filled in once the outcome is known and give it away. |
 | everything else | `amount`, `category`, `note`, ... | Features. Numbers stay numbers, other values become categories, empty cells are missing. |
 
-A head trains from 30 labelled rows, but a holdout you can read needs a few thousand.
+A head needs about 45 labelled rows before it trains at all: at least 30, with 10 or more landing in the 20 %
+holdout and enough left over for the calibration folds. With `group`, whole groups move, so the count depends
+on the group sizes. A holdout you can read needs a few thousand.
 
 ## 2. Create the project and describe the table (10 minutes)
 
@@ -76,8 +78,9 @@ pack_config:
 ```
 
 * **`group` and `time` together.** With both set, the default `train.ordering: auto` splits by group: the
-  holdout is the 20 % of employees whose first claim came latest, with all their claims. That keeps each
-  employee on one side, but the holdout is not "the most recent claims": recent claims of other employees train.
+  holdout is the employees whose first claim came latest, added until they hold 20 % of the claims, with all
+  their claims. That keeps each employee on one side, but the holdout is not "the most recent claims": recent
+  claims of other employees train.
   `train: {ordering: time}` makes the holdout the latest 20 % of claims instead, and then one employee's claims
   can land on both sides. This example keeps the group split.
 * **One outcome or several.** `label: outcome` is one head. For more, delete `label` and list them under
@@ -127,7 +130,8 @@ Data notes:
   ...
 ```
 
-* **holdout**: rows the model never trained or calibrated on (here the 20 % of employees who appear latest).
+* **holdout**: rows the model never trained or calibrated on (here the employees who appear latest, holding
+  20 % of the claims).
 * **logloss / base**: the model's log loss next to that of always answering the base rate. Lower than `base`
   is the point; equal means it learned nothing.
 * **BSS** (Brier skill score): 0 = no better than the base rate, 1 = perfect. Honest tables give 0.05-0.5.

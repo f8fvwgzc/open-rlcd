@@ -3,6 +3,8 @@ its path, in plain words, before anything runs; a valid file is never refused. O
 read, the documents pack is only asked for its head specs."""
 from __future__ import annotations
 
+import copy
+import dataclasses
 import importlib.util
 import json
 import re
@@ -219,19 +221,20 @@ def test_names_that_match_nothing_are_warnings(tmp_path):
 
 def test_a_route_contract_the_service_would_refuse_is_an_error(tmp_path):
     """A contract under an option the head does not have (a misspelt option), or on a head that is not a choice
-    head, makes the service refuse every decision that consults the head: RouteBook.check_head raises 500
-    bad_config, `rlcd decide` exits 1 and `rlcd check` fails routes.contracts. It used to be only a warning, so
-    `rlcd train` and `rlcd serve` started on a file that could not decide."""
+    head, fails `rlcd check` (routes.contracts), and RouteBook.check_head refuses every /v1/decide that applies route
+    contracts to the head with 500 bad_config. The documents decide applies them to response_type and route only:
+    for routes.route.vectr `rlcd decide` exits 1, while a contract on answerable never reaches a decide. It used
+    to be only a warning, so `rlcd train` and `rlcd serve` started on a file `rlcd check` fails."""
     specs = load_pack("documents").heads(Project(root=tmp_path, data={}))
     cases = (({"route": {"vectr": {}, "vector": {}}}, "routes.route.vectr", "is not an option of head 'route'"),
              ({"answerable": {"true": {}}}, "routes.answerable", "is a noul head"))
     for routes, path, fragment in cases:
         f = check(tmp_path, {"routes": routes})
         msg = at(f, path)                                   # an error, once
-        assert fragment in msg and "500 bad_config" in msg, msg
+        assert fragment in msg and "500 bad_config" in msg and "`rlcd check` fails routes.contracts" in msg, msg
         assert len(CC.errors(f)) == 1, f
         head = next(iter(routes))
-        with pytest.raises(ContractError) as e:             # what every decision consulting the head runs into
+        with pytest.raises(ContractError) as e:             # what a decide applying the head's contracts runs into
             RouteBook.from_config(routes).check_head(head, specs[head])
         assert e.value.kind == "bad_config" and e.value.status == 500
     assert "Did you mean 'vector'?" in at(check(tmp_path, {"routes": cases[0][0]}), "routes.route.vectr")
@@ -472,23 +475,145 @@ def _not_nullable(keys: dict, prefix: str = "") -> set[str]:
     return out
 
 
+def _paths(keys: dict, prefix: str = "") -> list[str]:
+    """Every path of a key tree, placeholders kept (`heads.<head>.stakes`)."""
+    out: list[str] = []
+    for name, key in keys.items():
+        path = f"{prefix}{name}"
+        out.append(path)
+        if key.keys is not None:
+            out += _paths(key.keys, path + ".")
+        elif key.each is not None:
+            out += _paths({f"<{key.each.label}>": key.each}, path + ".")
+    return out
+
+
+# a readable table: the tabular pack resolves its heads (and so checks their fields) only from one
+TABLE = "x,plan,churned\n" + "".join(f"{i},{'ab'[i % 2]},{'yes' if i % 3 else 'no'}\n" for i in range(60))
+SHORTHAND = (*TARGET_KEYS, *SPEC_KEYS, "question")
+
+
+def _required() -> set[str]:
+    """The keys the reference tables mark "required" in their default column: written empty, such a key is refused
+    just as it is when missing."""
+    return set(re.findall(r"^\| `([^`]+)` \|[^|]*\| required \|", DOC.read_text(encoding="utf-8"), re.M))
+
+
+def _empty(tmp_path, key: str, pack: str) -> tuple[dict, list[dict]]:
+    """A valid project of `pack` with `key` written empty (placeholders filled with names that exist), and the
+    errors config check reports on it."""
+    parts = key.split(".")
+    head = "churned" if pack == "tabular" else ("response_type" if parts[0] == "routes" else "answerable")
+    fill = {"<head>": head, "<level>": "low", "<battery>": "pre", "<option>": "direct_answer"}
+    path = [fill.get(p, p) for p in parts]
+    if pack == "tabular":
+        (tmp_path / "data.csv").write_text(TABLE, encoding="utf-8")
+        target = {"label": "churned"} if path[1] in SHORTHAND else {"targets": {"churned": {"label": "churned"}}}
+        data: dict = {"pack": "tabular", "pack_config": {"data": "data.csv", **target}}
+    elif parts[0] == "batteries":
+        data = {"batteries": {"pre": {"version": "1", "questions": {"q": {"type": "noul", "head": "answerable"}}}}}
+    else:
+        data = {}
+    assert CC.errors(check(tmp_path, data)) == [], data
+    node = data
+    for p in path[:-1]:
+        node = node.setdefault(p, {})
+    node[path[-1]] = None
+    return data, CC.errors(check(tmp_path, data))
+
+
 def test_the_reference_page_names_every_key_whose_empty_value_is_an_error(tmp_path):
+    """The reference page lists the keys that refuse an empty value (`key:`); every other key accepts one, as its
+    default except where the page's other bullets say otherwise (`heads.<head>.conformal:` removes the pack's
+    promise, `rollout.limited.stakes:` means no level, `routes.<head>.<option>:` is an empty contract, which a
+    `fallback` may name, unlike a missing option). Checked both ways on the check itself: each listed key,
+    written empty, is an error, and every other key of the schema and of both packs' pack_config is accepted,
+    except one the tables mark required. (The check's own `Key.nullable` flags miss the errors that its validators
+    raise.) Head fields, which this sweep fills with one noul head, are swept for every head type by the next
+    test."""
     bullet = DOC.read_text(encoding="utf-8").split("* **An empty value is an error**", 1)[1].split("\n* **", 1)[0]
     named: set[str] = set()
     parent = ""
     for word in re.findall(r"`([a-z_.<>*]+)`", bullet):
         if "." in word:
-            parent = word
-        else:                                   # `policy.stakes.<level>` and its `act`, `confirm` and `min_accuracy`
+            # a bare name after it is a field of a key ending in a placeholder (`policy.stakes.<level>` and its
+            # `act`), else a sibling (`routes.<head>.<option>.enabled`, `requires`)
+            parent = word if word.endswith(">") else word.rsplit(".", 1)[0]
+        else:
             word = f"{parent}.{word}"
         named |= {f"train.{k}" for k in CC.schema()["train"].keys} if word == "train.*" else {word}
     want = _not_nullable(CC.schema())
     for pack in ("documents", "tabular"):
         want |= _not_nullable(CC._pack_keys(load_pack(pack)) or {}, "pack_config.")
-    assert named == want
-    # and the example the paragraph opens with is a key whose empty value means the default
+    assert want <= named, want - named
+    swept = [("documents", k) for k in _paths(CC.schema()) if k != "pack_config"]
+    swept += [(p, k) for p in ("documents", "tabular") for k in _paths(CC._pack_keys(load_pack(p)) or {}, "pack_config.")]
+    assert named <= {k for _, k in swept}, named - {k for _, k in swept}
+    required = _required()
+    assert {"batteries.<battery>.version", "pack_config.targets.<head>.label"} <= required <= {k for _, k in swept}
+    wrong = []
+    for pack, key in swept:
+        data, errs = _empty(tmp_path, key, pack)
+        if bool(errs) != (key in named or key in required):
+            wrong.append((pack, key, errs[:1]))
+    assert wrong == []
+    # next to the one-head shorthand an empty `targets:` is ignored, as the bullet says
+    (tmp_path / "data.csv").write_text(TABLE, encoding="utf-8")
+    shorthand = {"pack": "tabular", "pack_config": {"data": "data.csv", "label": "churned", "targets": None}}
+    assert CC.errors(check(tmp_path, shorthand)) == []
+    # the example the paragraph opens with is a key whose empty value means the default
     assert check(tmp_path, {"labeling": {"timeout": None}}) == []
     assert at(check(tmp_path, {"serve": {"port": None}}), "serve.port").startswith("is empty: give it a value")
+
+
+def test_an_empty_head_field_keeps_the_packs_value(tmp_path):
+    """Under heads.<head>, a field written with no value keeps the pack's value (the target's, in the tabular pack),
+    as if the line were not there, for a noul, a choice and a score head in both packs; `conformal:` alone removes
+    the pack's promise. A tabular target field written with no value is its default, as when it is missing, but a
+    target's `label` is required. (An empty `type:` used to be an error or turn a declared score head into a choice
+    head; an empty `params:` passed the check and crashed `rlcd train`.)"""
+    def heads(data: dict) -> dict:
+        return load_pack(data.get("pack", "documents")).heads(Project(root=tmp_path, data=data))
+
+    (tmp_path / "data.csv").write_text("x,churned,plan,tier\n" + "".join(
+        f"{i},{('yes', 'no')[i % 2]},{('up', 'same', 'down')[i % 3]},{('low', 'mid', 'high')[i % 3]}\n"
+        for i in range(60)), encoding="utf-8")
+    targets = {"churned": {"label": "churned", "positive": "no", "stakes": "high", "params": {"C": 0.5}},
+               "plan": {"label": "plan", "classes": ["up", "same", "down"], "model": "logreg"},
+               "tier": {"label": "tier", "type": "score", "classes": ["low", "mid", "high"], "decision": "argmax",
+                        "conformal": 0.1}}
+    tabular = {"pack": "tabular", "pack_config": {"data": "data.csv", "targets": targets}}
+    for base, names, fields in (({}, ("answerable", "response_type", "complete"), CC.head_keys()),
+                                (tabular, tuple(targets), (*CC.head_keys(), "label"))):
+        plain = heads(base)
+        assert {plain[n].type for n in names} == {"noul", "choice", "score"}
+        for name in names:
+            for field in fields:
+                data = {**copy.deepcopy(base), "heads": {name: {field: None}}}
+                assert CC.errors(check(tmp_path, data)) == [], (name, field)
+                want = dataclasses.replace(plain[name], conformal=None) if field == "conformal" else plain[name]
+                assert heads(data)[name] == want, (name, field)
+    for name in targets:
+        for field in (*TARGET_KEYS, *SPEC_KEYS):
+            data, missing = copy.deepcopy(tabular), copy.deepcopy(tabular)
+            data["pack_config"]["targets"][name][field] = None
+            missing["pack_config"]["targets"][name].pop(field, None)
+            found = check(tmp_path, data)
+            assert found == check(tmp_path, missing), (name, field)    # the same findings as without the line
+            if field == "label":                                       # required
+                assert "has no label column" in at(found, "pack_config"), name
+            elif not CC.errors(found):
+                assert heads(data)[name] == heads(missing)[name], (name, field)
+
+
+def test_an_empty_feature_cache_is_the_default_cache(tmp_path):
+    """`pack_config.feature_cache:` with no value keeps the default 1024 featurised states (it used to turn the
+    decide-time cache off)."""
+    def size(**pc):
+        project = Project(root=tmp_path, data={"pack_config": {"encoder": {"kind": "hashing"}, **pc}})
+        return load_pack("documents").provider(project)._cache_size
+
+    assert size() == size(feature_cache=None) == 1024 and size(feature_cache=0) == 0
 
 
 def test_the_examples_on_the_reference_page_have_no_findings(tmp_path):
