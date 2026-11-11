@@ -118,11 +118,41 @@ class Ledger:
             return self._read().get(head)
 
     def reset(self, head: str, table: dict) -> None:
-        """Start a head's table again from the holdout of a freshly trained model."""
+        """Start a head's table again from the holdout of a freshly trained model. The table it replaces is kept in
+        bernoulli.archive.json under every version it was valid for, so a version that is pinned or rolled back to
+        later gates on its own evidence (holdout + the outcomes scored for it), not on its bare holdout."""
         with self._lock:
             data = self._read()
+            old = data.get(head)
+            if isinstance(old, dict):
+                arch = self._archive_read()
+                versions = {v for v in [old.get("model_version"), *(old.get("valid_for") or [])] if v}
+                for v in versions:
+                    arch.setdefault(head, {})[v] = old
+                if versions:
+                    self._archive_write(arch)
             data[head] = table
             self._write(data)
+
+    @property
+    def _archive_path(self) -> Path:
+        return self.path.with_name("bernoulli.archive.json")
+
+    def _archive_read(self) -> dict:
+        try:
+            return json.loads(self._archive_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def _archive_write(self, data: dict) -> None:
+        tmp = self._archive_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(self._archive_path)
+
+    def archived(self, head: str, version: str) -> dict | None:
+        """The last live table of `head` that was valid for `version`, if one was archived."""
+        with self._lock:
+            return (self._archive_read().get(head) or {}).get(version)
 
     def update(self, head: str, decision_id: str, chosen: str, p: float, label: str) -> dict | None:
         """Score one decision against its realised outcome. Each decision_id counts once per head.

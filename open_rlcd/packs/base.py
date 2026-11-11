@@ -245,9 +245,13 @@ def dataset_from_labels(spec: HeadSpec, provider: FeatureProvider, labelled: lis
     fb_rows = [r for r in feedback or [] if r.get("head") == spec.name and r.get("state") is not None]
     # a decision's outcome counts once, as in the Bernoulli ledger: a retried or corrected POST /v1/feedback for
     # the same decision_id replaces the earlier row instead of adding weight
-    last = {str(r["decision_id"]): i for i, r in enumerate(fb_rows) if r.get("decision_id")}
+    # (a /v1/systemone receipt can ask one head in several questions: each question is its own outcome)
+    def _key(r: dict) -> tuple:
+        return (str(r["decision_id"]), r.get("question"))
+
+    last = {_key(r): i for i, r in enumerate(fb_rows) if r.get("decision_id")}
     for i, r in enumerate(fb_rows):
-        if r.get("decision_id") and last[str(r["decision_id"])] != i:
+        if r.get("decision_id") and last[_key(r)] != i:
             replaced += 1
             continue
         try:

@@ -9,8 +9,15 @@
     policy: {abstain: escalate, stakes: {medium: {act: 0.85, confirm: 0.65, min_accuracy: 0.75}}}
     train: {holdout_fraction: 0.2, n_splits: 5, ordering: auto, calibration: auto, feedback_weight: 5}
     labeling: {judge: claude-cli, model: null, batch: 20}
-    serve: {host: 127.0.0.1, port: 8095, log_states: true}
+    serve: {host: 127.0.0.1, port: 8095, log_states: true, redact: true, receipts: decisions,
+            review_capacity_per_day: 40}
     security: {allow_remote: false}
+    rollout: {mode: full}            # shadow | assist | limited | full; limited: {stakes, heads}; heads: {head: mode}
+    routes: {...}                    # route contracts of choice heads (core/routes.py)
+    batteries: {...}                 # versioned question sets (core/battery.py)
+    evaluate: {max_revisions: 2, output_scan: [secrets]}
+    regressions: ./regressions.jsonl # regression cases for `rlcd regress` (default: regressions.jsonl in the project)
+    owners: {pack: ..., heads: ..., policy: ..., review: ..., incidents: ...}   # read by `rlcd check`
 
 Environment: RLCD_HOME overrides `home`, RLCD_PROJECT points at a project directory or rlcd.yaml,
 RLCD_API_KEY protects the API, RLCD_ALLOW_REMOTE=1 allows non-loopback connector / judge hosts.

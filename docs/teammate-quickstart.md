@@ -137,3 +137,11 @@ A bundle contains no training data, but its heads learned from your data: share 
 | `the request lacks … input feature(s)` | your request omits fields the model was trained with (e.g. candidate scores): send them |
 | `encoder unavailable … HF_HUB_OFFLINE` | run once online so the encoder downloads, or use the hashing encoder |
 | a head always says `escalate` | read its `skill` and `verdict` in `rlcd report`: that is the honest answer for now |
+
+## Next: put it in front of (and behind) your LLM
+
+Read [control-layer.md](control-layer.md). The short version: run `rlcd check` before launch; start with
+`rollout: {mode: shadow}` in rlcd.yaml and send your existing route as `baseline`; call
+`POST /v1/receipts/{id}/check` right before any side effect; post what happened to `/v1/feedback` (per head) and
+`/v1/outcome` (task success, cost); set `serve.review_capacity_per_day` and watch `rlcd metrics` and `rlcd review`; move to `assist`, then `limited`, then `full` as the
+evidence shows it is safe. `rlcd automation off --reason ...` stops all automation at once if something goes wrong.
