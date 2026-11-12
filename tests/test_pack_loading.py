@@ -13,6 +13,7 @@ from open_rlcd.core.head import HeadSpec
 from open_rlcd.labeling.store import LabelItem
 from open_rlcd.packs.base import BasePack, dataset_from_labels, load_pack
 from open_rlcd.packs.tabular import TabularPack
+from open_rlcd.packs.trading import TradingPack
 from tests.toypack import ToyPack, ToyProvider
 
 PACK = """
@@ -99,8 +100,9 @@ def test_missing_module_and_missing_class_say_where_they_looked(tmp_path, clean_
 def test_builtin_packs_load_as_before(tmp_path):
     assert isinstance(load_pack("tabular"), TabularPack)
     assert isinstance(load_pack("tabular", root=tmp_path), TabularPack)
+    assert isinstance(load_pack("trading", root=tmp_path), TradingPack)
     with pytest.raises(ValueError, match="unknown pack"):
-        load_pack("trading", root=tmp_path)
+        load_pack("tradng", root=tmp_path)
 
 
 # ----------------------------------------------------------------------------- feedback a pack did not use

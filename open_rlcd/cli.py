@@ -1,6 +1,6 @@
 """`rlcd` — the command teammates use.
 
-    rlcd init my-business --pack documents     write my-business/rlcd.yaml (packs: documents, tabular)
+    rlcd init my-business --pack documents     write my-business/rlcd.yaml (packs: documents, tabular, trading)
     rlcd config check [--json]                 rlcd.yaml checked key by key (exit 1 on an error); docs/configuration.md
     rlcd config show [--json]                  what the project resolves to: home, pack, heads, thresholds, rollout
     rlcd ingest ./data                         build the corpus (documents pack; tabular has no ingest step)
@@ -99,13 +99,13 @@ def _misplaced(args: argparse.Namespace) -> str | None:
         return None
     if cmd in NEEDS_PROJECT:
         return (f"no rlcd.yaml here or in any parent folder, and `rlcd {cmd}` works on a project. Create one with "
-                f"`rlcd init <name> --pack documents|tabular` and run it there (or pass --project DIR, or set "
-                f"RLCD_PROJECT). Nothing was read, written or downloaded.")
+                f"`rlcd init <name> --pack documents|tabular|trading` and run it there (or pass --project DIR, or "
+                f"set RLCD_PROJECT). Nothing was read, written or downloaded.")
     if getattr(args, "home", None) or os.environ.get("RLCD_HOME") or (Path.cwd() / "var" / "registry.json").is_file():
         return None
     return (f"no rlcd.yaml here or in any parent folder, and no model home to work on: run `rlcd {cmd}` inside a "
-            f"project (`rlcd init <name> --pack documents|tabular`), or name the home with --home DIR or RLCD_HOME. "
-            f"Nothing was written.")
+            f"project (`rlcd init <name> --pack documents|tabular|trading`), or name the home with --home DIR or "
+            f"RLCD_HOME. Nothing was written.")
 
 
 def _project(args: argparse.Namespace):
@@ -213,6 +213,16 @@ def next_steps(pack: str, root: Path) -> str:
             "RLCD_ALLOW_REMOTE=1, or stay local with --judge ollama:<model>",
             "rlcd label audit --heads answerable,grounded --n 600   # your labels calibrate the model",
             "rlcd train",
+        ]
+    elif pack == "trading":
+        steps = [
+            f"cd {root}",
+            "start the View Engine quant sidecar at pack_config.quant_url (http://127.0.0.1:8090); a sidecar on "
+            "another host needs security.allow_remote: true or RLCD_ALLOW_REMOTE=1",
+            "edit rlcd.yaml: pack_config.symbols and intervals (one setup:<interval> head per interval); sl_pips, "
+            "tp_pips, tp2_pips and horizon go to the sidecar, which computes the labels",
+            "rlcd config check",
+            "rlcd train                  # reads /dataset from the sidecar; each decision reads /features",
         ]
     else:
         from .packs.tabular.scaffold import next_steps as tabular_steps

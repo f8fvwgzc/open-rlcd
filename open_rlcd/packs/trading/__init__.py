@@ -20,13 +20,20 @@ Head `setup:<interval>` (choice buy / sell / hold) answers "from this candle's c
 target before its stop within the horizon", exactly as the sidecar labels it. Serve-time state is either
 `{symbol, interval?, as_of?, pip?}` (features are fetched from the sidecar) or a precomputed
 `{x, feature_names, feature_version}`. Analysis tool, not financial advice.
+
+Every key: docs/configuration.md (`pack_config` of the trading pack). `rlcd config check` checks them
+(`config_keys`, `check_config`); a key written with no value is its default, as when it is missing.
 """
 from __future__ import annotations
 
+import copy
+import difflib
 import io
 import json
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import numpy as np
@@ -35,12 +42,23 @@ from ...core.config import Project
 from ...core.contract import ContractError
 from ...core.dataset import Dataset, concat
 from ...core.head import HeadSpec
-from ..base import BasePack, epoch
+from ..base import BasePack, epoch, spec_from_yaml
 
 INTERVAL_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 CLASSES = ("buy", "sell", "hold")
 WIRE_NPZ = {1: 0, 2: 1, 0: 2}   # sidecar npz `best`: 0 hold, 1 buy, 2 sell -> our order buy, sell, hold
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+# what `_cfg` uses for a pack_config key that is missing or written with no value
+DEFAULTS = {"quant_url": "http://127.0.0.1:8090", "symbols": ["XAUUSD"], "intervals": ["15m"], "sl_pips": 20,
+            "tp_pips": 50, "tp2_pips": 100, "horizon": 48, "max_rows": 20000}
+# the head fields a `heads.<head>` override cannot change: the question is the sidecar's (what it labels, in this
+# class order, on which candles)
+FIXED = ("type", "classes", "view")
+
+
+def _hint(word: Any, options: Iterable[str]) -> str:
+    hit = difflib.get_close_matches(str(word), list(options), n=1, cutoff=0.6)
+    return f". Did you mean {hit[0]!r}?" if hit else ""
 
 
 def _check_url(url: str, allow_remote: bool) -> str:
@@ -158,10 +176,87 @@ class TradingPack(BasePack):
         self.transport = transport
 
     def _cfg(self, project: Project) -> dict:
-        c = {"quant_url": "http://127.0.0.1:8090", "symbols": ["XAUUSD"], "intervals": ["15m"], "sl_pips": 20,
-             "tp_pips": 50, "tp2_pips": 100, "horizon": 48, "max_rows": 20000}
-        c.update(project.pack_config)
+        """pack_config over DEFAULTS. A key written with no value (`horizon:`) is its default, as when it is missing:
+        the convention of every rlcd.yaml key (docs/configuration.md), and what `config_keys` declares."""
+        c = copy.deepcopy(DEFAULTS)
+        c.update({k: v for k, v in project.pack_config.items() if v is not None})
         return c
+
+    # ------------------------------------------------------------------ rlcd.yaml validation (core/config_check.py)
+    def config_keys(self) -> dict:
+        """The `pack_config` keys this pack reads, for `rlcd config check`. Where each is read: quant_url ->
+        `client` (and `_check_url`: loopback only unless remote hosts are allowed); symbols, pips, max_rows ->
+        `datasets`; intervals -> `heads`; sl_pips, tp_pips, tp2_pips, horizon -> `provider` (sent to the sidecar
+        with every /dataset and /features call, stored with the trained version) and `datasets` (horizon: the
+        label window)."""
+        from ...core.config_check import Key
+
+        pips = {"min": 0, "open_min": True}
+        return {
+            "quant_url": Key("str", default=DEFAULTS["quant_url"]),
+            "symbols": Key("list", default=DEFAULTS["symbols"]),
+            "intervals": Key("list", default=DEFAULTS["intervals"]),
+            "sl_pips": Key("number", default=DEFAULTS["sl_pips"], **pips),
+            "tp_pips": Key("number", default=DEFAULTS["tp_pips"], **pips),
+            "tp2_pips": Key("number", default=DEFAULTS["tp2_pips"], **pips),
+            "horizon": Key("int", default=DEFAULTS["horizon"], min=1),
+            "max_rows": Key("int", default=DEFAULTS["max_rows"], min=1),
+            "pips": Key("map", each=Key("list", label="symbol")),
+        }
+
+    def check_config(self, project: Project) -> list[dict]:
+        """What the key list cannot say (no network): an empty or unsupported `intervals`, an empty `symbols`, a
+        `quant_url` that is not an http(s) URL, pip sizes that are not positive numbers or belong to no listed
+        symbol, and a `heads:` entry that is not one of this pack's heads or changes the question itself (FIXED).
+        Runs after the key and type checks passed."""
+        cfg = self._cfg(project)
+        out: list[dict] = []
+
+        def add(path: str, message: str, level: str = "error") -> None:
+            out.append({"level": level, "path": path, "message": message})
+
+        intervals, symbols = list(cfg["intervals"]), list(cfg["symbols"])
+        if not intervals:
+            add("pack_config.intervals", "is empty: list at least one interval (each one is a setup:<interval> head)")
+        for iv in intervals:
+            if iv not in INTERVAL_SECONDS:
+                add("pack_config.intervals", f"{iv!r} is not an interval this pack supports "
+                                             f"({', '.join(INTERVAL_SECONDS)}){_hint(iv, INTERVAL_SECONDS)}")
+        if not symbols:
+            add("pack_config.symbols", "is empty: list at least one symbol the quant sidecar exports")
+        elif not all(isinstance(s, str) and s.strip() for s in symbols):
+            add("pack_config.symbols", "must be a list of symbol names (text)")
+        url = urlsplit(str(cfg["quant_url"]).strip())
+        if url.scheme not in ("http", "https") or not url.hostname:
+            add("pack_config.quant_url", f"must be an http:// or https:// URL with a host, got {cfg['quant_url']!r}")
+        for symbol, sizes in (cfg.get("pips") or {}).items():
+            if any(isinstance(p, bool) or not isinstance(p, (int, float)) or p <= 0 for p in sizes or ()):
+                add(f"pack_config.pips.{symbol}", "must be a list of pip sizes (numbers > 0)")
+            elif symbol not in symbols:
+                add(f"pack_config.pips.{symbol}", f"{symbol!r} is not in pack_config.symbols, so these pip sizes are "
+                                                  f"never used", "warn")
+        names = {f"setup:{iv}": iv for iv in intervals if iv in INTERVAL_SECONDS}
+        for name, o in project.head_overrides.items():
+            if not isinstance(o, dict):
+                continue
+            if name not in names:
+                if o.get("enabled", True) is not False:      # switching off a head that does not exist changes nothing
+                    add(f"heads.{name}", f"is not a head of the trading pack ({', '.join(names) or 'it has none'}): "
+                                         f"its heads are setup:<interval>, one per pack_config.intervals"
+                                         f"{_hint(name, names)}")
+                continue
+            for field, message in self._fixed_changed(names[name], o):
+                add(f"heads.{name}.{field}", message)
+        return out
+
+    def switched_off(self, project: Project, trained: Iterable[str] = ()) -> set[str]:
+        """BasePack's (`heads.<head>.enabled: false`), plus every trained head whose interval is no longer in
+        `pack_config.intervals`: that list names the heads this pack serves, so removing an interval stops serving
+        its head at once, as `enabled: false` does, while a train keeps carrying the trained head over (same
+        feature version): listing the interval again serves it again without a retrain. Reads rlcd.yaml only."""
+        intervals = self._cfg(project)["intervals"]
+        listed = {f"setup:{iv}" for iv in intervals} if isinstance(intervals, (list, tuple)) else set()
+        return super().switched_off(project, trained) | {str(n) for n in trained if n not in listed}
 
     def client(self, project: Project, url: str | None = None) -> SidecarClient:
         try:
@@ -170,17 +265,49 @@ class TradingPack(BasePack):
             raise ContractError(str(e)) from None
         return SidecarClient(u, self.transport)
 
+    @staticmethod
+    def _default_head(iv: str) -> dict:
+        return {"type": "choice", "classes": list(CLASSES), "view": iv, "model": "auto", "stakes": "medium",
+                "description": f"From this {iv} candle's close, which action reached its target before its stop "
+                               f"within the horizon (labelled by the quant sidecar)?"}
+
+    def _fixed_changed(self, iv: str, override: dict) -> list[tuple[str, str]]:
+        """[(field, message)] for each FIXED field `override` sets to something other than the pack's value."""
+        base = self._default_head(iv)
+        out = []
+        for field in FIXED:
+            if field not in override:
+                continue
+            value = override[field]
+            if field == "classes":
+                same = isinstance(value, (list, tuple)) and [str(c) for c in value] == base["classes"]
+            else:
+                same = str(value) == base[field]
+            if not same:
+                out.append((field, f"cannot be changed in the trading pack: the quant sidecar labels this head as a "
+                                   f"{base['type']} head with classes {', '.join(CLASSES)} (in this order) on the "
+                                   f"{iv} candles; got {value!r}"))
+        return out
+
     def heads(self, project: Project) -> dict[str, HeadSpec]:
+        """One `setup:<interval>` head per interval of `pack_config.intervals`, with its `heads.<head>` fields from
+        rlcd.yaml merged in (the override wins field by field, as in every pack). `enabled: false` switches the head
+        off: it is not trained and not served. A FIXED field set to another value is refused."""
         out = {}
+        overrides = project.head_overrides
         for iv in self._cfg(project)["intervals"]:
             if iv not in INTERVAL_SECONDS:
                 raise ValueError(f"interval {iv!r} not supported; choose from {list(INTERVAL_SECONDS)}")
             name = f"setup:{iv}"
-            ov = project.head_overrides.get(name) or {}
-            out[name] = HeadSpec(name=name, type="choice", classes=CLASSES, view=iv, model=ov.get("model", "auto"),
-                                 stakes=ov.get("stakes", "medium"), params=ov.get("params") or {},
-                                 description=f"From this {iv} candle's close, which action reached its target before "
-                                             f"its stop within the horizon (labelled by the quant sidecar)?")
+            o = overrides.get(name)
+            o = o if isinstance(o, dict) else {}
+            if o.get("enabled", True) is False:
+                continue
+            changed = self._fixed_changed(iv, o)
+            if changed:
+                raise ValueError(f"head {name!r}: {changed[0][0]} {changed[0][1]}")
+            d = {**self._default_head(iv), **{k: v for k, v in o.items() if k != "enabled"}}
+            out[name] = spec_from_yaml(name, d)
         return out
 
     def provider(self, project: Project, config: dict | None = None) -> TradingProvider:
