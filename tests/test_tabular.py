@@ -14,6 +14,7 @@ from open_rlcd.core import regress as RG
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError, DecideRequest, FeedbackRequest, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import lightgbm_available
+from open_rlcd.core.replay import replay
 from open_rlcd.core.service import Service
 from open_rlcd.packs.tabular import generate, synthetic_pack_config, true_probabilities, write_synthetic_csv
 
@@ -494,3 +495,24 @@ def test_regression_cases_of_a_switched_off_head_still_judge_the_trained_head(tm
     with pytest.raises(ContractError) as e:
         RG.case_from_decision(off, d["decision_id"], head="next_plan", expect={"class": "sideways"})
     assert e.value.kind == "bad_case" and "not a class of head 'next_plan'" in e.value.message
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_replay_compares_the_logged_decisions_of_a_switched_off_head(tmp_path, how):
+    """`rlcd replay` judges versions as trained, as regression cases do: the logged decisions of a head rlcd.yaml
+    switches off since are replayed with the trained head the version still has, giving the report they gave while
+    the head was on, not skipped as decisions of a head the version lacks."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {})
+    v1 = train(on)["model"]
+    for y in (0.1, 0.5, 0.9):
+        on.generic_decide(DecideRequest(state={**ROW, "y": y}))
+    rows = list(on.logs.decisions())
+    before = replay(on, v1, v1, rows)
+    assert set(before["heads"]) == {"churned", "next_plan"} and before["skipped"] == {}
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}),
+           "removed": lambda: small(tmp_path, None)}[how]()
+    assert off.switched_off(v1) == {"next_plan"}
+    after = replay(off, v1, v1, rows)
+    assert after["skipped"] == {} and after["heads"] == before["heads"]

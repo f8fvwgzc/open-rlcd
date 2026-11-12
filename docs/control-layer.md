@@ -217,7 +217,7 @@ them yourself.
 
 | stage | open-rlcd |
 |---|---|
-| offline | `rlcd replay --base A --candidate B`: logged decisions re-run under both versions (as trained: rollout full, kill switch on, each version's own holdout gate), with class and tier transitions, probability-band shifts and accuracy on rows with outcomes; `rlcd regress`: regression cases every version must pass (`rlcd case add --from-decision ID --head H --expect class=X`, or feedback tagged `regression`; kept in `regressions.jsonl` in the project, meant to be committed after review), judged as trained as well: a head rlcd.yaml switches off still answers its cases |
+| offline | `rlcd replay --base A --candidate B`: logged decisions re-run under both versions (as trained: rollout full, kill switch on, each version's own holdout gate, heads rlcd.yaml switches off included), with class and tier transitions, probability-band shifts and accuracy on rows with outcomes; `rlcd regress`: regression cases every version must pass (`rlcd case add --from-decision ID --head H --expect class=X`, or feedback tagged `regression`; kept in `regressions.jsonl` in the project, meant to be committed after review), judged as trained as well: a head rlcd.yaml switches off still answers its cases |
 | shadow | `rollout.mode: shadow`: decisions are made, logged and returned, nothing is automated (capped at confirm, marked) — compare with your `baseline` |
 | assist | `rollout.mode: assist`: every decision is a recommendation a person confirms |
 | limited | `rollout.mode: limited` + `limited: {stakes: [low], heads: [...]}`: act only inside the slice |
