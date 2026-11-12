@@ -1093,7 +1093,7 @@ def _regressions(ctx: _Ctx) -> Outcome:
         judged = f" ({errors} of them could not be judged, which counts as failing)" if errors else ""
         return "fail", f"{len(bad)} of {len(results)} case(s) in {where} fail on {ctx.version}{judged}: {shown}{more}"
     return "pass", (f"all {len(results)} case(s) in {where} pass on {ctx.version} (judged as trained: rollout full, "
-                    f"kill switch on, each version's own holdout gate)")
+                    f"kill switch on, each version's own holdout gate, heads rlcd.yaml switches off included)")
 
 
 # ----------------------------------------------------------------------------- the decision log: review load

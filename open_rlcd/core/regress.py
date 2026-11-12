@@ -28,10 +28,10 @@ with that error kind (an incomplete or malformed state must stay refused). Optio
 `source` (the decision or feedback row the case was copied from). `add_case` assigns `id` and `added_at`.
 
 Cases judge the model and its policy as trained, not the deployment: they run with rollout mode `full`, the kill
-switch on, and the Bernoulli gate on each version's own holdout table instead of the live ledger (`as_trained`). So
-switching automation off during an incident cannot make a case pass, the outcomes posted since cannot make it flip,
-and a case gives the same result wherever the version is installed. Every case runs inside `service.dry_run()`:
-nothing is logged.
+switch on, the Bernoulli gate on each version's own holdout table instead of the live ledger, and every head the
+version has trained, also one rlcd.yaml switches off (`as_trained`). So switching automation or a head off during an
+incident cannot make a case pass or fail, the outcomes posted since cannot make it flip, and a case gives the same
+result wherever the version is installed. Every case runs inside `service.dry_run()`: nothing is logged.
 
 What it does not do: it does not write cases by itself (an incident review does: `rlcd case add --from-decision`,
 or feedback tagged "regression"), it does not decide what to do about a failing case, and an untrained head can
@@ -318,13 +318,13 @@ def _canonical(spec: Any, label: Any) -> str:
 
 
 def _canonical_expect(service: Any, head: str, expect: Any) -> dict:
-    """Class names checked against the head as the latest version defines it (a typo is refused when the case is
-    made, not discovered when it fails)."""
+    """Class names checked against the head as the latest version defines it, as cases see it (`as_trained`: a head
+    rlcd.yaml switches off included). A typo is refused when the case is made, not discovered when it fails."""
     if not isinstance(expect, dict) or not expect:
         raise _bad("expect must be a non-empty object: what the answer must be")
     out = dict(expect)
     try:
-        spec = service.specs(service.resolve(None)).get(head)
+        spec = as_trained(service).specs(service.resolve(None)).get(head)
     except Exception:   # the pack cannot load here: keep the names as given, run_cases checks them per version
         spec = None
     if spec is None:
@@ -439,14 +439,21 @@ def _own_holdout(version: str, head_name: str, head: Any) -> dict | None:
     return holdout_table(head)
 
 
+def _none_switched_off(version: str) -> set[str]:
+    return set()
+
+
 def as_trained(service: Any) -> Any:
-    """A view of `service` that decides as each version was trained: rollout mode `full`, the kill switch on, and
-    the Bernoulli gate on the version's own holdout table instead of the live ledger. A shallow copy: it shares the
-    registry, logs, caches and the dry-run flag with `service`; only those three lookups differ."""
+    """A view of `service` that decides as each version was trained: rollout mode `full`, the kill switch on, the
+    Bernoulli gate on the version's own holdout table instead of the live ledger, and every head the version has
+    trained, also one rlcd.yaml switches off (`switched_off`: switching a head off is not a retrain, so the trained
+    head still answers its cases). A shallow copy: it shares the registry, logs, caches and the dry-run flag with
+    `service`; only those four lookups differ."""
     view = copy.copy(service)
     view.rollout = _full_rollout
     view.switch = _SwitchOn()
     view.gate_table = _own_holdout
+    view.switched_off = _none_switched_off
     return view
 
 

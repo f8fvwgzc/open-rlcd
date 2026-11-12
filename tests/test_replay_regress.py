@@ -491,9 +491,10 @@ def test_cases_judge_the_model_not_the_rollout_or_the_kill_switch(world):
     assert off == shadow == on
 
 
-def test_as_trained_view_changes_only_rollout_switch_and_gate(world):
+def test_as_trained_view_changes_only_rollout_switch_gate_and_switched_off_heads(world):
     svc = world.svc
     svc.project.data["rollout"] = {"mode": "assist"}
+    svc.project.data["heads"] = {"color": {"enabled": False}}
     try:
         view = RG.as_trained(svc)
         assert view.rollout().mode == "full" and view.switch.state().enabled and view.switch.cap() == (2, None)
@@ -501,11 +502,14 @@ def test_as_trained_view_changes_only_rollout_switch_and_gate(world):
         head = svc.loaded(V1, "color")
         assert view.gate_table(V1, "color", head) == head.holdout_ledger()
         assert view.gate_table(V1, "color", None) is None
+        # switching a head off is not a retrain: cases still see the trained head
+        assert svc.switched_off(V1) == {"color"} and view.switched_off(V1) == set()
         assert view.registry is svc.registry and view.logs is svc.logs
         with view.dry_run():
             assert svc.is_dry                                              # one dry-run flag for both
     finally:
         svc.project.data.pop("rollout")
+        svc.project.data.pop("heads")
 
 
 def test_tier_names_follow_the_policy_abstain_name(tmp_path):

@@ -1149,11 +1149,11 @@ class Service:
                     f"decision, and kept as an up-weighted training row for a later train of '{head}'")
         out = {"id": saved["id"], "stored": True, "head": head, "label": label,
                "feedback_rows": self.logs.feedback_counts().get(head, 0), "bernoulli": update, "note": note}
-        if "regression" in (req.tags or []) and unserved is not None:
-            # `rlcd regress` judges a case with the head the version serves: it could not run this one
-            out["regression_case"] = {"stored": False, "reason": f"head '{head}' is not served by {version}, so "
-                                                                 f"`rlcd regress` could not run a case for it: tag a "
-                                                                 f"label again once the head is served"}
+        if "regression" in (req.tags or []) and unserved not in (None, version):
+            # `rlcd regress` judges a case with the head the version has trained (a switched-off head included):
+            # rlcd-latest has none to judge this one with
+            out["regression_case"] = {"stored": False, "reason": f"{version} has no head '{head}', so `rlcd regress` "
+                                                                 f"could not judge a case for it"}
         elif "regression" in (req.tags or []):
             from . import regress as RG  # a reviewer's correction becomes a case every later version must pass
 
