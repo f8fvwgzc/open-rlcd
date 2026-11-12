@@ -196,6 +196,47 @@ def combined_skill(gain_vs_train: np.ndarray, P: np.ndarray, Y: np.ndarray, bloc
     return out
 
 
+def paired_gain_test(P_base: np.ndarray, P_cand: np.ndarray, y: np.ndarray, blocks: np.ndarray | int = 20,
+                     alpha: float = 0.05, n_boot: int | None = None, seed: int = 7) -> dict:
+    """Is a candidate model reliably better than a base model on the SAME holdout rows?
+
+    Per row, the Brier gain and the log-loss gain of the candidate over the base (base loss minus candidate loss;
+    > 0 = the candidate is better). Pairing removes the row-to-row difficulty both models share, so the test sees
+    only how they differ. Rows are not independent, so the gains are summed per block (contiguous blocks of the
+    scoring order, or one block key per row, e.g. the group) and whole blocks are resampled with replacement; both
+    gains use the same resamples. `passed` needs the one-sided (1 - alpha) lower bound of BOTH mean gains > 0."""
+    P_base, P_cand, y = np.asarray(P_base, float), np.asarray(P_cand, float), np.asarray(y, int)
+    n, k = P_base.shape
+    if P_cand.shape != P_base.shape or len(y) != n:
+        raise ValueError("paired_gain_test needs both models' forecasts for the same rows")
+    Y = np.eye(k)[y]
+    gains = {"brier": brier_rows(P_base, Y) - brier_rows(P_cand, Y),
+             "log_loss": log_loss_rows(P_base, Y) - log_loss_rows(P_cand, Y)}
+    keys, nb, how = _block_keys(n, blocks)
+    out: dict = {"n": int(n), "blocks": int(nb), "alpha": _f(alpha), "confidence": _f(1 - alpha)}
+    if keys is None or nb < 5 or n < 10:
+        for name, g in gains.items():
+            out[name] = {"mean_gain": _f(g.mean()) if n else None, "lower": None, "upper": None}
+        out.update(passed=False, method="too few holdout rows or blocks to test (need at least 10 rows in 5 blocks)")
+        return out
+    n_boot = int(n_boot or max(4000, math.ceil(200 / alpha)))
+    _, inv = np.unique(keys, return_inverse=True)
+    counts = np.bincount(inv).astype(float)
+    draws = np.random.default_rng(seed).integers(0, nb, size=(n_boot, nb))
+    denom = counts[draws].sum(axis=1)
+    ok = True
+    for name, g in gains.items():
+        boot = np.bincount(inv, weights=g)[draws].sum(axis=1) / denom
+        lower, upper = float(np.quantile(boot, alpha)), float(np.quantile(boot, 1 - alpha))
+        out[name] = {"mean_gain": _f(g.mean()), "lower": _f(lower), "upper": _f(upper)}
+        ok = ok and float(g.mean()) > 0 and lower > 0
+    out.update(passed=bool(ok), n_boot=n_boot,
+               method=f"paired block bootstrap ({how}, {n_boot} resamples) of the per-row Brier and log-loss gain "
+                      f"of the candidate over the base on the same holdout rows: both one-sided {1 - alpha:.4g} "
+                      f"lower bounds must be > 0")
+    return out
+
+
 def calibration_report(P: np.ndarray, y: np.ndarray, classes: Sequence[str], prior: np.ndarray,
                        baseline_note: str = "always predicts the class frequencies of the trusted training rows",
                        blocks: np.ndarray | int = 20, seed: int = 7) -> dict:

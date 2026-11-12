@@ -236,7 +236,10 @@ so abstention keeps meaning "the model cannot vouch for this".
   automation nor confirm its own decisions.
 * **Rollback**: `rlcd rollback` (or `rlcd promote VERSION`) points `rlcd-latest` at another version — no retrain,
   no code change; the version's heads gate on their own evidence again. `--by NAME` and `--reason` go into the
-  registry history (`--by` defaults to `$USER`, else `unknown`).
+  registry history (`--by` defaults to `$USER`, else `unknown`). A weight edit that `rlcd patch` promoted is a
+  version like any other: `rlcd rollback` returns to the version it edited. An edit whose holdout gate failed is
+  never made latest: `rlcd promote` and `rlcd rollback --to` refuse it, `rlcd rollback` skips it
+  ([weight edits](weight-edits.md)).
 * **Measure**: `GET /v1/metrics` / `rlcd metrics`: automatic-action, review and abstention rates, false automation
   and false rejection from feedback, online reliability next to the holdout, uncertainty sources, binding links
   (`binding.latency_only_candidates`: heads that never change an action), task success, cost and retries from

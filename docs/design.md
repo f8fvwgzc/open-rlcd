@@ -93,6 +93,13 @@ the interfaces the packages build against.
   (terminal review), `rlcd label next` (uncertainty + judge/model disagreement + diversity sampling).
 * **CLI** `rlcd`, **benchmark** `rlcd bench` (p50 / p95 / p99 per stage on the user's machine), **reports**
   (`MODEL_CARD.md`, an HTML reliability page with inline SVG, no external assets).
+* **Guarded weight edits** (experimental, `core/patch.py`, `rlcd patch`): a hand-, script- or LLM-made edit of a
+  head's logistic-regression arrays (safetensors deltas) or of the ONNX encoder becomes a candidate version. Head
+  edits recalibrate every member on its trusted calibration block; encoder edits are a new feature version, so
+  every head is retrained. The candidate is scored once on the base's untouched holdout and becomes `rlcd-latest`
+  only if a paired block-bootstrap test shows a reliable Brier and log-loss gain over the base and no verdict is
+  weaker; a failed candidate is kept for inspection and never served. Edits tuned on holdout rows are refused.
+  See [weight-edits.md](weight-edits.md).
 
 ## 5. Package layout and responsibilities
 
@@ -116,6 +123,7 @@ open_rlcd/
     config.py            rlcd.yaml project config + environment
     service.py           Service: answer questions / rank / decide / evaluate / feedback (no HTTP)
     jobs.py              Trainer: one background training job at a time
+    patch.py             guarded weight edits: candidate versions judged on the base's holdout (experimental)
   features/  text.py  lexical.py  retrieval.py
   packs/     base.py (Pack, FeatureProvider protocols, loader, dataset_from_labels)  documents/  tabular/  trading/
   connectors/ base.py  security.py  local_vector.py  local_graph.py  factory.py

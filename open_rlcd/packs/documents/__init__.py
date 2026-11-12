@@ -30,7 +30,7 @@ from typing import Any
 from ...core.config import Project, load_project
 from ...core.contract import ContractError
 from ...core.dataset import Dataset
-from ...features.text import EncoderError, EncoderMismatch, make_encoder
+from ...features.text import EncoderError, EncoderMismatch, local_path_problem, make_encoder
 from ...labeling.store import LabelItem, LabelStore
 from ..base import BasePack, dataset_from_labels
 from .provider import VIEWS, DocumentsProvider
@@ -60,9 +60,18 @@ class DocumentsPack(BasePack):
         return config_keys()
 
     def check_config(self, project: Project) -> list[dict]:
-        """`vector` / `graph` against the store their `kind` names (settings.py `config_findings`): what a remote
-        store would refuse when it is built, found by `rlcd config check` without a connection."""
-        return config_findings(project.pack_config)
+        """What `rlcd config check` finds in pack_config without a connection: `vector` / `graph` against the store
+        their `kind` names (settings.py `config_findings`: what a remote store would refuse when it is built), and a
+        local encoder file (`encoder.path`, `encoder.tokenizer`) that is not relative to the home or leaves it, the
+        rule `OnnxEncoder` enforces (the file itself is not opened: it may not exist yet)."""
+        out = list(config_findings(project.pack_config))
+        enc = project.pack_config.get("encoder")
+        for key, what in (("path", "encoder"), ("tokenizer", "tokenizer")):
+            value = enc.get(key) if isinstance(enc, dict) else None
+            why = local_path_problem(value, what) if isinstance(value, str) and value else None
+            if why:
+                out.append({"level": "error", "path": f"pack_config.encoder.{key}", "message": why})
+        return out
 
     # ------------------------------------------------------------------ features
     def provider(self, project: Project, config: dict | None = None) -> DocumentsProvider:

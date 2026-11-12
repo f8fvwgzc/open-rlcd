@@ -227,7 +227,7 @@ root filesystem read-only, with a tmpfs `/tmp`).
 
 | path | what | written | class |
 |---|---|---|---|
-| `registry.json` | the versions, which one `rlcd-latest` points at, and the history of what made each version latest (train, import, promote, rollback), which `rlcd rollback` follows | on train, import, promote, rollback (whole file, atomic replace) | **precious** |
+| `registry.json` | the versions, which one `rlcd-latest` points at, and the history of what made each version latest (train, import, promote, rollback, and a weight edit `rlcd patch` promoted), which `rlcd rollback` follows | on train, import, promote, rollback, patch (whole file, atomic replace) | **precious** |
 | `models/<version>/` | one bundle per version: `model.json`, weights, calibrators, reports | once per version, never changed after | **precious** (re-importable only if you kept the exported bundle) |
 | `decisions.jsonl` | the receipts: one hash-chained line per decision, with the logged state | appended per decision | **precious**, the audit trail; cannot be rebuilt |
 | `feedback.jsonl` | labels posted to `/v1/feedback`; training rows for the next model | appended | **precious** |

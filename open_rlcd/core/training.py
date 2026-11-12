@@ -20,6 +20,7 @@ its holdout check, the judge's agreement with humans, per-segment slices and a d
 """
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -74,11 +75,17 @@ class TrainedHead:
     notes: list[str]
     trained_at: str
     model: str
+    edit: dict | None = None             # set by core/patch.py: the weight edit this head carries and its evidence
+    holdout_idx: np.ndarray | None = field(default=None, repr=False)   # holdout rows in scoring order (not saved)
+    holdout_P: np.ndarray | None = field(default=None, repr=False)     # the served ensemble's holdout forecasts
 
     def summary(self) -> dict:
-        return {"head": self.spec.name, "type": self.spec.type, "model": self.model, "trained_at": self.trained_at,
-                "metrics": self.metrics, "verdict": self.verdict, "calibration": self.calibration,
-                "conformal": _conformal_summary(self.conformal), "data": self.data, "notes": self.notes}
+        out = {"head": self.spec.name, "type": self.spec.type, "model": self.model, "trained_at": self.trained_at,
+               "metrics": self.metrics, "verdict": self.verdict, "calibration": self.calibration,
+               "conformal": _conformal_summary(self.conformal), "data": self.data, "notes": self.notes}
+        if self.edit is not None:   # head.json is hash-checked: the edit's provenance and evidence travel with it
+            out["edit"] = self.edit
+        return out
 
 
 def _conformal_summary(c: dict | None) -> dict | None:
@@ -129,11 +136,38 @@ def _day(ts: int | None) -> str | None:
     return datetime.fromtimestamp(int(ts), UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> TrainedHead:
-    cfg = cfg or TrainConfig()
+def ids_sha256(ids) -> str:
+    """sha256 of a set of row ids (sorted, newline-joined): which rows a holdout or a calibration block holds,
+    without publishing the ids themselves."""
+    return hashlib.sha256("\n".join(sorted(str(i) for i in ids)).encode("utf-8")).hexdigest()
+
+
+@dataclass
+class HeadPlan:
+    """How one head's rows are kept apart: the untouched holdout (in scoring order), the calibration folds and the
+    calibration method. Deterministic in (rows, config), so a weight edit can re-derive exactly the split its base
+    head was trained and scored on (core/patch.py)."""
+    mode: str
+    split: S.Split
+    h_idx: np.ndarray
+    folds: list[tuple[np.ndarray, np.ndarray]]
+    method: str
+    why: str
+    notes: list[str]
+
+    def holdout_ids_sha256(self, ds: Dataset) -> str:
+        return ids_sha256(ds.ids[self.h_idx])
+
+    def calibration_ids_sha256(self, ds: Dataset) -> str:
+        """One hash over the trusted calibration rows of every fold, in fold order (fold k calibrates member k)."""
+        per_fold = [ids_sha256(ds.ids[ca]) for _, ca in self.folds]
+        return hashlib.sha256("\n".join(per_fold).encode("utf-8")).hexdigest()
+
+
+def check_rows(spec: HeadSpec, ds: Dataset, cfg: TrainConfig) -> None:
+    """Refuse rows a head cannot be trained, calibrated or measured on (TrainError says what to do)."""
     labels = spec.labels
     k = len(labels)
-    notes: list[str] = list(ds.notes)
     if len(ds) == 0:
         raise TrainError(f"{spec.name}: no labelled rows")
     if ds.y.min() < 0 or ds.y.max() >= k:
@@ -152,6 +186,35 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
         raise TrainError(f"{spec.name}: all {n_trusted} trusted rows carry the label {labels[int(present[0])]!r}; "
                          f"calibrating and measuring a head needs trusted examples of at least two classes. Audit "
                          f"rows of the other classes (`rlcd label audit`).")
+
+
+def plan_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig) -> HeadPlan:
+    """The holdout split, the calibration folds over development and the calibration method (rows already checked
+    with `check_rows`)."""
+    k = len(spec.labels)
+    try:
+        split = S.holdout_split(ds, cfg.holdout_fraction, cfg.ordering, cfg.seed)
+    except S.NotEnoughData as e:
+        raise TrainError(f"{spec.name}: {e}") from e
+    mode = split.mode
+    h_idx = S.scoring_order(ds, np.flatnonzero(split.holdout), mode, cfg.seed)
+    if len(h_idx) < 10:
+        raise TrainError(f"{spec.name}: only {len(h_idx)} trusted holdout rows after the split; need at least 10 "
+                         f"(add trusted labels or raise holdout_fraction)")
+    try:
+        folds, fnotes = S.calibration_folds(ds, split.dev, cfg.n_splits, mode, cfg.gap, cfg.seed, n_classes=k)
+    except S.NotEnoughData as e:
+        raise TrainError(f"{spec.name}: {e}") from e
+    method, why = C.choose_method(cfg.calibration, [ds.y[ca] for _, ca in folds], k, cfg.isotonic_min_per_class)
+    return HeadPlan(mode=mode, split=split, h_idx=h_idx, folds=folds, method=method, why=why,
+                    notes=[*split.notes, *fnotes])
+
+
+def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> TrainedHead:
+    cfg = cfg or TrainConfig()
+    k = len(spec.labels)
+    check_rows(spec, ds, cfg)
+    notes: list[str] = list(ds.notes)
     model_kind, note = resolve_model(spec.model)
     if note:
         notes.append(note)
@@ -159,44 +222,39 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
     if model_kind == "lightgbm" and cfg.n_estimators and "n_estimators" not in params:
         params["n_estimators"] = int(cfg.n_estimators)
 
-    # ------------------------------------------------------------------ holdout
-    try:
-        split = S.holdout_split(ds, cfg.holdout_fraction, cfg.ordering, cfg.seed)
-    except S.NotEnoughData as e:
-        raise TrainError(f"{spec.name}: {e}") from e
-    notes += split.notes
-    mode = split.mode
-    h_idx = S.scoring_order(ds, np.flatnonzero(split.holdout), mode, cfg.seed)
-    n_hold = len(h_idx)
-    if n_hold < 10:
-        raise TrainError(f"{spec.name}: only {n_hold} trusted holdout rows after the split; need at least 10 "
-                         f"(add trusted labels or raise holdout_fraction)")
+    # ------------------------------------------------------------------ holdout and calibration folds
+    plan = plan_head(spec, ds, cfg)
+    notes += plan.notes
 
-    # ------------------------------------------------------------------ calibration folds
-    try:
-        folds, fnotes = S.calibration_folds(ds, split.dev, cfg.n_splits, mode, cfg.gap, cfg.seed, n_classes=k)
-    except S.NotEnoughData as e:
-        raise TrainError(f"{spec.name}: {e}") from e
-    notes += fnotes
-    method, why = C.choose_method(cfg.calibration, [ds.y[ca] for _, ca in folds], k, cfg.isotonic_min_per_class)
-
-    members, fold_info = [], []
-    oof_idx, oof_P = [], []
-    for fi, (tr, ca) in enumerate(folds):
+    # ------------------------------------------------------------------ one calibrated member per fold
+    members, oof_P = [], []
+    for fi, (tr, ca) in enumerate(plan.folds):
         base = make_base(model_kind, k, params, cfg.seed + fi)
         base.fit(ds.X[tr], ds.y[tr], ds.weight[tr])
         raw = base.raw(ds.X[ca])
-        cal = C.Calibrator(method, k).fit(raw, ds.y[ca])   # the served member: calibrated on the whole block
+        cal = C.Calibrator(plan.method, k).fit(raw, ds.y[ca])   # the served member: calibrated on the whole block
         members.append((base, cal))
-        oof_idx.append(ca)
         # conformal scores must come from rows neither the base model nor the calibrator saw: cross-fit
-        oof_P.append(cross_fit_scores(method, k, raw, ds.y[ca]))
-        fold_info.append({"n_train": int(len(tr)), "n_train_trusted": int(ds.trusted[tr].sum()),
-                          "n_calibration": int(len(ca))})
+        oof_P.append(cross_fit_scores(plan.method, k, raw, ds.y[ca]))
+    return finish_head(spec, ds, cfg, plan, members, oof_P, model_kind, notes)
+
+
+def finish_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig, plan: HeadPlan, members: list, oof_P: list,
+                model_kind: str, notes: list[str]) -> TrainedHead:
+    """Everything after the members are calibrated: the served ensemble, scored once on the untouched holdout
+    (report, skill test, conformal threshold, policy, verdict, Bernoulli table, data card). Training and weight
+    edits (core/patch.py) both end here, so an edited head earns its verdict exactly the way a trained one does.
+    `members[k]` / `oof_P[k]` belong to `plan.folds[k]`."""
+    labels = spec.labels
+    k = len(labels)
+    split, mode, h_idx, method, why = plan.split, plan.mode, plan.h_idx, plan.method, plan.why
+    n_hold = len(h_idx)
+    fold_info = [{"n_train": int(len(tr)), "n_train_trusted": int(ds.trusted[tr].sum()),
+                  "n_calibration": int(len(ca))} for tr, ca in plan.folds]
     # share of development rows missing each feature (NaN or non-finite: the input guard counts both as missing)
     nan_rate = (~np.isfinite(ds.X[split.dev])).mean(axis=0).round(4).tolist() if split.dev.any() else None
     ensemble = CalibratedEnsemble(spec, members, ds.feature_names, ds.feature_version, nan_rate)
-    oof_i = np.concatenate(oof_idx)
+    oof_i = np.concatenate([ca for _, ca in plan.folds])
     oof = np.vstack(oof_P)
 
     # ------------------------------------------------------------------ holdout report
@@ -284,7 +342,9 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
         data["holdout_from"] = _day(split.cut.get("time"))
     report["split"] = {"ordering": mode, "holdout_fraction": cfg.holdout_fraction, **split.cut,
                        "holdout_rows": n_hold, "development_rows": int(split.dev.sum()), "purged_rows": split.purged,
-                       "folds": fold_info}
+                       "folds": fold_info, "seed": cfg.seed, "n_splits": cfg.n_splits, "gap": cfg.gap,
+                       "holdout_ids_sha256": plan.holdout_ids_sha256(ds),
+                       "calibration_ids_sha256": plan.calibration_ids_sha256(ds)}
     calib = {"method": method, "why": why, "folds": fold_info, "ensemble_members": len(members),
              "fitted_on": "trusted rows of each fold's calibration block"}
     summary = M.summary(report)
@@ -293,7 +353,7 @@ def train_head(spec: HeadSpec, ds: Dataset, cfg: TrainConfig | None = None) -> T
         summary["conformal_threshold"] = threshold
     return TrainedHead(spec=spec, ensemble=ensemble, report=report, metrics=summary, verdict=verdict,
                        conformal=conformal, ledger=ledger, calibration=calib, data=data, notes=notes,
-                       trained_at=now_iso(), model=model_kind)
+                       trained_at=now_iso(), model=model_kind, holdout_idx=h_idx, holdout_P=Ph)
 
 
 def describe_failure(e: Exception) -> dict:

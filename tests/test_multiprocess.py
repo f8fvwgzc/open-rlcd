@@ -77,6 +77,28 @@ def _commit_worker(args) -> list[str]:
     return out
 
 
+def _edit_worker(args) -> list[str]:
+    """`rlcd patch` saving edits that passed their gate, each judged against the version that was latest a moment
+    before it is saved (another process may have moved it since)."""
+    home, n, start_at = args
+    reg = Registry(home)
+    _wait(start_at)
+    out = []
+    for _ in range(n):
+        try:
+            base = reg.latest_id()
+            res = reg.commit_edit(base, {}, edit={"kind": "head", "passed": True, "reasons": []})
+            out.append(json.dumps({"version": res["version"], "base": base, "promoted": res["promoted"]}))
+        except Exception as e:
+            out.append(f"error: {type(e).__name__}: {e}")
+    return out
+
+
+def _train_or_edit_worker(args) -> list[str]:
+    kind, *rest = args
+    return (_edit_worker if kind == "edit" else _commit_worker)(tuple(rest))
+
+
 def _promote_worker(args) -> int:
     home, versions, start_at = args
     reg = Registry(home)
@@ -268,6 +290,37 @@ def test_registry_history_keeps_every_promotion(tmp_path, pool):
     assert len(hist) == changed              # every change of `latest` is in the history, none overwritten
     for prev, cur in zip(hist, hist[1:], strict=False):
         assert cur["from"] == prev["to"]     # and the history is one line of succession
+
+
+def test_registry_patch_commits_share_the_lock_and_the_history_with_trains(tmp_path, pool):
+    """`rlcd patch` (commit_edit) in some processes while others train (commit): no version id is handed out twice,
+    an edit is promoted only over the version it was judged against (checked inside the same lock as the write),
+    and every move of `latest`, a promoted edit's included (kind "patch"), is in the history, one line of
+    succession."""
+    home = tmp_path / "home"
+    first = Registry(home).commit({}, pack={"name": "p"}, feature_version="f1", encoder=None, policy={})
+    n = 6
+    start = _soon()
+    jobs = [("edit" if w % 2 == 0 else "train", home, n, start) for w in range(PROCS)]
+    results = pool.map(_train_or_edit_worker, jobs)
+    assert [x for r in results for x in r if x.startswith("error")] == []
+    edits = [json.loads(x) for r, job in zip(results, jobs, strict=True) if job[0] == "edit" for x in r]
+    trains = [x for r, job in zip(results, jobs, strict=True) if job[0] == "train" for x in r]
+    got = [first, *trains, *(e["version"] for e in edits)]
+    assert len(set(got)) == len(got) == 1 + PROCS * n
+    reg = Registry(home).registry()
+    assert set(reg["versions"]) == set(got) and reg["next"] == len(got) + 1
+    hist = reg["history"]
+    for prev, cur in zip(hist, hist[1:], strict=False):
+        assert cur["from"] == prev["to"]
+    assert hist[-1]["to"] == reg["latest"]
+    moved = {h["to"]: h for h in hist}
+    assert {v for v, h in moved.items() if h["kind"] == "train"} == {first, *trains}
+    for e in edits:
+        if e["promoted"]:
+            assert (moved[e["version"]]["kind"], moved[e["version"]]["from"]) == ("patch", e["base"])
+        else:   # its base had moved on: kept, servable by name, and `latest` did not move
+            assert e["version"] not in moved and reg["versions"][e["version"]]["edit"]["servable"] is True
 
 
 def test_registry_sees_another_process_write(tmp_path):

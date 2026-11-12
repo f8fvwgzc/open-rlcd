@@ -307,6 +307,8 @@ the `*_env` keys name the environment variables that hold them.
 | `pack_config.encoder.seed` | whole number | 0 | hashing: seed of the hash. |
 | `pack_config.encoder.sha256` | text | none | Refuse to run when the encoder built here has another digest. |
 | `pack_config.encoder.cache` | true / false | true | Cache embeddings under `<home>/cache/embeddings`. |
+| `pack_config.encoder.path` | path inside the home | none | onnx: load this local ONNX file instead of the Hub's `file`, for example an edited encoder that `rlcd patch --encoder` registered as `encoders/edited/<sha256>.onnx` ([weight edits](weight-edits.md)). Relative to the home and inside it: an absolute path or one with `..` is an error. `quantize_locally` is ignored with it. Pin the file with `sha256`. |
+| `pack_config.encoder.tokenizer` | path inside the home | none | onnx: a local `tokenizer.json` (relative to the home and inside it, as `path`) instead of the Hub's `tokenizer.json` of `model_id`. |
 | `pack_config.corpus` | path | none | The folder `rlcd ingest` reads when no path is given. |
 | `pack_config.queries` | path | none | The query log `rlcd label bootstrap` labels (JSON lines, a JSON array, or CSV with a `query` column). |
 | `pack_config.chunking.max_chars` | whole number >= 1 | 1200 | Chunk size in characters. The chunker raises a value below 50 to 50. |
