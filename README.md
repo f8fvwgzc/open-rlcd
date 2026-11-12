@@ -164,8 +164,8 @@ Attach mode never writes to your store. Query vectors come from open-rlcd's enco
 been embedded with the same model (a different vector size is refused; a different model of the same size cannot
 be detected): otherwise pass `candidates` in the request. To let open-rlcd write its own chunks to a database
 instead of the local index: `rlcd ingest ./data --qdrant http://localhost:6333 --collection docs --neo4j
-bolt://localhost:7687` (index mode). Details: [docs/teammate-quickstart.md](docs/teammate-quickstart.md) and
-the connector docstrings in `open_rlcd/connectors/`.
+bolt://localhost:7687` (index mode). Every connector key is in [docs/configuration.md](docs/configuration.md),
+and `rlcd config check` checks them; a walk-through is in [docs/teammate-quickstart.md](docs/teammate-quickstart.md).
 
 How many human labels? A head needs about 45 trusted rows to train (at least 30, enough that 10 land in its 20 %
 holdout, and enough for the calibration folds). `act` is verified only with 30 holdout rows the policy would act on,

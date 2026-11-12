@@ -349,6 +349,12 @@ to chunk ids with path length and degree, `neighbors`). `pack_config.vector` and
   table / database and the exception type, never a URL, DSN, password or path. A configuration that cannot work
   (unknown key, a credential in rlcd.yaml, a refused host, a missing collection in attach mode) is a 422
   `connector_config`; decide then answers without candidates and says why, as for a local encoder mismatch.
+* Configuration: every key of `vector` / `graph` is in [configuration.md](configuration.md). `rlcd config check`
+  (and so `rlcd train` and `rlcd serve`, which refuse to start on an error) checks each against the store its
+  `kind` names and runs that store's own checks offline (`factory.check_store`: no client library, environment
+  variable or connection). What depends on the environment the store runs in is left to the moment it is built:
+  whether a remote host is allowed (`RLCD_ALLOW_REMOTE`), and the DSN and credentials in the variables the `*_env`
+  keys name.
 
 Verified offline: Qdrant through qdrant-client's in-process engine (real upsert / search / fetch / delete round
 trips, attach mode with foreign payload schemas, dot-product and named-vector collections, the dimension check);

@@ -58,6 +58,10 @@ pack_config:
 security: {allow_remote: true}         # only if the database is not on this machine
 ```
 
+Then run `rlcd config check`. It knows every connector key ([configuration.md](configuration.md) lists them) and runs
+the connector's own checks without connecting, so a misspelled field or a missing collection shows up before `rlcd
+train` or `rlcd serve`, which refuse to start on an error.
+
 Read this before you rely on it:
 
 * **Query vectors come from open-rlcd's encoder.** Your collection must have been embedded with the model in

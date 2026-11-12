@@ -59,7 +59,8 @@ REDACT_KINDS = ("secrets", "pii")
 ENVIRONMENT = (("RLCD_PROJECT", False), ("RLCD_HOME", False), ("RLCD_PACK", False), ("RLCD_ALLOW_REMOTE", False),
                (ENV_SWITCH, False), ("RLCD_MAX_BODY_BYTES", False), ("RLCD_URL", False), ("RLCD_DEBUG", False),
                ("HF_HUB_OFFLINE", False), ("RLCD_API_KEY", True), ("RLCD_ADMIN_KEY", True),
-               ("ANTHROPIC_API_KEY", True), ("OPENAI_API_KEY", True))
+               ("ANTHROPIC_API_KEY", True), ("OPENAI_API_KEY", True),
+               ("RLCD_PG_DSN", True))         # connectors/pgvector.py DEFAULT_DSN_ENV
 _ENV_REF = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
 _BOOL_WORDS = "YAML reads an unquoted yes / no / on / off / true / false as a boolean: quote it"
 

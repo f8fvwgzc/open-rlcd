@@ -238,7 +238,7 @@ root filesystem read-only, with a tmpfs `/tmp`).
 | `automation.json`, `automation.jsonl` | the kill-switch state and its history | on `POST /v1/automation`, `rlcd automation` | **precious** (a restore must not silently switch automation back on) |
 | `labels/` | items and judge / human labels | by `rlcd label ...` | **precious** where labeling happens (usually the training machine, not the server) |
 | `tabular/category_salt` | salt for hashed categorical columns (tabular pack) | once | keep with the home; each bundle also stores the salt it was trained with |
-| `corpus/` | documents pack: chunks, vector index, entity graph, BM25 | by `rlcd ingest` | rebuildable from the source documents (re-ingest) |
+| `corpus/` | documents pack: chunks, vector index, entity graph, BM25. With a remote store in index mode (`pack_config.vector` / `graph`) the vectors or the graph live in that store instead; with `vector` in attach mode `corpus/` is not used | by `rlcd ingest` | rebuildable from the source documents (re-ingest); back up a remote store with that store's own tools |
 | `encoders/` | the downloaded ONNX encoder (~135 MB) | first use | rebuildable (downloads again, unless `HF_HUB_OFFLINE=1`) |
 | `cache/embeddings/*.sqlite` | embedding cache, one file per encoder hash | continuously | rebuildable; safe to delete while stopped |
 | `cache/huggingface/` | the Hugging Face client's own files | first download | rebuildable |
@@ -419,7 +419,7 @@ What a bundle does not carry, for the documents pack:
 | needed at serve time | how it gets to the server |
 |---|---|
 | the encoder (ONNX) | downloaded from the Hugging Face Hub into `encoders/` on first use, and its sha256 must match the bundle's. No egress: copy `encoders/` from the training home and set `HF_HUB_OFFLINE=1` |
-| the corpus, if callers rely on open-rlcd's own retrieval | `rlcd ingest` on the server against the mounted documents, or copy `corpus/` from the training home. Callers that send their own `candidates` need none |
+| the corpus, if callers rely on open-rlcd's own retrieval | `rlcd ingest` on the server against the mounted documents, or copy `corpus/` from the training home. Callers that send their own `candidates` need none. A copied `corpus/` names the remote stores that hold its index (Qdrant, pgvector, Neo4j in index mode): the server needs the same `pack_config.vector` / `graph`, network access to them and their credentials in its environment. A store in attach mode needs only the last two |
 | feedback posted in production | it is in the server's `feedback.jsonl`. Training reads the home it runs against: train where the feedback is, or copy the file to the training home |
 
 `POST /v1/train` exists and works on a server, but it trains from the labels and feedback in the server's home
@@ -501,9 +501,10 @@ corpus, so also send smoke decisions:
   periodic probe.
 * If your callers rely on open-rlcd's retrieval (a `/v1/decide` without `candidates`), `POST /v1/decide` with a
   known query and no candidates, expecting 200 and `"candidates_from": "corpus"` with no warning about
-  retrieval. The corpus is opened only for such a decide: an unreadable corpus fails it with 503
-  `connector_unavailable`, and a corpus it cannot use (built with another encoder, an unknown format) answers
-  200 with `"candidates_from": "none"` and the warning that retrieval is unavailable.
+  retrieval. The corpus is opened only for such a decide: an unreadable corpus, or a vector / graph store that
+  cannot be reached, fails it with 503 `connector_unavailable`, and a corpus it cannot use (built with another
+  encoder, an unknown format, a store configuration the store refuses, such as a host that is not allowed)
+  answers 200 with `"candidates_from": "none"` and the warning that retrieval is unavailable.
 
   A decide is a real decision. It writes a receipt and counts in `/v1/metrics`. Unless its action is `act` (and
   none is while the kill switch is off, or while `rollout.mode` is `shadow` or `assist` and no `rollout.heads`

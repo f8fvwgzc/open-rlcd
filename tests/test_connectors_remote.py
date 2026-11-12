@@ -29,7 +29,7 @@ import yaml
 
 from open_rlcd.cli import main
 from open_rlcd.connectors import base as B
-from open_rlcd.connectors.factory import make_graph_store, make_vector_store
+from open_rlcd.connectors.factory import check_store, make_graph_store, make_vector_store
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError, DecideRequest
 from open_rlcd.core.service import Service
@@ -178,6 +178,46 @@ def test_corpus_takes_allow_remote_from_the_project(tmp_path, monkeypatch):
     from open_rlcd.packs.documents.settings import project_corpus_settings
     assert project_corpus_settings(allowed)["allow_remote"] is True
     assert project_corpus_settings(project)["allow_remote"] is False
+
+
+def test_check_store_refuses_offline_what_building_the_store_refuses(monkeypatch):
+    """`factory.check_store` is what `rlcd config check` runs for a remote store: the store's own checks without its
+    client library, an environment variable or a connection. Qdrant and Neo4j build the store to check it (building
+    opens no connection), so a refusal is word for word the one the pack gets. The one difference: any host passes,
+    because whether a remote host is allowed depends on the environment the store is built in."""
+    from open_rlcd.connectors import neo4j as N4
+    from open_rlcd.connectors import qdrant as QD
+
+    def offline(*a, **kw):
+        raise AssertionError("checking a configuration needs no client library and no environment variable")
+
+    for mod in (QD, N4):
+        monkeypatch.setattr(mod, "require_extra", offline)
+        monkeypatch.setattr(mod, "env_secret", offline)
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    cypher = "MATCH (e:Entity)<-[:MENTIONS]-(c:Chunk) WHERE e.key IN $keys RETURN c.id AS id, 1 AS path_length"
+    cases = [({"kind": "qdrant", "url": "http://localhost:6333"}, "vector"),
+             ({"kind": "qdrant", "url": "http://localhost:6333", "path": "./q", "collection": "c"}, "vector"),
+             ({"kind": "qdrant", "url": "http://localhost:6333", "collection": "c", "table": "t"}, "vector"),
+             ({"kind": "qdrant", "url": "http://admin:s3cret-k@localhost:6333", "collection": "c"}, "vector"),
+             ({"kind": "qdrant", "url": ":memory:", "collection": "c", "mode": "attach", "text_field": None}, "vector"),
+             ({"kind": "neo4j", "uri": "bolt://localhost:7687", "mode": "attach"}, "graph"),
+             ({"kind": "neo4j", "uri": "bolt://localhost:7687", "expand_cypher": cypher + " DETACH DELETE c"}, "graph"),
+             ({"kind": "neo4j", "uri": "bolt://localhost:7687", "degree_cypher": "RETURN 1 AS degree"}, "graph"),
+             ({"kind": "neo4j", "uri": "bolt://localhost:7687", "password_env": "s3cret-k pw"}, "graph")]
+    for cfg, what in cases:
+        with pytest.raises(ContractError) as built:
+            make_vector_store(cfg, DIM) if what == "vector" else make_graph_store(cfg)
+        with pytest.raises(ContractError) as checked:
+            check_store(cfg, what)
+        assert checked.value.message == built.value.message and checked.value.kind == "connector_config", cfg
+        assert "s3cret" not in checked.value.message
+    check_store({"kind": "neo4j", "mode": "attach", "uri": "bolt://localhost:7687", "expand_cypher": cypher}, "graph")
+    far = {"kind": "qdrant", "url": "http://qdrant.example.com:6333", "collection": "c"}
+    with pytest.raises(ContractError, match="refusing non-loopback host"):
+        make_vector_store(far, DIM)
+    check_store(far, "vector")
+    check_store({"kind": "local", "backend": "numpy"}, "vector")             # a local store: nothing to refuse here
 
 
 # ============================================================================ Qdrant (real, in-process)
@@ -763,6 +803,38 @@ def test_pgvector_dsn_comes_from_the_environment_and_its_hosts_are_checked(pg, m
         PgVectorStore("t", 16, dsn_env="KB_DSN")
     with pytest.raises(ContractError, match="schema.table"):
         PgVectorStore("a.b.c", 16)
+
+
+@needs_psycopg
+def test_pgvector_check_config_refuses_what_the_store_refuses_without_psycopg_or_the_dsn(pg, monkeypatch):
+    """`rlcd config check` runs PgVectorStore.check_config (factory.check_store): it shares the constructor's own
+    checks, so it refuses a configuration with the message building the store gives, and it needs neither psycopg
+    nor the DSN in the environment to do so."""
+    from open_rlcd.connectors import pgvector as PG
+
+    cases = [{"kind": "pgvector"}, {"kind": "pgvector", "table": "a.b.c"},
+             {"kind": "pgvector", "table": "t", "mode": "attach", "id_field": None},
+             {"kind": "pgvector", "table": "t", "mode": "attach", "text_field": ""},
+             {"kind": "pgvector", "table": "t", "dsn_env": "postgresql://localhost/db"},
+             {"kind": "pgvector", "table": "t", "dsn": DSN}, {"kind": "pgvector", "table": "t", "collection": "c"}]
+    for cfg in cases:
+        with pytest.raises(ContractError) as built:
+            make_vector_store(cfg, DIM)
+        with pytest.raises(ContractError) as checked:
+            check_store(cfg, "vector")
+        assert checked.value.message == built.value.message and checked.value.kind == "connector_config", cfg
+        assert "hunter2" not in checked.value.message
+
+    def offline(*a, **kw):
+        raise AssertionError("checking a configuration needs no client library and no environment variable")
+
+    monkeypatch.setattr(PG, "require_extra", offline)
+    monkeypatch.setattr(PG, "env_secret", offline)
+    monkeypatch.delenv("RLCD_PG_DSN")
+    check_store({"kind": "pgvector", "mode": "attach", "table": "public.kb", "id_field": "chunk_id",
+                 "authority_field": None}, "vector")
+    with pytest.raises(AssertionError):                      # building the store does need them
+        make_vector_store({"kind": "pgvector", "table": "t"}, DIM)
 
 
 @needs_psycopg

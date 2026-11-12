@@ -228,6 +228,13 @@ class Neo4jGraphStore:
                    terms=terms if terms is not None else cfg.get("terms"), timeout=int(cfg.get("timeout") or 10),
                    allow_remote=allow_remote)
 
+    @classmethod
+    def check_config(cls, cfg: dict) -> None:
+        """What `from_config` refuses (keys, uri, credentials, the attach template, write clauses), checked offline
+        for `rlcd config check` (factory.check_store): building a store opens no connection and imports no driver.
+        Any host passes here; the pack builds the store with the project's `allow_remote`, which decides then."""
+        cls.from_config(cfg, allow_remote=True)
+
     @property
     def target(self) -> str:
         return f"database {self.database!r}" if self.database else "default database"

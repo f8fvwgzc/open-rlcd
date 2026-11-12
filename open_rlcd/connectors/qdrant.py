@@ -148,6 +148,13 @@ class QdrantVectorStore:
                    vector_name=cfg.get("vector_name"), timeout=int(cfg.get("timeout") or 10),
                    batch_size=int(cfg.get("batch_size") or 256), allow_remote=allow_remote)
 
+    @classmethod
+    def check_config(cls, cfg: dict) -> None:
+        """What `from_config` refuses, checked offline for `rlcd config check` (factory.check_store): building a
+        store opens no connection and imports no client library, and the dimension only matters once connected.
+        Any host passes here; the pack builds the store with the project's `allow_remote`, which decides then."""
+        cls.from_config(cfg, 1, allow_remote=True)
+
     @property
     def target(self) -> str:
         return f"collection {self.collection!r}"

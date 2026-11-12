@@ -34,7 +34,7 @@ from ...features.text import EncoderError, EncoderMismatch, make_encoder
 from ...labeling.store import LabelItem, LabelStore
 from ..base import BasePack, dataset_from_labels
 from .provider import VIEWS, DocumentsProvider
-from .settings import DEFAULT_ENCODER, config_keys, encoder_settings, project_corpus_settings
+from .settings import DEFAULT_ENCODER, config_findings, config_keys, encoder_settings, project_corpus_settings
 
 PROVIDER_CONFIG_VERSION = 1
 
@@ -58,6 +58,11 @@ class DocumentsPack(BasePack):
 
     def config_keys(self) -> dict:
         return config_keys()
+
+    def check_config(self, project: Project) -> list[dict]:
+        """`vector` / `graph` against the store their `kind` names (settings.py `config_findings`): what a remote
+        store would refuse when it is built, found by `rlcd config check` without a connection."""
+        return config_findings(project.pack_config)
 
     # ------------------------------------------------------------------ features
     def provider(self, project: Project, config: dict | None = None) -> DocumentsProvider:

@@ -86,6 +86,37 @@ def parse_vector(s: Any) -> np.ndarray | None:
         return None
 
 
+# ----------------------------------------------------------------------------- config (no psycopg, no DSN needed)
+
+def _table_parts(table: Any) -> tuple[str | None, str]:
+    """(schema or None, table name) of a `table` / `schema.table` setting."""
+    if not isinstance(table, str) or not table.strip():
+        raise config_error("the pgvector connector needs `table` (optionally schema-qualified: schema.table)")
+    parts = [p.strip() for p in table.strip().split(".")]
+    if len(parts) > 2 or not all(parts):
+        raise config_error(f"pgvector table must be `table` or `schema.table`, got {table!r}")
+    return (parts[0], parts[1]) if len(parts) == 2 else (None, parts[0])
+
+
+def _mode(mode: Any) -> str:
+    out = str(mode or "index").lower()
+    if out not in MODES:
+        raise config_error(f"pgvector mode must be one of {MODES}, got {mode!r}")
+    return out
+
+
+def _columns(mode: str, fields: dict | None) -> tuple[str, FieldMap]:
+    """(the vector column, the candidate columns): open-rlcd's own in index mode, the `*_field` keys in attach
+    mode (`vector_field` in both)."""
+    f = dict(fields or {})
+    vector_field = str(f.pop("vector_field", None) or "embedding")
+    base = FieldMap(id="id")
+    columns = base if mode == "index" else FieldMap.from_config(f, base)
+    if columns.id is None:
+        raise config_error("pgvector needs id_field: the column that holds the chunk id")
+    return vector_field, columns
+
+
 class PgVectorStore:
     """A `VectorStore` on a Postgres table with a pgvector column (see the module docstring)."""
 
@@ -96,17 +127,10 @@ class PgVectorStore:
                  allow_remote: bool = False):
         self._pg = require_extra("psycopg", "pgvector", "pgvector")
         self._sql = require_extra("psycopg.sql", "pgvector", "pgvector")
-        if not isinstance(table, str) or not table.strip():
-            raise config_error("the pgvector connector needs `table` (optionally schema-qualified: schema.table)")
-        parts = [p.strip() for p in table.strip().split(".")]
-        if len(parts) > 2 or not all(parts):
-            raise config_error(f"pgvector table must be `table` or `schema.table`, got {table!r}")
-        self.table = ".".join(parts)
-        self._schema, self._name = (parts[0], parts[1]) if len(parts) == 2 else (None, parts[0])
+        self._schema, self._name = _table_parts(table)
+        self.table = f"{self._schema}.{self._name}" if self._schema else self._name
         self.dim = int(dim)
-        self.mode = str(mode or "index").lower()
-        if self.mode not in MODES:
-            raise config_error(f"pgvector mode must be one of {MODES}, got {mode!r}")
+        self.mode = _mode(mode)
         self._dsn_env = env_name(dsn_env or DEFAULT_DSN_ENV, "dsn_env")
         dsn = env_secret(self._dsn_env)
         if not dsn:
@@ -114,12 +138,7 @@ class PgVectorStore:
                                f"put the Postgres connection string there (never in rlcd.yaml)")
         self._dsn = dsn
         self._password = self._check_hosts(dsn, allow_remote)
-        f = dict(fields or {})
-        self.vector_field = str(f.pop("vector_field", None) or "embedding")
-        base = FieldMap(id="id")
-        self.fields = base if self.mode == "index" else FieldMap.from_config(f, base)
-        if self.fields.id is None:
-            raise config_error("pgvector needs id_field: the column that holds the chunk id")
+        self.vector_field, self.fields = _columns(self.mode, fields)
         self.timeout = int(timeout)
         self.create_index = bool(create_index)
         self.batch_size = max(1, int(batch_size))
@@ -135,6 +154,18 @@ class PgVectorStore:
                    mode=cfg.get("mode") or "index", fields={k: v for k, v in cfg.items() if k.endswith("_field")},
                    timeout=int(cfg.get("timeout") or 10), create_index=cfg.get("create_index", True) is not False,
                    batch_size=int(cfg.get("batch_size") or 500), allow_remote=allow_remote)
+
+    @classmethod
+    def check_config(cls, cfg: dict) -> None:
+        """What `from_config` refuses before it needs psycopg, the DSN or a connection, checked offline for `rlcd
+        config check` (factory.check_store): the keys, the table name, the mode, the name of the DSN variable and
+        the column mapping. The DSN itself (set? which hosts?) is read only when the pack builds the store."""
+        refuse_inline_secrets(cfg, "pack_config.vector")
+        check_keys(cfg, KEYS, "pack_config.vector (pgvector)")
+        _table_parts(cfg.get("table"))
+        mode = _mode(cfg.get("mode"))
+        env_name(cfg.get("dsn_env") or DEFAULT_DSN_ENV, "dsn_env")
+        _columns(mode, {k: v for k, v in cfg.items() if k.endswith("_field")})
 
     @property
     def target(self) -> str:
@@ -441,4 +472,3 @@ class PgVectorStore:
 
     def save(self) -> None:
         """Nothing to save: every write is committed."""
-
