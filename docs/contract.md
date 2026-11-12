@@ -17,10 +17,11 @@ Default address `127.0.0.1:8095`. Errors are `{"error": "...", "kind": "...", ..
 | 422 | `unknown_head` | lists `available_heads` |
 | 422 | `unknown_model` | lists `available` (`rlcd-latest` + versions) |
 | 422 | `feature_version_mismatch`, `feature_names_mismatch`, `bad_feature_vector` | a precomputed `{x, feature_version}` state that does not fit the trained head |
-| 422 | `encoder_mismatch`, `feature_schema_mismatch` | the configured encoder / feature schema is not the one the bundle was trained with |
+| 422 | `encoder_mismatch`, `feature_schema_mismatch` | the configured encoder / feature schema is not the one the bundle was trained with; an attached vector store whose vector size is not the encoder's dimension |
+| 422 | `connector_config`, `read_only_connector` | a vector / graph connector configuration that cannot work (unknown key, a credential in rlcd.yaml, a refused remote host, a missing collection in attach mode); a write asked of a store in attach mode (`rlcd ingest`). `/v1/decide` reports a `connector_config` problem as a warning and plans without candidates |
 | 422 | `bad_bundle` | a bundle names a pack that is neither the project's pack nor a built-in one (bundles never name code to import); or the served version's stored policy cannot be served (a bundle trained with `policy.abstain: act` before rlcd.yaml was checked): it refuses to decide until it is retrained or rolled back, instead of naming an abstention `act` |
 | 422 | `untrained`, `unknown_decision`, `unsupported` | report of an untrained head, feedback for an unknown `decision_id`, an endpoint the pack does not offer |
-| 503 | `connector_unavailable`, `encoder_unavailable` | the corpus / a vector or graph store cannot be opened or searched; the encoder cannot be loaded (messages never contain paths or DSNs; details are in the server log) |
+| 503 | `connector_unavailable`, `encoder_unavailable` | the corpus / a vector or graph store (local, Qdrant, pgvector, Neo4j) cannot be opened or searched, refuses the login, or its client library (extra) is not installed; the encoder cannot be loaded (messages never contain paths, URLs, DSNs or passwords; details are in the server log) |
 | 503 | `not_ready` | `GET /ready` only: no trained model can decide yet (`reasons`); every other route answers as before |
 | 500 | `internal` | the exception type and a generic message; details are in the server log |
 | 422 | `missing_evidence` | a question's `path` / `inputs` does not resolve in the state, or a `strict` request lacks inputs almost every training row had (`missing`, `missing_groups`) |

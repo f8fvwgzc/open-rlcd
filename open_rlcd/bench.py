@@ -6,9 +6,10 @@ Stages (each measured on its own, single request unless noted):
   features.<view>        build one feature row for one repeated state (provider and encoder caches warm: what a
                          repeated request costs)
   head.<name>            one calibrated head on one prepared feature row (the decision model itself)
-  ann.search             top-10 vector search in the local corpus index (when a corpus exists)
+  ann.search             top-10 vector search in the configured vector store (when a corpus exists or a store is
+                         attached; for Qdrant / pgvector this includes the network round trip)
   graph.expand           2-hop entity expansion in the local graph from a real entity of the corpus (the
-                         best-connected entity that is not a hub; skipped when the graph has none)
+                         best-connected entity that is not a hub; skipped when the graph has none or is in Neo4j)
   decide.end_to_end      the pack's whole /v1/decide in process (no HTTP) on distinct sampled query states, cycled,
                          with the query's embedding-cache lookup and the provider's feature cache bypassed: what a
                          new query costs over an ingested corpus (the stage's `cache` field says what was bypassed)
@@ -174,9 +175,10 @@ def run(service: Any, n: int = 200, model: str | None = None, progress: Callable
     corpus = None
     try:
         from .packs.documents.corpus import Corpus
+        from .packs.documents.settings import project_corpus_settings
 
-        if enc is not None:
-            corpus = Corpus.open(service.home, enc, service.project.pack_config)
+        if enc is not None:   # the configured stores: local, or Qdrant / pgvector / Neo4j (then network included)
+            corpus = Corpus.open(service.home, enc, project_corpus_settings(service.project))
     except Exception:
         corpus = None
     if corpus is not None:
@@ -187,7 +189,10 @@ def run(service: Any, n: int = 200, model: str | None = None, progress: Callable
             stages["ann.search"] = _measure(lambda: vs.search(qv, 10), n)
             out["corpus_vectors"] = vs.count()
         gs = getattr(corpus, "graph", None)
-        if gs is not None:
+        if gs is not None and getattr(gs, "g", None) is None:
+            out.setdefault("skipped", {})["graph.expand"] = (f"the graph is in {getattr(gs, 'backend', 'a remote store')}"
+                                                             f": no local entity to pick a seed from")
+        elif gs is not None:
             seed = _graph_seed(gs)
             hits = gs.expand([seed], hops=2) if seed else []
             if hits:

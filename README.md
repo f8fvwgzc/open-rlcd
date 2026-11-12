@@ -94,9 +94,10 @@ autonomy. [docs/control-layer.md](docs/control-layer.md) maps its ten-step playb
 
 ## The enterprise-documents pack
 
-For each incoming request in front of a document store (today: the local corpus `rlcd ingest` builds, with a
-FAISS / numpy vector index and a NetworkX entity graph; Qdrant, pgvector and Neo4j connectors are the next
-milestone), or in front of your own retriever (pass the candidates in the request):
+For each incoming request in front of a document store — the local corpus `rlcd ingest` builds (a FAISS / numpy
+vector index and a NetworkX entity graph), the same corpus with its vectors in Qdrant or pgvector and its graph in
+Neo4j, or a Qdrant collection, pgvector table or Neo4j graph you already run (read-only attach mode, no copy of
+your corpus) — or in front of your own retriever (pass the candidates in the request):
 
 | head | type | decides |
 |---|---|---|
@@ -145,6 +146,26 @@ uv run rlcd serve --port 8095
 uv run rlcd bench
 uv run rlcd export ./bundle                        # open weights: JSON + safetensors + LightGBM text
 ```
+
+Millions of documents already in a vector database? Attach it instead of ingesting (`uv sync --extra qdrant`,
+`--extra pgvector` or `--extra neo4j`):
+
+```yaml
+pack_config:
+  encoder: {kind: onnx, model_id: intfloat/multilingual-e5-small}   # must be the model the collection was embedded with
+  vector: {kind: qdrant, mode: attach, url: http://localhost:6333, collection: kb, api_key_env: QDRANT_API_KEY,
+           text_field: body, doc_id_field: source_id, title_field: title, updated_at_field: modified}
+  # or: {kind: pgvector, mode: attach, dsn_env: KB_DSN, table: public.kb_chunks, vector_field: embedding, ...}
+  # graph: {kind: neo4j, mode: attach, uri: bolt://localhost:7687, password_env: NEO4J_PASSWORD,
+  #         expand_cypher: "<read-only Cypher: $keys -> chunk ids with path_length>"}
+```
+
+Attach mode never writes to your store. Query vectors come from open-rlcd's encoder, so the collection must have
+been embedded with the same model (a different vector size is refused; a different model of the same size cannot
+be detected): otherwise pass `candidates` in the request. To let open-rlcd write its own chunks to a database
+instead of the local index: `rlcd ingest ./data --qdrant http://localhost:6333 --collection docs --neo4j
+bolt://localhost:7687` (index mode). Every connector key is in [docs/configuration.md](docs/configuration.md),
+and `rlcd config check` checks them; a walk-through is in [docs/teammate-quickstart.md](docs/teammate-quickstart.md).
 
 How many human labels? A head needs about 45 trusted rows to train (at least 30, enough that 10 land in its 20 %
 holdout, and enough for the calibration folds). `act` is verified only with 30 holdout rows the policy would act on,
@@ -226,7 +247,9 @@ verifiable. Connectors and judges
 refuse non-loopback hosts unless you allow them (`security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1`). That
 includes the `claude-cli` and `anthropic` judges, which send the text of the items being labelled to Anthropic:
 `rlcd label bootstrap` refuses them until you opt in. Choose a local judge (`ollama:<model>`) for data that must
-not leave your machines. Secrets come from environment variables only.
+not leave your machines. Secrets come from environment variables only: connector configs name the
+variable (`api_key_env`, `password_env`, `dsn_env`), and a password, key or DSN written into rlcd.yaml
+is refused.
 
 ## Run it on a server
 

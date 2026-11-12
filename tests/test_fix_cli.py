@@ -163,11 +163,13 @@ def test_init_next_steps_name_what_each_step_needs(tmp_path, capsys):
     assert "data.csv" in steps and "pack_config.label" in steps and "rlcd train" in steps
 
 
-def test_ingest_help_does_not_advertise_unimplemented_connectors(capsys):
+def test_ingest_help_advertises_only_implemented_connectors(capsys):
     with pytest.raises(SystemExit):
         main(["ingest", "--help"])
     out = capsys.readouterr().out
-    assert "--qdrant" not in out and "--neo4j" not in out and "--csv" not in out
+    # M7: Qdrant and Neo4j ingest are implemented and documented; --csv is still not a documents-pack input
+    assert "--qdrant" in out and "--collection" in out and "--neo4j" in out
+    assert "--csv" not in out
 
 
 # ----------------------------------------------------------------------------- F22: push visibility

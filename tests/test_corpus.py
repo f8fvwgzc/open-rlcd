@@ -246,15 +246,20 @@ def test_encoder_mismatch_and_reembed(tmp_path, docs, enc):
     assert Corpus.open(tmp_path / "home", other) is not None          # meta now records the new encoder
 
 
-def test_cached_encoder_and_unsupported_connectors(tmp_path, docs):
+def test_cached_encoder_and_connector_config_errors(tmp_path, docs):
     enc = make_encoder({"kind": "hashing", "dim": 64}, tmp_path / "home")
     c = Corpus(tmp_path / "home", enc)
     c.ingest_folder(docs)
     assert c.retrieve("Bluebird Bakery", k=1)[0]["doc_id"] == "acme-docs/bakery.html"
-    for cfg in ({"vector": {"kind": "qdrant"}}, {"graph": {"kind": "neo4j"}}):
-        with pytest.raises(ContractError, match="not available yet") as e:
+    # remote kinds exist now (tests/test_connectors_remote.py); an unknown kind or an incomplete remote config is a
+    # configuration error, raised before any connection is attempted
+    for cfg, msg in (({"vector": {"kind": "milvus"}}, "unknown vector connector kind"),
+                     ({"graph": {"kind": "arangodb"}}, "unknown graph connector kind"),
+                     ({"vector": {"kind": "qdrant", "url": "http://localhost:6333"}}, "collection"),
+                     ({"graph": {"kind": "neo4j"}}, "uri")):
+        with pytest.raises(ContractError, match=msg) as e:
             Corpus(tmp_path / "home", enc, config=cfg)
-        assert e.value.kind == "unsupported_connector"
+        assert e.value.kind == "connector_config"
     with pytest.raises(ContractError):
         c.ingest_folder(tmp_path / "does-not-exist")
 

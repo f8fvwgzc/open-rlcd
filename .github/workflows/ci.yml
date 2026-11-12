@@ -24,7 +24,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        extras: ["--extra dev --extra documents --extra labeling", "--extra dev"]
+        extras: ["--extra dev --extra documents --extra labeling --extra qdrant --extra pgvector --extra neo4j", "--extra dev"]
     runs-on: ${{ matrix.os }}
     env:
       HF_HUB_OFFLINE: "1"

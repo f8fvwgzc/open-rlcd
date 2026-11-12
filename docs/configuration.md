@@ -34,9 +34,9 @@ warn   routes.response_type.direct_answer.api_key: the key names a secret and ha
 
 `--json` prints `{config, ok, errors, warnings, findings: [{level, path, message}]}` for CI.
 
-What the check does not do: it does not look at your documents, your query log or a trained model (`rlcd check`
-compares the model with the file), and its secret scan knows well-known key shapes and key names only. A file
-without findings is a file without typos, not a good configuration.
+What the check does not do: it does not look at your documents, your query log, a vector or graph store or a
+trained model (`rlcd check` compares the model with the file), and its secret scan knows well-known key shapes and
+key names only. A file without findings is a file without typos, not a good configuration.
 
 The tables below are the keys the code reads. They are kept equal to the checker's own list by a test
 (`tests/test_config_check.py`), so a key that is here is accepted and a key that is not is reported.
@@ -62,6 +62,9 @@ A key written with no value (`timeout:`, or `timeout: null`) usually means the d
   automates nothing (the check warns).
 * **`routes.<head>.<option>:` with no value is an empty contract**, not a missing one: the option has no limits,
   and a `fallback` may name it.
+* **In a remote store's attach mode, an empty `*_field` means the store has no such field**, not the default:
+  `pack_config.vector.doc_id_field:` leaves every candidate's `doc_id` empty. `text_field` and a pgvector
+  `id_field` cannot be empty; a Qdrant `id_field:` means the point id is the chunk id, as when it is missing.
 
 ## Top level
 
@@ -281,6 +284,17 @@ Read by `rlcd check` (item `owners`), which warns until all five are named. Each
 
 ## `pack_config` of the documents pack
 
+`vector` and `graph` name the stores retrieval uses: by default the local ones under `<home>/corpus`. Qdrant or
+pgvector (`vector`) and Neo4j (`graph`) are optional extras (`uv sync --extra qdrant`, `--extra pgvector`,
+`--extra neo4j`) with two modes: `index`, where open-rlcd owns the collection, table or graph and `rlcd ingest`
+writes to it, and `attach`, read-only retrieval from one that already exists. Each kind reads only the keys the
+table marks for it: a key of another kind is an error for a remote store, which refuses it, and a warning for a
+local one, which ignores it. `rlcd config check` also runs a remote store's own checks without connecting (a
+missing collection, table or uri, a `*_env` value that is not a variable name, a URL with a password, a Cypher
+template with a write clause). Whether a host that is not loopback is allowed depends on the environment the
+store runs in (`RLCD_ALLOW_REMOTE`), so that is checked when the store is built. Credentials never go in the file:
+the `*_env` keys name the environment variables that hold them.
+
 | key | type | default | what it does |
 |---|---|---|---|
 | `pack_config.encoder.kind` | `onnx`, `hashing` | `onnx` | The text encoder. `onnx` downloads a model once (needs the `documents` extra); `hashing` needs nothing and gives weaker features. Changing the encoder means re-ingesting and retraining. |
@@ -297,13 +311,41 @@ Read by `rlcd check` (item `owners`), which warns until all five are named. Each
 | `pack_config.queries` | path | none | The query log `rlcd label bootstrap` labels (JSON lines, a JSON array, or CSV with a `query` column). |
 | `pack_config.chunking.max_chars` | whole number >= 1 | 1200 | Chunk size in characters. The chunker raises a value below 50 to 50. |
 | `pack_config.chunking.overlap` | whole number >= 0 | 150 | Characters shared by neighbouring chunks, at most a third of `max_chars`: the chunker lowers a larger value to that. |
-| `pack_config.vector.kind` | `local` | `local` | The vector store. Only the local one exists. |
-| `pack_config.vector.backend` | `auto`, `faiss`, `hnswlib`, `numpy` | `auto` | The index of the local vector store. `auto`: faiss, else hnswlib, else numpy, whichever is installed. |
-| `pack_config.graph.kind` | `local` | `local` | The entity graph. Only the local one exists. |
-| `pack_config.graph.terms` | list of text | empty | Entity names to recognise (needed for names the tokenizer cannot find, such as kanji names). |
-| `pack_config.graph.max_fanout` | whole number >= 1 | 200 | An entity mentioned by more than this many chunks is always a hub (never followed), whatever `hub_share` gives. It does not cut the chunks of an entity that is followed. |
-| `pack_config.graph.hub_share` | number in [0, 1] | 0.05 | An entity mentioned in more than this share of all chunks is a hub and is not followed. |
-| `pack_config.graph.hub_min` | whole number >= 0 | 10 | An entity mentioned by this many chunks or fewer is never a hub. |
+| `pack_config.vector.kind` | `local`, `qdrant`, `pgvector` | `local` | The vector store: the local index, a Qdrant collection (extra `qdrant`) or a Postgres table with the `vector` extension (extra `pgvector`). |
+| `pack_config.vector.backend` | `auto`, `faiss`, `hnswlib`, `numpy` | `auto` | local: the index. `auto`: faiss, else hnswlib, else numpy, whichever is installed. |
+| `pack_config.vector.mode` | `index`, `attach` | `index` | qdrant, pgvector: `index`: open-rlcd owns the collection / table; `rlcd ingest` creates it with the encoder's dimension and writes its chunks there (chunk text and BM25 stay local). `attach`: read-only search of a collection / table that already exists; nothing is ingested or written, and its vectors must come from the model in `encoder`. |
+| `pack_config.vector.url` | text | none | qdrant: the server, e.g. `http://localhost:6333` (`":memory:"`: an in-process store for tests). A URL with `user:password@` is refused. Give `url` or `path`, not both. |
+| `pack_config.vector.path` | path | none | qdrant: a folder for Qdrant's embedded on-disk mode, without a server. |
+| `pack_config.vector.collection` | text | none | qdrant: the collection written (index) or searched (attach). Needed. |
+| `pack_config.vector.api_key_env` | text | none | qdrant: the name of the environment variable that holds the API key (unset: no key). |
+| `pack_config.vector.vector_name` | text | none | qdrant: the named vector to use when the collection has several (and to create in index mode). Leave it out for a collection with one unnamed vector. |
+| `pack_config.vector.table` | text | none | pgvector: the table, `table` or `schema.table`. Needed. |
+| `pack_config.vector.dsn_env` | text | `RLCD_PG_DSN` | pgvector: the name of the environment variable that holds the connection string. |
+| `pack_config.vector.vector_field` | text | `embedding` | pgvector: the `vector` column. |
+| `pack_config.vector.create_index` | true / false | true | pgvector, index mode: create an HNSW cosine index on the vector column. |
+| `pack_config.vector.timeout` | whole number >= 1 | 10 | qdrant, pgvector: seconds before a request (qdrant) or a connection attempt (pgvector) gives up. |
+| `pack_config.vector.batch_size` | whole number >= 1 | 256 (qdrant), 500 (pgvector) | qdrant, pgvector: points / rows `rlcd ingest` writes per batch. |
+| `pack_config.vector.id_field` | text | none (qdrant: the point id), `id` (pgvector) | qdrant, pgvector, attach mode: the payload key / column that holds the chunk id. |
+| `pack_config.vector.text_field` | text | `text` | qdrant, pgvector, attach mode: the payload key / column that holds the chunk text. |
+| `pack_config.vector.doc_id_field` | text | `doc_id` | qdrant, pgvector, attach mode: ... the document id. |
+| `pack_config.vector.title_field` | text | `title` | qdrant, pgvector, attach mode: ... the title. |
+| `pack_config.vector.updated_at_field` | text | `updated_at` | qdrant, pgvector, attach mode: ... the last update (freshness, `max_evidence_age_days`). |
+| `pack_config.vector.authority_field` | text | `authority` | qdrant, pgvector, attach mode: ... the authority of the source. |
+| `pack_config.graph.kind` | `local`, `neo4j` | `local` | The entity graph: the local one, or Neo4j (extra `neo4j`). With `vector` in attach mode there is no local graph (nothing is ingested): attach a Neo4j graph for graph retrieval. |
+| `pack_config.graph.terms` | list of text | empty | local, neo4j: entity names to recognise (needed for names the tokenizer cannot find, such as kanji names). |
+| `pack_config.graph.max_fanout` | whole number >= 1 | 200 | local, neo4j: an entity mentioned by more than this many chunks is always a hub (never followed), whatever `hub_share` gives. It does not cut the chunks of an entity that is followed. |
+| `pack_config.graph.hub_share` | number in [0, 1] | 0.05 | local: an entity mentioned in more than this share of all chunks is a hub and is not followed. |
+| `pack_config.graph.hub_min` | whole number >= 0 | 10 | local: an entity mentioned by this many chunks or fewer is never a hub. |
+| `pack_config.graph.mode` | `index`, `attach` | `index` | neo4j: `index`: `rlcd ingest` writes open-rlcd's entity graph under its own labels (`RlcdDoc`, `RlcdChunk`, `RlcdEntity`). `attach`: read-only expansion over a graph that already exists, through `expand_cypher`. |
+| `pack_config.graph.uri` | text | none | neo4j: the server, e.g. `bolt://localhost:7687`. Needed. A URI with `user:password@` is refused. |
+| `pack_config.graph.user` | text | `neo4j` | neo4j: the user name. |
+| `pack_config.graph.user_env` | text | none | neo4j: the name of an environment variable that holds the user name; when it is set it wins over `user`. |
+| `pack_config.graph.password_env` | text | none | neo4j: the name of the environment variable that holds the password (unset: no authentication). |
+| `pack_config.graph.database` | text | the server's default | neo4j: the database. |
+| `pack_config.graph.timeout` | whole number >= 1 | 10 | neo4j: seconds before a connection attempt gives up. |
+| `pack_config.graph.expand_cypher` | text | open-rlcd's query (index mode) | neo4j: a read-only Cypher template from the query's entities (`$terms`, `$keys`) to chunk ids with `path_length`. Needed in attach mode. A template with a write clause (CREATE, MERGE, SET, DELETE, ...) is refused; values reach it only as parameters. |
+| `pack_config.graph.neighbors_cypher` | text | open-rlcd's query (index mode), none (attach) | neo4j: a read-only template from chunk ids (`$ids`) to the chunks around them. |
+| `pack_config.graph.degree_cypher` | text | open-rlcd's query (index mode), none (attach) | neo4j: a read-only template that gives one chunk's (`$id`) degree. |
 | `pack_config.retrieve_k` | whole number >= 1 | 5 | Top-k of each retriever at decide time (fused, up to 3k candidates). |
 | `pack_config.label_top_k` | whole number >= 1 | 5 | Chunks retrieved per query when label tasks are built. |
 | `pack_config.rrf_k` | number > 0 | 60 | The constant of reciprocal rank fusion. |
@@ -404,6 +446,7 @@ Secrets are read from the environment only. A value in `rlcd.yaml` that looks li
 | `RLCD_MAX_BODY_BYTES` | Largest request body the API accepts (default 16 MiB). |
 | `RLCD_URL` | Where the Python client finds the service (default `http://127.0.0.1:8095`). |
 | `RLCD_DEBUG` | `1` makes the `rlcd` command print a full traceback instead of one line. |
+| `RLCD_PG_DSN` | Secret. The Postgres connection string of the pgvector store, read unless `pack_config.vector.dsn_env` names another variable. Every host it names (and `PGHOST` when it names none) must be loopback unless remote hosts are allowed. The Qdrant API key, the Neo4j password and user are in the variables `api_key_env`, `password_env` and `user_env` name. |
 | `ANTHROPIC_API_KEY` | Secret. The key of the `anthropic` judge. |
 | `OPENAI_API_KEY` | Secret. Sent by the `openai:` judge when set. |
 | `HF_HUB_OFFLINE` | `1`: the ONNX encoder downloads nothing and fails if its files are not already in `<home>/encoders`. |
@@ -424,6 +467,8 @@ the server next to it. `GET /health` shows what the server runs with (`model`, `
 | `train.*` | the next `rlcd train` | restart, then the next `POST /v1/train` |
 | `pack_config`: what features are built from (tabular: the table and its columns; documents: the encoder, chunking) | after `rlcd train` (documents: `rlcd ingest` first): the trained schema and encoder are stored in the bundle | after `rlcd train`, as above |
 | `pack_config`: decide-time settings of the documents pack (`retrieve_k`, `max_evidence_age_days`, `require_evidence_dates`, `feature_cache`, and what opening the corpus reads: `rrf_k`, `vector.backend`, `graph.terms`, `graph.max_fanout`, `graph.hub_share`, `graph.hub_min`, `on_encoder_change`; new `graph.terms` link chunks only after a re-ingest) | at once | restart |
+| `pack_config.vector` / `graph`: the store that holds the index (an index-mode store's `kind`, `collection`, `table` or `database`) | after `rlcd ingest`, which writes the existing chunks into the new store; until then the corpus refuses to open (`connector_config`: decide answers without candidates) | after that `rlcd ingest`, then restart |
+| `pack_config.vector` / `graph`: every other store key (`url`, the `*_env` names, field mappings, Cypher templates, `timeout`, ...), and a store in attach mode, which holds no index of open-rlcd's | at once | restart |
 | `rollout.*`, `routes`, `batteries`, `evaluate.*` | at once | restart |
 | `serve.log_states`, `serve.redact`, `serve.receipts`, `serve.review_capacity_per_day`, `security.allow_remote`, `regressions`, `owners` | at once | restart |
 | `serve.host`, `serve.port`, `home`, `pack` | the next command | restart |

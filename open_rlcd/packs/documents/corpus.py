@@ -24,9 +24,26 @@ The entity graph records the version of the entity extractor that built it; a co
 extractor re-extracts the graph from its chunks in memory (vectors and BM25 are untouched) and writes it at the
 next save.
 
-What this is not: a database. One writer at a time, everything is loaded into memory, BM25 is rebuilt on every
-ingest. It is meant for a laptop-sized corpus (up to some hundred thousand chunks); remote connectors (Qdrant,
-pgvector, Neo4j) are the path beyond that and are not implemented here yet.
+Remote stores (`pack_config.vector: {kind: qdrant | pgvector}`, `pack_config.graph: {kind: neo4j}`; the
+connectors and their keys are documented in open_rlcd/connectors):
+
+* **index** mode: ingestion works as above, but the vectors (and, for neo4j, the entity graph) live in the remote
+  store instead of `vectors/` (and `graph.json`); the store's payload carries each chunk's text and metadata.
+  Chunk text, docs.jsonl and BM25 stay local, so retrieval is still vector + graph + lexical. meta.json records
+  which stores hold the index; opening the corpus with other stores configured is refused (`connector_config`)
+  until `rlcd ingest` has re-indexed the existing chunks into them (the pack opens the corpus with `reindex=True`
+  for that).
+* **attach** mode (`vector.mode: attach`): nothing is ingested or stored locally and nothing is written anywhere.
+  `retrieve` searches the existing collection / table (and, when `graph` is neo4j, expands the query's entities
+  through its Cypher template), takes text and metadata from the mapped payload fields / columns, and fetches the
+  stored vector of a graph hit to score it by the same cosine. There is no BM25 (the chunks are not here), so
+  candidates come from vector and graph retrieval only; a local `graph` is ignored. Query vectors come from this
+  corpus' encoder, so the attached store must have been embedded with that same model.
+
+What this is not: a database. One writer at a time, everything local is loaded into memory, BM25 is rebuilt on
+every ingest. The local corpus is meant for a laptop-sized collection (up to some hundred thousand chunks); index
+mode moves the vectors (and the graph) out of memory but keeps the chunk text and BM25 local; attach mode is the
+path for a corpus that already lives in a vector database, at whatever size that database serves.
 """
 from __future__ import annotations
 
@@ -42,6 +59,8 @@ from urllib.parse import unquote, urlparse
 
 import numpy as np
 
+from ...connectors.base import CANDIDATE_FIELDS, config_error, cosine, read_only
+from ...connectors.factory import kind_of, make_graph_store, make_vector_store, mode_of
 from ...connectors.local_graph import ENTITY_VERSION, HUB_MIN, HUB_SHARE, LocalGraphStore
 from ...connectors.local_vector import LocalVectorStore
 from ...core.contract import ContractError
@@ -410,25 +429,44 @@ def _read_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _describe_store(d: dict | None, what: str) -> str:
+    d = d or {"kind": "local"}
+    kind = d.get("kind") or "local"
+    if kind == "local":
+        return f"the local {'vector index' if what == 'vector' else 'entity graph'}"
+    if d.get("collection"):
+        return f"{kind} collection {d['collection']!r}"
+    if d.get("table"):
+        return f"{kind} table {d['table']!r}"
+    return f"{kind} ({'database ' + repr(d['database']) if d.get('database') else 'default database'})"
+
+
 class Corpus:
-    """A local, multilingual document corpus: chunks + vectors + entity graph + BM25 under `<home>/corpus`.
+    """A multilingual document corpus: chunks + vectors + entity graph + BM25 under `<home>/corpus`, with the vectors
+    and the graph optionally in remote stores (index mode), or a read-only view of a remote store (attach mode).
 
-    config keys (all optional): `vector: {kind: local, backend: auto|faiss|hnswlib|numpy}`, `graph: {kind:
-    local, terms: [...known entity names...], max_fanout: 200, hub_share: 0.05, hub_min: 10}`, `max_chars`,
-    `overlap`, `rrf_k` (60), `batch_size` (64), `on_encoder_change: error | reembed`."""
+    config keys (all optional): `vector: {kind: local, backend: auto|faiss|hnswlib|numpy}` or a remote store
+    (`{kind: qdrant | pgvector, mode: index | attach, ...}`, see open_rlcd/connectors), `graph: {kind: local, terms:
+    [...known entity names...], max_fanout: 200, hub_share: 0.05, hub_min: 10}` or `{kind: neo4j, mode: index |
+    attach, ...}`, `max_chars`, `overlap`, `rrf_k` (60), `batch_size` (64), `on_encoder_change: error | reembed`,
+    `allow_remote` (set by the pack from the project's security settings, never from a request).
 
-    def __init__(self, home: Path, encoder: Encoder, config: dict | None = None):
+    `reindex=True` (what `rlcd ingest` uses): when the configured stores are not the ones meta.json says hold the
+    index, re-embed / re-add the existing chunks into the configured stores instead of refusing to open."""
+
+    def __init__(self, home: Path, encoder: Encoder, config: dict | None = None, reindex: bool = False):
         self.home = Path(home)
         self.dir = self.home / "corpus"
         self.encoder = encoder
         self.config = dict(config or {})
         vcfg = dict(self.config.get("vector") or {"kind": "local"})
         gcfg = dict(self.config.get("graph") or {"kind": "local"})
-        for name, c in (("vector", vcfg), ("graph", gcfg)):
-            kind = str(c.get("kind") or "local").lower()
-            if kind != "local":
-                raise ContractError(f"{name} connector kind {kind!r} is not available yet; the documents pack "
-                                    f"supports {name}: {{kind: local}} for now", kind="unsupported_connector")
+        self.vector_kind, self.vector_mode = kind_of(vcfg, "vector"), mode_of(vcfg, "vector")
+        self.graph_kind, self.graph_mode = kind_of(gcfg, "graph"), mode_of(gcfg, "graph")
+        self.attached = self.vector_mode == "attach"
+        self._reindex = bool(reindex)
+        self.reindexed: list[str] = []         # stores the existing chunks were re-indexed into when opening
+        allow_remote = bool(self.config.get("allow_remote"))
         self.max_chars = int(self.config.get("max_chars") or 1200)
         self.overlap = int(self.config.get("overlap") if self.config.get("overlap") is not None else 150)
         self.rrf_k = float(self.config.get("rrf_k") or 60)
@@ -444,22 +482,70 @@ class Corpus:
         self.bm25: BM25 | None = None
         self._bm25_ids: list[str] = []
         self._bm25_pos: dict[str, int] = {}
-        self.vectors = LocalVectorStore(self.dir / "vectors", encoder.dim, backend=self._backend)
-        self.graph = LocalGraphStore(self.dir / "graph.json", terms=self._terms, **self._hub)
+        self.vectors: Any
+        self.graph: Any
+        if self.vector_kind == "local":
+            self.vectors = LocalVectorStore(self.dir / "vectors", encoder.dim, backend=self._backend)
+        else:
+            self.vectors = make_vector_store(vcfg, encoder.dim, allow_remote=allow_remote)
+        if self.graph_kind != "local":
+            self.graph = make_graph_store(gcfg, allow_remote=allow_remote, terms=self._terms)
+        elif self.attached:
+            self.graph = None                  # nothing is ingested in attach mode, so a local graph would be empty
+        else:
+            self.graph = LocalGraphStore(self.dir / "graph.json", terms=self._terms, **self._hub)
         self._graph_dirty = False              # the graph was re-extracted on load and not saved yet
-        if self.exists():
+        if not self.attached and self._local_exists():
             self._load()
 
     # ------------------------------------------------------------------ state
 
-    def exists(self) -> bool:
+    def _local_exists(self) -> bool:
         return (self.dir / "meta.json").is_file() and (self.dir / "chunks.jsonl").is_file()
+
+    def exists(self) -> bool:
+        """True when there is something to retrieve from: an ingested corpus, or an attached remote store."""
+        return self.attached or self._local_exists()
 
     @classmethod
     def open(cls, home: Path, encoder: Encoder, config: dict | None = None) -> Corpus | None:
-        """The corpus under `home`, or None when nothing was ingested there yet."""
+        """The corpus under `home`, or None when nothing was ingested there yet (and no store is attached)."""
         c = cls(home, encoder, config)
         return c if c.exists() else None
+
+    def connect(self) -> None:
+        """Open the remote stores now (connection, collection / table, dimension checks) instead of at first use.
+        Local stores need nothing. Raises ContractError (503 `connector_unavailable`, `encoder_mismatch`, ...)."""
+        for store in (self.vectors, self.graph):
+            fn = getattr(store, "connect", None)
+            if callable(fn):
+                fn()
+
+    def store_targets(self) -> dict:
+        """Which stores hold the index (recorded in meta.json; no URLs or credentials)."""
+        v = {"kind": "local"} if self.vector_kind == "local" else self.vectors.describe()
+        g = {"kind": "local"} if self.graph_kind == "local" else self.graph.describe()
+        return {"vector": v, "graph": g}
+
+    def _graph_writable(self) -> bool:
+        return self.graph is not None and (self.graph_kind == "local" or bool(getattr(self.graph, "writable", False)))
+
+    def _check_writable(self) -> None:
+        if self.attached:
+            raise read_only(f"pack_config.vector is in attach mode: open-rlcd only searches the existing "
+                            f"{self.vectors.target} and never writes to it, so there is nothing to ingest here. To "
+                            f"let open-rlcd index documents, give it a collection / table of its own (mode: index).")
+
+    def _moved(self, meta: dict) -> list[str]:
+        """The stores (vector / graph) the configuration names that do not hold this corpus' index."""
+        stored = meta.get("stores") or {}
+        want = self.store_targets()
+        moved = []
+        if (stored.get("vector") or {"kind": "local"}) != want["vector"]:
+            moved.append("vector")
+        if self._graph_writable() and (stored.get("graph") or {"kind": "local"}) != want["graph"]:
+            moved.append("graph")
+        return moved
 
     def _load(self) -> None:
         meta = json.loads((self.dir / "meta.json").read_text(encoding="utf-8"))
@@ -467,9 +553,9 @@ class Corpus:
             raise ContractError(f"{self.dir}: unknown corpus format {meta.get('format')!r}", kind="corpus_format")
         self.docs = {d["id"]: d for d in _read_jsonl(self.dir / "docs.jsonl")}
         self.chunks = {c["id"]: c for c in _read_jsonl(self.dir / "chunks.jsonl")}
-        if (self.dir / "vectors" / "meta.json").is_file():
+        if self.vector_kind == "local" and (self.dir / "vectors" / "meta.json").is_file():
             self.vectors = LocalVectorStore.load(self.dir / "vectors", backend=self._backend)
-        if (self.dir / "graph.json").is_file():
+        if self.graph_kind == "local" and (self.dir / "graph.json").is_file():
             # configured terms win; without any, the terms the graph was built with are kept
             self.graph = LocalGraphStore.load(self.dir / "graph.json", terms=self._terms or None, **self._hub)
             if self.graph.entity_version != ENTITY_VERSION:
@@ -482,21 +568,43 @@ class Corpus:
             self._bm25_pos = {cid: i for i, cid in enumerate(self._bm25_ids)}
         else:
             self._rebuild_bm25()
+        moved = self._moved(meta)
+        if moved and not self._reindex:
+            stored = meta.get("stores") or {}
+            want = self.store_targets()
+            what = "; ".join(f"pack_config.{n} names {_describe_store(want[n], n)}, but the index is in "
+                             f"{_describe_store(stored.get(n), n)}" for n in moved)
+            raise config_error(f"the local corpus was indexed into other stores than the configured ones ({what}). "
+                               f"Run `rlcd ingest` once to index the existing documents into the configured stores, "
+                               f"or restore the previous setting.")
         enc = meta.get("encoder") or {}
+        reembedded = False
         if enc.get("sha256") != self.encoder.sha256 or int(enc.get("dim") or 0) != int(self.encoder.dim):
             if str(self.config.get("on_encoder_change") or "error") == "reembed":
                 self.reembed()
+                reembedded = True
             else:
                 raise ContractError(
                     f"the corpus in {self.dir} was embedded with encoder {enc.get('id')!r} "
                     f"(sha256 {str(enc.get('sha256'))[:16]}...), not {self.encoder.id!r} "
                     f"(sha256 {self.encoder.sha256[:16]}...): its vectors would be meaningless. Re-embed it "
                     f"(config on_encoder_change: reembed) or use the original encoder.", kind="encoder_mismatch")
+        if "vector" in moved and not reembedded:
+            self.reembed()
+        if "graph" in moved:
+            self._rebuild_graph()
+            self.save()
+        self.reindexed = moved
 
     def _rebuild_graph(self) -> None:
-        """Re-extract the entity graph from the stored chunks with the current extractor (in memory; the next save
-        writes it). Vectors, BM25 and chunk ids stay as they are."""
-        g = LocalGraphStore(self.dir / "graph.json", terms=self._terms or self.graph.terms, **self._hub)
+        """Re-extract the entity graph from the stored chunks with the current extractor. A local graph is rebuilt
+        in memory (the next save writes it); a remote one (index mode) gets every document re-added (replacing its
+        chunks). Vectors, BM25 and chunk ids stay as they are."""
+        if self.graph_kind == "local":
+            g = LocalGraphStore(self.dir / "graph.json", terms=self._terms or (self.graph.terms if self.graph else []),
+                                **self._hub)
+        else:
+            g = self.graph
         for d in self.docs.values():
             rows = sorted((self.chunks[c] for c in d.get("chunk_ids") or [] if c in self.chunks),
                           key=lambda r: r.get("ord", 0))
@@ -505,12 +613,21 @@ class Corpus:
         self._graph_dirty = True
 
     def stats(self) -> dict:
-        return {"docs": len(self.docs), "chunks": len(self.chunks), "vectors": self.vectors.count(),
-                "vector_backend": self.vectors.backend, "graph": self.graph.stats(), "encoder": self.encoder.id}
+        return {"docs": None if self.attached else len(self.docs),
+                "chunks": None if self.attached else len(self.chunks), "vectors": self.vectors.count(),
+                "vector_backend": self.vectors.backend, "vector_mode": self.vector_mode,
+                "graph": self.graph.stats() if self.graph is not None else None, "encoder": self.encoder.id}
 
     def chunk(self, chunk_id: str) -> dict | None:
+        """A stored chunk; in attach mode it is fetched from the store (None when it has no text there)."""
         c = self.chunks.get(str(chunk_id))
-        return dict(c) if c is not None else None
+        if c is not None:
+            return dict(c)
+        if self.attached:
+            got = self.vectors.fetch([str(chunk_id)]).get(str(chunk_id))
+            if got is not None and got[1].get("text"):
+                return {"id": str(chunk_id), **got[1]}
+        return None
 
     def doc(self, doc_id: str) -> dict | None:
         d = self.docs.get(str(doc_id))
@@ -523,7 +640,9 @@ class Corpus:
 
         Document ids are `<folder name>/<relative path>` (`:<content hash>` appended per record of a JSON file
         without ids), so re-ingesting the same folder updates in place. Records that left a JSON / JSONL file that
-        was read again are removed (`docs_removed`). Returns counts and up to 50 skip notes."""
+        was read again are removed (`docs_removed`). Returns counts and up to 50 skip notes. Refused in attach
+        mode (read_only_connector)."""
+        self._check_writable()
         root = Path(path).expanduser().resolve()
         if not root.exists():
             raise ContractError(f"nothing to ingest: {root} does not exist", kind="not_found")
@@ -543,6 +662,7 @@ class Corpus:
 
     def ingest_records(self, records: list[dict], max_chars: int | None = None, overlap: int | None = None) -> dict:
         """Ingest documents given as dicts `{id, title?, text, updated_at?, authority?, links?}`."""
+        self._check_writable()
         docs, notes = [], []
         for i, r in enumerate(records or []):
             d = record_to_doc(r, default_id=f"record:{i}", source="records") if isinstance(r, dict) else None
@@ -562,13 +682,23 @@ class Corpus:
     def _passage(self, title: str, text: str) -> str:
         return f"{title}\n{text}" if title and not text.lstrip().startswith(title) else text
 
+    def _payload(self, r: dict) -> dict:
+        """What a vector store keeps with a chunk: the doc id locally; the candidate fields in a remote store (so
+        the collection / table describes itself and could be attached elsewhere)."""
+        if self.vector_kind == "local":
+            return {"doc_id": r["doc_id"]}
+        return {"doc_id": r["doc_id"], "title": r.get("title") or "", "text": r["text"],
+                "updated_at": r.get("updated_at"), "authority": r.get("authority")}
+
     def _drop_doc(self, doc_id: str) -> None:
         old = self.docs.pop(doc_id, None)
         ids = [cid for cid in (old or {}).get("chunk_ids", [])]
         for cid in ids:
             self.chunks.pop(cid, None)
-        self.vectors.delete(ids)
-        self.graph.remove_document(doc_id)
+        if ids:
+            self.vectors.delete(ids)
+        if self._graph_writable():
+            self.graph.remove_document(doc_id)
 
     def _ingest(self, docs: list[dict], max_chars: int, overlap: int, notes: list[dict] | None = None,
                 reread: dict[str, set[str]] | None = None) -> dict:
@@ -605,13 +735,14 @@ class Corpus:
                                   "updated_at": d.get("updated_at"), "authority": d.get("authority"),
                                   "links": list(d.get("links") or []), "chunk_ids": [r["id"] for r in rows],
                                   "title_is_filename": bool(d.get("title_is_filename"))}
-            _graph_add(self.graph, self.docs[d["id"]], rows)
+            if self._graph_writable():
+                _graph_add(self.graph, self.docs[d["id"]], rows)
             new_chunks.extend(rows)
         for s in range(0, len(new_chunks), self.batch_size):
             batch = new_chunks[s:s + self.batch_size]
             vecs = self.encoder.encode([self._passage(r["title"], r["text"]) for r in batch], kind="passage")
-            self.vectors.upsert([r["id"] for r in batch], vecs, [{"doc_id": r["doc_id"]} for r in batch])
-        if added or updated or stale or self._graph_dirty or not self.exists():
+            self.vectors.upsert([r["id"] for r in batch], vecs, [self._payload(r) for r in batch])
+        if added or updated or stale or self._graph_dirty or not self._local_exists():
             self._rebuild_bm25()
             self.save()
         return {"docs_added": added, "docs_updated": updated, "docs_unchanged": unchanged, "docs_removed": len(stale),
@@ -620,6 +751,7 @@ class Corpus:
 
     def remove(self, doc_ids: list[str]) -> int:
         """Remove documents (and their chunks, vectors and graph nodes); returns how many existed."""
+        self._check_writable()
         n = 0
         for d in doc_ids:
             if str(d) in self.docs:
@@ -631,13 +763,16 @@ class Corpus:
         return n
 
     def reembed(self) -> int:
-        """Re-encode every chunk with the current encoder (after an encoder change); returns the chunk count."""
-        self.vectors = LocalVectorStore(self.dir / "vectors", self.encoder.dim, backend=self._backend)
+        """Re-encode every chunk with the current encoder (after an encoder change, or into a newly configured
+        store) and upsert it into the vector store; returns the chunk count."""
+        self._check_writable()
+        if self.vector_kind == "local":
+            self.vectors = LocalVectorStore(self.dir / "vectors", self.encoder.dim, backend=self._backend)
         rows = list(self.chunks.values())
         for s in range(0, len(rows), self.batch_size):
             batch = rows[s:s + self.batch_size]
             vecs = self.encoder.encode([self._passage(r["title"], r["text"]) for r in batch], kind="passage")
-            self.vectors.upsert([r["id"] for r in batch], vecs, [{"doc_id": r["doc_id"]} for r in batch])
+            self.vectors.upsert([r["id"] for r in batch], vecs, [self._payload(r) for r in batch])
         self.save()
         return len(rows)
 
@@ -647,6 +782,10 @@ class Corpus:
         self._bm25_pos = {cid: i for i, cid in enumerate(self._bm25_ids)}
 
     def save(self) -> None:
+        """Write the local files (docs, chunks, BM25, a local vector index / graph, meta.json). Remote stores in
+        index mode persist their own writes; nothing is saved in attach mode."""
+        if self.attached:
+            return
         self._graph_dirty = False
         self.dir.mkdir(parents=True, exist_ok=True)
         _write_jsonl(self.dir / "docs.jsonl", list(self.docs.values()))
@@ -654,11 +793,14 @@ class Corpus:
         if self.bm25 is not None:
             _write_json(self.dir / "bm25.json", {"ids": self._bm25_ids, **self.bm25.to_dict()})
         self.vectors.save()
-        self.graph.save()
+        if self.graph is not None:
+            self.graph.save()
         _write_json(self.dir / "meta.json", {
             "format": FORMAT, "encoder": encoder_config(self.encoder), "docs": len(self.docs),
             "chunks": len(self.chunks), "chunking": {"max_chars": self.max_chars, "overlap": self.overlap},
-            "vector_backend": self.vectors.backend, "graph_backend": self.graph.backend})
+            "vector_backend": self.vectors.backend,
+            "graph_backend": self.graph.backend if self.graph is not None else None,
+            "stores": self.store_targets()})
 
     # ------------------------------------------------------------------ retrieve
 
@@ -667,11 +809,60 @@ class Corpus:
 
         Each retriever contributes up to `k` chunks, so the merged list holds up to 3k candidates, best first:
         `{id, doc_id, title, text, score (cosine), source (vector | graph | lexical | hybrid), sources, rank,
-        rrf, lexical_score (BM25), updated_at, authority, graph? {path_length, degree, via}}`."""
-        if not self.chunks or not str(query or "").strip():
+        rrf, lexical_score (BM25), updated_at, authority, graph? {path_length, degree, via}}`.
+
+        With a remote vector store the cosine of a vector hit is the store's (always a cosine similarity); graph and
+        lexical hits it did not return are fetched by id in one request and scored against their stored vectors.
+        In attach mode text and metadata come from the store's mapped fields (or from the graph template's rows),
+        a hit without text is dropped, and there is no lexical retriever (`lexical_score` is NaN)."""
+        if not str(query or "").strip() or (not self.attached and not self.chunks):
             return []
         k = max(1, int(k))
         qv = np.asarray(self.encoder.encode([str(query)], kind="query"), dtype=np.float32)[0]
+        remote = self.vector_kind != "local"
+        # chunks this corpus does not hold locally are candidates only from stores it does not own: an attached
+        # vector store, or an attached graph whose template returns text. In index mode an id that is not a local
+        # chunk is a leftover (or another corpus' point in a shared collection) and is dropped, as locally.
+        foreign_graph = self.attached or (self.graph is not None and not self._graph_writable())
+        rows: dict[str, dict] = {}         # candidate fields of chunks that are not in the local corpus
+        cos: dict[str, float] = {}         # cosine of remote hits
+
+        def keep_row(cid: str, fields: dict, allowed: bool) -> None:
+            if allowed and cid not in self.chunks and cid not in rows and fields.get("text"):
+                rows[cid] = {f: fields.get(f) for f in CANDIDATE_FIELDS}
+
+        vector_ids = []
+        for h in self.vectors.search(qv, k=k):
+            vector_ids.append(h.id)
+            if remote:
+                cos[h.id] = float(h.score)
+                keep_row(h.id, h.payload or {}, self.attached)
+        graph_rows: list[dict] = []
+        if graph_hops and int(graph_hops) > 0 and self.graph is not None:
+            terms = self.graph.entities(str(query))
+            graph_rows = list(self.graph.expand(terms, hops=int(graph_hops), limit=k))
+            for g in graph_rows:
+                keep_row(g["id"], g, foreign_graph)
+        lex = self.bm25.scores(tokens(str(query))) if self.bm25 is not None else np.zeros(0)
+        lex_order = np.lexsort((np.arange(lex.size), -lex))[:k] if lex.size else []
+        if remote:
+            # one request for what the search did not return: text of attached graph rows, vectors of graph /
+            # lexical hits (to score them by the same cosine)
+            seen = list(dict.fromkeys([*vector_ids, *(g["id"] for g in graph_rows),
+                                       *(self._bm25_ids[i] for i in lex_order if lex[i] > 0)]))
+            if self.attached:
+                pending = [c for c in seen if c not in cos or c not in rows]
+            else:
+                pending = [c for c in seen if c not in cos and c in self.chunks]
+            if pending:
+                for cid, (vec, fields) in self.vectors.fetch(pending).items():
+                    keep_row(cid, fields, self.attached)
+                    if cid not in cos and vec is not None:
+                        cos[cid] = cosine(vec, qv)
+
+        def known(cid: str) -> bool:
+            return cid in self.chunks or cid in rows
+
         found: dict[str, dict] = {}
 
         def add(cid: str, source: str, rank: int) -> dict:
@@ -681,36 +872,35 @@ class Corpus:
                 info["rrf"] += 1.0 / (self.rrf_k + rank)
             return info
 
-        for r, h in enumerate(self.vectors.search(qv, k=k)):
-            if h.id in self.chunks:
-                add(h.id, "vector", r + 1)
-        if graph_hops and int(graph_hops) > 0:
-            terms = self.graph.entities(str(query))
-            graph_hits = [g for g in self.graph.expand(terms, hops=int(graph_hops), limit=k) if g["id"] in self.chunks]
-            for r, g in enumerate(graph_hits):
-                add(g["id"], "graph", r + 1)["graph"] = {"path_length": g["path_length"], "degree": g["degree"],
-                                                         "via": g.get("via")}
-        lex = self.bm25.scores(tokens(str(query))) if self.bm25 is not None else np.zeros(0)
-        if lex.size:
-            order = np.lexsort((np.arange(lex.size), -lex))[:k]
-            for r, i in enumerate(order):
-                if lex[i] > 0 and self._bm25_ids[i] in self.chunks:
-                    add(self._bm25_ids[i], "lexical", r + 1)
+        for r, cid in enumerate(vector_ids):
+            if known(cid):
+                add(cid, "vector", r + 1)
+        graph_hits = [g for g in graph_rows if known(g["id"])]
+        for r, g in enumerate(graph_hits):
+            add(g["id"], "graph", r + 1)["graph"] = {"path_length": g["path_length"], "degree": g["degree"],
+                                                     "via": g.get("via")}
+        for r, i in enumerate(lex_order):
+            if lex[i] > 0 and self._bm25_ids[i] in self.chunks:
+                add(self._bm25_ids[i], "lexical", r + 1)
         if not found:
             return []
         ids = list(found)
-        qn = qv / (np.linalg.norm(qv) or 1.0)
-        cos = self.vectors.vectors(ids) @ qn
+        if remote:
+            scores = np.asarray([cos.get(cid, float("nan")) for cid in ids], dtype=np.float64)
+        else:
+            qn = qv / (np.linalg.norm(qv) or 1.0)
+            scores = self.vectors.vectors(ids) @ qn
         out = []
-        for cid, s in zip(ids, cos, strict=True):
-            c, info = self.chunks[cid], found[cid]
+        for cid, s in zip(ids, scores, strict=True):
+            c, info = (self.chunks.get(cid) or rows[cid]), found[cid]
             li = self._bm25_pos.get(cid)
-            cand = {"id": cid, "doc_id": c["doc_id"], "title": c.get("title") or "", "text": c["text"],
+            cand = {"id": cid, "doc_id": c.get("doc_id"), "title": c.get("title") or "", "text": c["text"],
                     "score": float(s) if np.isfinite(s) else float("nan"),
                     "source": info["sources"][0] if len(info["sources"]) == 1 else "hybrid",
                     "sources": sorted(info["sources"]), "rrf": info["rrf"],
                     "lexical_score": float(lex[li]) if li is not None and li < lex.size else float("nan"),
-                    "updated_at": c.get("updated_at"), "authority": c.get("authority")}
+                    "updated_at": c.get("updated_at"),
+                    "authority": c.get("authority") if cid in self.chunks else _authority(c.get("authority"))}
             if "graph" in info:
                 cand["graph"] = info["graph"]
             out.append(cand)

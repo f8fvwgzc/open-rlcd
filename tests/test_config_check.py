@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from open_rlcd.cli import _config_ok, main
+from open_rlcd.connectors.factory import make_vector_store
 from open_rlcd.core import battery as BT
 from open_rlcd.core import checklist as CL
 from open_rlcd.core import config_check as CC
@@ -291,15 +292,164 @@ def test_a_stakes_level_must_exist_in_the_policy(tmp_path):
 
 def test_documents_pack_config_keys(tmp_path):
     f = check(tmp_path, {"pack_config": {"encodr": {"kind": "hashing"}, "encoder": {"kind": "onx", "dims": 256},
-                                         "chunking": {"max_chars": 0}, "vector": {"kind": "qdrant"},
+                                         "chunking": {"max_chars": 0}, "vector": {"kind": "qdrnt"},
                                          "retrieve_k": "many", "on_encoder_change": "reembd"}})
     assert "Did you mean 'encoder'?" in at(f, "pack_config.encodr")
     assert "Did you mean 'onnx'?" in at(f, "pack_config.encoder.kind")
     assert "Did you mean 'dim'?" in at(f, "pack_config.encoder.dims")
     assert "must be >= 1" in at(f, "pack_config.chunking.max_chars")
-    assert "must be one of local" in at(f, "pack_config.vector.kind")
+    assert "must be one of local, qdrant, pgvector; got 'qdrnt'. Did you mean 'qdrant'?" in at(f, "pack_config.vector.kind")
     assert "whole number" in at(f, "pack_config.retrieve_k")
     assert "Did you mean 'reembed'?" in at(f, "pack_config.on_encoder_change")
+
+
+# one project per connector and mode, written as the connector docs show them (M7: open_rlcd/connectors)
+CYPHER = "MATCH (e:Entity)<-[:MENTIONS]-(c:Chunk) WHERE e.key IN $keys RETURN c.id AS id, 1 AS path_length LIMIT $limit"
+STORES = {
+    "qdrant + neo4j, index": {
+        "vector": {"kind": "qdrant", "url": "http://localhost:6333", "collection": "rlcd_chunks",
+                   "api_key_env": "QDRANT_API_KEY", "timeout": 10, "batch_size": 256},
+        "graph": {"kind": "neo4j", "uri": "bolt://localhost:7687", "user": "neo4j", "password_env": "NEO4J_PASSWORD",
+                  "terms": ["Ulaanbaatar", "東京"], "max_fanout": 200, "timeout": 10}},
+    "qdrant + neo4j, attach": {
+        "vector": {"kind": "qdrant", "mode": "attach", "url": "http://localhost:6333", "collection": "kb",
+                   "api_key_env": "QDRANT_API_KEY", "vector_name": "dense", "text_field": "body",
+                   "doc_id_field": "source_id", "title_field": "heading", "updated_at_field": "modified",
+                   "authority_field": None, "id_field": None},
+        "graph": {"kind": "neo4j", "mode": "attach", "uri": "bolt://localhost:7687", "user_env": "NEO4J_USER",
+                  "password_env": "NEO4J_PASSWORD", "database": "kb", "expand_cypher": CYPHER,
+                  "neighbors_cypher": "MATCH (s:Chunk)-[:NEXT]-(c:Chunk) WHERE s.id IN $ids "
+                                      "RETURN c.id AS id, 1 AS path_length",
+                  "degree_cypher": "MATCH (c:Chunk {id: $id}) RETURN size([(c)--(z) | z]) AS degree"}},
+    "pgvector, index": {"vector": {"kind": "pgvector", "dsn_env": "RLCD_PG_DSN", "table": "rlcd_chunks",
+                                   "create_index": True, "batch_size": 500, "timeout": 5}},
+    "pgvector, attach": {"vector": {"kind": "pgvector", "mode": "attach", "dsn_env": "KB_DSN",
+                                    "table": "public.kb_chunks", "id_field": "chunk_id", "vector_field": "embedding",
+                                    "text_field": "body", "doc_id_field": "document_id", "title_field": "heading",
+                                    "updated_at_field": "modified_at", "authority_field": None}},
+}
+
+
+@pytest.mark.parametrize("name", list(STORES))
+def test_a_connector_project_in_index_or_attach_mode_has_no_findings(tmp_path, name, capsys, monkeypatch):
+    """The remote stores' configurations pass `rlcd config check` as written, with none of the environment
+    variables they name set (the check reads the file only). `rlcd config show` echoes them as written: the
+    `*_env` keys hold names, not secrets."""
+    for var in ("RLCD_PG_DSN", "KB_DSN", "QDRANT_API_KEY", "NEO4J_USER", "NEO4J_PASSWORD", "RLCD_ALLOW_REMOTE"):
+        monkeypatch.delenv(var, raising=False)
+    pack_config = {"encoder": {"kind": "hashing", "dim": 64}, **STORES[name]}
+    root = write(tmp_path, {"name": "kb", "pack": "documents", "pack_config": pack_config})
+    project, findings = CC.check_file(root)
+    assert findings == []
+    assert CC.effective(project)["pack_config"] == pack_config
+    assert main(["--project", str(root), "config", "check"]) == 0
+    assert "no problems found" in capsys.readouterr().out
+
+
+def test_a_store_key_is_checked_against_the_kind_that_reads_it(tmp_path):
+    """`vector` and `graph` accept the keys of every store kind; each kind reads only its own. A remote store
+    refuses the others when it is built, even an empty one, so they are errors here too; the local store ignores
+    them, which is a warning (without `kind: qdrant`, a collection is never searched)."""
+    qdrant = {"kind": "qdrant", "url": "http://localhost:6333", "collection": "kb"}
+    f = check(tmp_path, {"pack_config": {"vector": {**qdrant, "table": "kb", "dsn_env": None},
+                                         "graph": {"kind": "neo4j", "uri": "bolt://localhost:7687", "hub_share": 0.1}}})
+    assert at(f, "pack_config.vector.table").startswith("is a key of pgvector, not of qdrant: the qdrant store "
+                                                        "refuses it. Its keys are: api_key_env, authority_field")
+    assert at(f, "pack_config.vector.dsn_env").startswith("is a key of pgvector, not of qdrant")
+    assert at(f, "pack_config.graph.hub_share").startswith("is a key of local, not of neo4j")
+    assert len(f) == 3
+    with pytest.raises(ContractError, match=r"unknown key\(s\) \['dsn_env', 'table'\]"):
+        make_vector_store({**qdrant, "table": "kb", "dsn_env": None}, 8)      # what building the store says
+    f = check(tmp_path, {"pack_config": {"vector": {"url": "http://localhost:6333", "collection": "kb",
+                                                    "mode": "attach", "table": None},
+                                         "graph": {"kind": "local", "uri": "bolt://localhost:7687"}}})
+    assert CC.errors(f) == [] and len(f) == 4                                 # an empty key is not even a warning
+    assert at(f, "pack_config.vector.collection", "warn") == ("is ignored: `kind` is local (not set), and the local "
+                                                              "vector store does not read it. It is a key of qdrant")
+    assert at(f, "pack_config.vector.mode", "warn").endswith("It is a key of qdrant and pgvector")
+    assert "It is a key of qdrant" in at(f, "pack_config.vector.url", "warn")
+    assert at(f, "pack_config.graph.uri", "warn").startswith("is ignored: `kind` is local, and the local graph")
+
+
+def test_config_check_finds_what_a_remote_store_would_refuse_without_connecting(tmp_path, monkeypatch, capsys):
+    """Once the keys fit the kind, the store's own checks run (connectors/factory.py `check_store`) with no client
+    library, environment variable or connection: each case below would otherwise only fail at the first ingest or
+    decide. A host that is not loopback passes, since whether it is allowed depends on the environment the store
+    is built in (RLCD_ALLOW_REMOTE), and a credential in a URL is never echoed. `rlcd train` refuses to start."""
+    from open_rlcd.connectors import neo4j as N4
+    from open_rlcd.connectors import pgvector as PG
+    from open_rlcd.connectors import qdrant as QD
+
+    def offline(*a, **kw):
+        raise AssertionError("config check needs no client library and no environment variable")
+
+    for mod in (QD, PG, N4):
+        monkeypatch.setattr(mod, "require_extra", offline)
+        monkeypatch.setattr(mod, "env_secret", offline)
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    qdrant = {"kind": "qdrant", "url": "http://localhost:6333", "collection": "kb"}
+    neo4j = {"kind": "neo4j", "mode": "attach", "uri": "bolt://localhost:7687", "expand_cypher": CYPHER}
+    pg = {"kind": "pgvector", "mode": "attach", "table": "kb"}
+    cases = [
+        ({"vector": {**qdrant, "collection": None}}, "pack_config.vector", "needs `collection`"),
+        ({"vector": {**qdrant, "path": "./qdrant"}}, "pack_config.vector", "exactly one of `url`"),
+        ({"vector": {**qdrant, "url": "http://admin:hunter2-pw@localhost:6333"}}, "pack_config.vector",
+         "carries credentials"),
+        ({"vector": {**qdrant, "api_key_env": "sk-live-123"}}, "pack_config.vector", "name of an environment variable"),
+        ({"vector": {**qdrant, "mode": "attach", "text_field": None}}, "pack_config.vector", "text_field cannot be null"),
+        ({"vector": {**pg, "table": "a.b.c"}}, "pack_config.vector", "`table` or `schema.table`"),
+        ({"vector": {**pg, "id_field": None}}, "pack_config.vector", "needs id_field"),
+        ({"graph": {**neo4j, "expand_cypher": None}}, "pack_config.graph", "attach mode needs expand_cypher"),
+        ({"graph": {**neo4j, "expand_cypher": CYPHER + " SET c.seen = true"}}, "pack_config.graph.expand_cypher",
+         "contains the write clause 'SET'"),
+        ({"graph": {**neo4j, "neighbors_cypher": "MATCH (c) RETURN c.id AS id"}},
+         "pack_config.graph.neighbors_cypher", "must use the parameter $ids"),
+    ]
+    for pack_config, path, text in cases:
+        f = check(tmp_path, {"pack_config": pack_config})
+        assert text in at(f, path), pack_config
+        assert not at(f, path).startswith("pack_config.")                 # the path is not repeated
+        assert "hunter2" not in json.dumps(f)
+    assert check(tmp_path, {"pack_config": {"vector": {**qdrant, "url": "http://qdrant.internal:6333"}}}) == []
+    root = write(tmp_path, {"pack": "documents", "pack_config": {"encoder": {"kind": "hashing", "dim": 64},
+                                                                 "graph": {**neo4j, "expand_cypher": None}}})
+    assert main(["--project", str(root), "--home", str(tmp_path / "home"), "train"]) == 2
+    err = capsys.readouterr().err
+    assert "rlcd.yaml: error  pack_config.graph: neo4j attach mode needs expand_cypher" in err
+    assert "so nothing was started" in err
+
+
+def test_the_store_keys_are_the_ones_the_stores_read():
+    """`pack_config.vector` / `graph` hold exactly the keys some store kind reads (connectors/factory.py
+    `store_keys`: the local stores' and each remote module's KEYS), with the factory's kinds and modes, and the
+    defaults the reference shows are the ones a store built without the key uses."""
+    import inspect
+
+    from open_rlcd.connectors import factory as FA
+    from open_rlcd.connectors import neo4j as N4
+    from open_rlcd.connectors import pgvector as PG
+    from open_rlcd.connectors import qdrant as QD
+
+    keys = load_pack("documents").config_keys()
+    vector, graph = keys["vector"].keys, keys["graph"].keys
+    assert set(vector) == FA.LOCAL_KEYS["vector"] | QD.KEYS | PG.KEYS
+    assert set(graph) == FA.LOCAL_KEYS["graph"] | N4.KEYS
+    assert vector["kind"].choices == FA.VECTOR_KINDS and graph["kind"].choices == FA.GRAPH_KINDS
+    assert vector["mode"].choices == graph["mode"].choices == FA.MODES == QD.MODES == PG.MODES == N4.MODES
+    q = QD.QdrantVectorStore.from_config({"kind": "qdrant", "url": ":memory:", "collection": "c", "mode": "attach"}, 8)
+    n = N4.Neo4jGraphStore.from_config({"kind": "neo4j", "uri": "bolt://localhost:7687"})
+    assert n.mode == vector["mode"].default == graph["mode"].default == "index"
+    assert q.timeout == vector["timeout"].default and n.timeout == graph["timeout"].default
+    assert n.user == graph["user"].default and n.max_fanout == graph["max_fanout"].default
+    for name in ("text", "doc_id", "title", "updated_at", "authority"):
+        assert getattr(q.fields, name) == vector[f"{name}_field"].default, name
+    assert q.fields.id is None is vector["id_field"].default            # qdrant: the point id is the chunk id
+    vector_field, columns = PG._columns("attach", {})
+    assert vector_field == vector["vector_field"].default and columns.id == "id"
+    assert vector["dsn_env"].default == PG.DEFAULT_DSN_ENV and vector["create_index"].default is True
+    row = re.search(r"^\| `pack_config\.vector\.batch_size` \|[^|]*\| ([^|]*) \|", DOC.read_text(encoding="utf-8"), re.M)
+    pg_batch = inspect.signature(PG.PgVectorStore.__init__).parameters["batch_size"].default
+    assert row and row.group(1) == f"{q.batch_size} (qdrant), {pg_batch} (pgvector)"
 
 
 def test_tabular_pack_config_keys(tmp_path):

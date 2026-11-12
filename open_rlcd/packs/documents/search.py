@@ -54,6 +54,7 @@ def candidates(corpus: Any, query: str, k: int) -> list[dict]:
         cands.append({"id": cid, "doc_id": ch["doc_id"], "title": ch.get("title") or "", "text": ch["text"],
                       "score": s if np.isfinite(s) else None, "source": "graph", "sources": ["graph"], "rrf": 0.0,
                       "lexical_score": None, "updated_at": ch.get("updated_at"), "authority": ch.get("authority"),
-                      "graph": {"path_length": 2, "degree": corpus.graph.chunk_degree(cid)},
+                      "graph": {"path_length": 2,
+                                "degree": corpus.graph.chunk_degree(cid) if corpus.graph is not None else None},
                       "rank": len(cands) + 1})
     return cands

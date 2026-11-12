@@ -3,7 +3,8 @@
     rlcd init my-business --pack documents     write my-business/rlcd.yaml (packs: documents, tabular)
     rlcd config check [--json]                 rlcd.yaml checked key by key (exit 1 on an error); docs/configuration.md
     rlcd config show [--json]                  what the project resolves to: home, pack, heads, thresholds, rollout
-    rlcd ingest ./data                         build the local corpus (documents pack; tabular has no ingest step)
+    rlcd ingest ./data                         build the corpus (documents pack; tabular has no ingest step)
+    rlcd ingest ./data --qdrant http://localhost:6333 --collection docs --neo4j bolt://localhost:7687
     rlcd label bootstrap --judge claude-cli    weak labels from an LLM judge (documents: needs queries.jsonl)
     rlcd label audit --heads answerable        human review in the terminal (~150+ trusted rows per head)
     rlcd label next --head answerable          the most informative rows to audit next
@@ -220,7 +221,11 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     svc = _service(args)
     opts = {"path": args.path, "csv": args.csv, "qdrant": args.qdrant, "collection": args.collection,
             "neo4j": args.neo4j, "max_chars": args.max_chars}
-    _print(svc.pack.ingest(svc.project, {k: v for k, v in opts.items() if v is not None}))
+    res = svc.pack.ingest(svc.project, {k: v for k, v in opts.items() if v is not None})
+    note = res.pop("note", None) if isinstance(res, dict) else None
+    _print(res)
+    if note:
+        print(f"\nnote: {note}", file=sys.stderr)
     return 0
 
 
@@ -887,12 +892,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(fn=cmd_config)
 
     s = sub.add_parser("ingest", help="documents pack: read a local folder into the corpus (uses the project's "
-                                      "encoder)")
+                                      "encoder)",
+                       description="Read a folder into the documents corpus: chunks and BM25 under RLCD_HOME, vectors "
+                                   "and the entity graph locally or in the stores pack_config.vector / graph name "
+                                   "(index mode). Remote hosts need security.allow_remote: true or "
+                                   "RLCD_ALLOW_REMOTE=1; credentials come from environment variables only.")
     s.add_argument("path", nargs="?", help="folder of documents (default: pack_config.corpus)")
-    # remote connectors are not implemented yet: the pack refuses them with a clear message, so they stay out of
-    # the help instead of advertising a flow that cannot run
-    for flag in ("--csv", "--qdrant", "--collection", "--neo4j"):
-        s.add_argument(flag, help=argparse.SUPPRESS)
+    s.add_argument("--qdrant", metavar="URL", help="upsert the vectors into Qdrant at URL (index mode; needs "
+                                                   "--collection unless pack_config.vector names one; API key from "
+                                                   "the variable named by pack_config.vector.api_key_env)")
+    s.add_argument("--collection", metavar="NAME", help="the Qdrant collection open-rlcd writes its chunks into "
+                                                        "(created with the encoder's dimension if missing)")
+    s.add_argument("--neo4j", metavar="URI", help="write the entity graph into Neo4j at URI, e.g. "
+                                                  "bolt://localhost:7687 (password from the variable named by "
+                                                  "pack_config.graph.password_env)")
+    s.add_argument("--csv", help=argparse.SUPPRESS)     # not a documents-pack input: refused with a message
     s.add_argument("--max-chars", type=int, dest="max_chars", help="chunk size in characters")
     s.set_defaults(fn=cmd_ingest)
 
