@@ -296,10 +296,9 @@ def test_f14_a_custom_pack_from_rlcd_yaml_serves_after_training(tmp_path, monkey
     assert again.health()["heads"]["good"] == {"trained": True}
 
 
-def test_f34_trading_is_not_a_builtin_pack_here():
-    assert "trading" not in BUILTIN
-    with pytest.raises(ValueError, match="unknown pack"):
-        load_pack("trading")
+def test_f34_the_trading_pack_ships_with_its_branch():
+    assert "trading" in BUILTIN
+    assert load_pack("trading").name == "trading"
 
 
 # ============================================================================ F04 / F20 / F21: bundles

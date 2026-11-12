@@ -1,7 +1,7 @@
 """Domain packs: what a business plugs in.
 
 A pack = YAML (the questions: heads, classes, views, defaults) + a little Python (a FeatureProvider that turns
-request `state` into feature rows, and a way to get labelled rows). Built-in packs: `documents`, `tabular`.
+request `state` into feature rows, and a way to get labelled rows). Built-in packs: `documents`, `tabular`, `trading`.
 A custom pack is referenced from rlcd.yaml by a dotted path, `pack: my_pkg.my_pack:Pack`
 (that imports your code: only point it at code you trust). See docs/writing-a-pack.md.
 
@@ -37,6 +37,7 @@ from ..core.head import HeadSpec
 BUILTIN = {
     "documents": "open_rlcd.packs.documents:DocumentsPack",
     "tabular": "open_rlcd.packs.tabular:TabularPack",
+    "trading": "open_rlcd.packs.trading:TradingPack",
 }
 # what to install when a built-in pack's optional dependencies are missing
 EXTRAS = {"documents": "documents"}

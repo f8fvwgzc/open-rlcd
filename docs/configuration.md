@@ -1,7 +1,7 @@
 # Configuration reference: every key of `rlcd.yaml`
 
-One file configures a project: `rlcd.yaml`, written by `rlcd init NAME --pack documents|tabular` and found by
-looking in the current folder and its parents (or where `--project` / `RLCD_PROJECT` points). Everything in it
+One file configures a project: `rlcd.yaml`, written by `rlcd init NAME --pack documents|tabular|trading` and
+found by looking in the current folder and its parents (or where `--project` / `RLCD_PROJECT` points). Everything in it
 is optional, but the file itself is not: `rlcd train`, `rlcd ingest` and `rlcd label ...` stop with one line
 (exit code 2, nothing read, written or downloaded) when there is no `rlcd.yaml`; the commands that work on a
 model home (`decide`, `ask`, `check`, `import`, `promote`, `metrics`, ...) also run without a project when the
@@ -71,9 +71,9 @@ A key written with no value (`timeout:`, or `timeout: null`) usually means the d
 | key | type | default | what it does |
 |---|---|---|---|
 | `name` | text | the folder's name | The project's name, shown by `rlcd config show`. Nothing else reads it. |
-| `pack` | `documents`, `tabular`, or `module:Class` | `documents` (or `RLCD_PACK`) | Which pack answers the questions. `module:Class` imports your own pack: only name code you trust. |
+| `pack` | `documents`, `tabular`, `trading`, or `module:Class` | `documents` (or `RLCD_PACK`) | Which pack answers the questions. `module:Class` imports your own pack: only name code you trust. |
 | `home` | path | `var` | Where models, logs, labels and caches are written, relative to the folder of `rlcd.yaml`. `RLCD_HOME` and `--home` override it. |
-| `pack_config` | mapping | empty | The pack's own settings: see [the documents pack](#pack_config-of-the-documents-pack) and [the tabular pack](#pack_config-of-the-tabular-pack). A custom pack that declares no keys is not checked here. |
+| `pack_config` | mapping | empty | The pack's own settings: see [the documents pack](#pack_config-of-the-documents-pack), [the tabular pack](#pack_config-of-the-tabular-pack) and [the trading pack](#pack_config-of-the-trading-pack). A custom pack that declares no keys is not checked here. |
 | `regressions` | path | `regressions.jsonl` | The regression cases file for `rlcd regress`, relative to the folder of `rlcd.yaml`. |
 
 ## `heads`: change a question the pack defines
@@ -83,7 +83,7 @@ show` prints the merged result and which fields came from your file). A name the
 head. In the documents pack it needs at least `type` and `view` (`query`, `query_chunk`, `query_evidence` or
 `query_evidence_answer`), and `classes` or `levels` for a choice or score head; the check asks only for `type`,
 and a head without `view` cannot train. In the tabular pack it needs `label`: the type is inferred from the
-column.
+column. The trading pack has one head per interval and no others: add the interval to `pack_config.intervals`.
 
 | key | type | default | what it does |
 |---|---|---|---|
@@ -196,7 +196,7 @@ Judge API keys are read from the environment only (`ANTHROPIC_API_KEY`, `OPENAI_
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `security.allow_remote` | true / false | false | Let connectors and LLM judges talk to hosts that are not loopback, including the `claude-cli` and `anthropic` judges. Same as `RLCD_ALLOW_REMOTE=1`. |
+| `security.allow_remote` | true / false | false | Let connectors, LLM judges and the trading pack's `quant_url` talk to hosts that are not loopback, including the `claude-cli` and `anthropic` judges. Same as `RLCD_ALLOW_REMOTE=1`. |
 
 ## `rollout`: how much automation the operator allows
 
@@ -411,6 +411,29 @@ any of the target keys) directly under `pack_config`. Not both.
 
 In the tabular pack a `heads.<head>` override may also set `label`.
 
+## `pack_config` of the trading pack
+
+A thin HTTP client of the View Engine quant sidecar, which computes the features (`GET /features`) and the labels
+(`GET /dataset`). One head per interval, `setup:<interval>`: a choice of `buy`, `sell` or `hold`, answering "from
+this candle's close, which action reached its target before its stop within the horizon". Under `heads.<head>` its
+`type`, `classes` and `view` cannot change (the sidecar labels them), and a name that is not one of its heads is an
+error unless it switches that head off (`enabled: false`). Analysis tool, not financial advice.
+
+| key | type | default | what it does |
+|---|---|---|---|
+| `pack_config.quant_url` | text | `http://127.0.0.1:8090` | The sidecar's http(s) base URL. A host that is not loopback is refused unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1` (this pack has no `pack_config.allow_remote`). |
+| `pack_config.symbols` | list | `[XAUUSD]` | The symbols to train on, one `/dataset` export each. A symbol the sidecar refuses, or whose export has another feature version, is skipped with a note; a sidecar that cannot be reached fails the train (and a decision, with 503). |
+| `pack_config.intervals` | list of `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d` | `[15m]` | One head per interval. Removing an interval switches its head off at once, as `heads.<head>.enabled: false` does: not trained, and not served even when the model has it trained; listing it again serves it again without a retrain while the model has it. |
+| `pack_config.sl_pips` | number > 0 | 20 | Stop distance in pips, sent to the sidecar, which labels each candle with it. |
+| `pack_config.tp_pips` | number > 0 | 50 | First target in pips, sent to the sidecar. |
+| `pack_config.tp2_pips` | number > 0 | 100 | Second target in pips, sent to the sidecar. |
+| `pack_config.horizon` | whole number >= 1 | 48 | Candles a setup has to reach its target, sent to the sidecar. Also each row's label window, which keeps the training folds and the holdout apart. |
+| `pack_config.max_rows` | whole number >= 1 | 20000 | The sidecar's row cap for one JSON `/dataset` export (one per symbol and pip size). |
+| `pack_config.pips.<symbol>` | list of numbers > 0 | none | Pip sizes to train for that symbol, each one an export and a segment of its own. Without it the sidecar's pip size for the symbol is used. |
+
+`sl_pips`, `tp_pips`, `tp2_pips` and `horizon` are stored with the trained version, and its decisions ask the sidecar
+for features with the values it was trained with: an edit takes effect at the next `rlcd train`.
+
 ## A pack of your own
 
 A custom pack (`pack: my_pkg.my_pack:Pack`) is not checked inside `pack_config` until it says which keys it
@@ -441,7 +464,7 @@ Secrets are read from the environment only. A value in `rlcd.yaml` that looks li
 | `RLCD_PACK` | The pack when `rlcd.yaml` names none (or there is no `rlcd.yaml`). |
 | `RLCD_API_KEY` | Secret. When set, every route except `/health` and `/ready` needs `Authorization: Bearer <key>`; the Python client sends it. `rlcd serve` on a host that is not loopback refuses to start without it. |
 | `RLCD_ADMIN_KEY` | Secret. When set, training, the kill switch and confirmations (`POST /v1/train`, `POST /v1/automation`, `POST /v1/receipts/{id}/confirm`) need this key instead. It protects only those three routes: without `RLCD_API_KEY` everything else stays open. |
-| `RLCD_ALLOW_REMOTE` | `1` lets connectors and judges reach hosts that are not loopback (as `security.allow_remote`). |
+| `RLCD_ALLOW_REMOTE` | `1` lets connectors, judges and the trading pack's `quant_url` reach hosts that are not loopback (as `security.allow_remote`). |
 | `RLCD_AUTOMATION` | `off` forces the kill switch off: every decision is capped at confirm and the API cannot switch it back on. |
 | `RLCD_MAX_BODY_BYTES` | Largest request body the API accepts (default 16 MiB). |
 | `RLCD_URL` | Where the Python client finds the service (default `http://127.0.0.1:8095`). |
@@ -463,9 +486,10 @@ the server next to it. `GET /health` shows what the server runs with (`model`, `
 |---|---|---|
 | `policy.*` (thresholds, `abstain`, `min_verify_rows`, `gate_min_p_above`, `overrides`) | after `rlcd train`: a version serves the policy stored in its bundle, the one its holdout verified | after a retrain that read the edited file: `rlcd train`, or a restart followed by `POST /v1/train` (the server trains with the file it read at start). The new version is then served without another restart |
 | `heads.<head>.stakes` and the other head fields (`type`, `classes`, `model`, `decision`, `conformal`, ...) | after `rlcd train`: a trained head is served as it was trained | after `rlcd train`, as above |
-| `heads.<head>.enabled` (in the tabular pack also `pack_config.targets.<head>.enabled`, and removing a target) | at once | restart |
+| `heads.<head>.enabled` (in the tabular pack also `pack_config.targets.<head>.enabled`, and removing a target; in the trading pack removing an interval) | at once | restart |
 | `train.*` | the next `rlcd train` | restart, then the next `POST /v1/train` |
-| `pack_config`: what features are built from (tabular: the table and its columns; documents: the encoder, chunking) | after `rlcd train` (documents: `rlcd ingest` first): the trained schema and encoder are stored in the bundle | after `rlcd train`, as above |
+| `pack_config`: what features are built from (tabular: the table and its columns; documents: the encoder, chunking; trading: `symbols`, a new interval, `sl_pips`, `tp_pips`, `tp2_pips`, `horizon`, `max_rows`, `pips`) | after `rlcd train` (documents: `rlcd ingest` first): the trained schema and encoder are stored in the bundle | after `rlcd train`, as above |
+| `pack_config.quant_url` (trading) | at once | restart |
 | `pack_config`: decide-time settings of the documents pack (`retrieve_k`, `max_evidence_age_days`, `require_evidence_dates`, `feature_cache`, and what opening the corpus reads: `rrf_k`, `vector.backend`, `graph.terms`, `graph.max_fanout`, `graph.hub_share`, `graph.hub_min`, `on_encoder_change`; new `graph.terms` link chunks only after a re-ingest) | at once | restart |
 | `pack_config.vector` / `graph`: the store that holds the index (an index-mode store's `kind`, `collection`, `table` or `database`) | after `rlcd ingest`, which writes the existing chunks into the new store; until then the corpus refuses to open (`connector_config`: decide answers without candidates) | after that `rlcd ingest`, then restart |
 | `pack_config.vector` / `graph`: every other store key (`url`, the `*_env` names, field mappings, Cypher templates, `timeout`, ...), and a store in attach mode, which holds no index of open-rlcd's | at once | restart |

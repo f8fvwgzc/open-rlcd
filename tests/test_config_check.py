@@ -25,7 +25,7 @@ from open_rlcd.core.contract import ContractError, TrainRequest
 from open_rlcd.core.head import HeadSpec
 from open_rlcd.core.routes import RESERVED, RouteBook
 from open_rlcd.core.service import RECEIPT_MODES, Service
-from open_rlcd.packs.base import load_pack
+from open_rlcd.packs.base import BUILTIN, load_pack
 from open_rlcd.packs.tabular.data import BASE_KEYS, SPEC_KEYS, TARGET_KEYS, TOLERATED_KEYS
 from tests.toypack import ToyPack
 
@@ -56,7 +56,7 @@ def write(tmp_path, data: dict | str, name: str = "p") -> Path:
 
 # ----------------------------------------------------------------------------- valid files are never refused
 
-@pytest.mark.parametrize("pack", ["documents", "tabular"])
+@pytest.mark.parametrize("pack", ["documents", "tabular", "trading"])
 def test_what_rlcd_init_writes_has_no_findings(tmp_path, pack, capsys):
     assert main(["init", str(tmp_path / pack), "--pack", pack]) == 0
     project, findings = CC.check_file(tmp_path / pack)
@@ -620,7 +620,7 @@ def _documented() -> tuple[set[str], dict[str, set[str]]]:
         m = re.match(r"^\| `([a-z0-9_]+(?:\.[a-z0-9_<>]+)*)` \|", line)
         if not m:
             continue
-        pack = next((p for p in ("documents", "tabular") if f"`pack_config` of the {p} pack" in section), None)
+        pack = next((p for p in BUILTIN if f"`pack_config` of the {p} pack" in section), None)
         if pack:
             packs.setdefault(pack, set()).add(m.group(1))
         else:
@@ -631,7 +631,7 @@ def _documented() -> tuple[set[str], dict[str, set[str]]]:
 def test_the_reference_page_lists_exactly_the_keys_the_check_knows():
     core, packs = _documented()
     assert core == set(CC.known_keys())
-    assert set(packs) == {"documents", "tabular"}
+    assert set(packs) == set(BUILTIN) == {"documents", "tabular", "trading"}
     for name, keys in packs.items():
         assert keys == set(CC.known_keys(load_pack(name))), name
     text = DOC.read_text(encoding="utf-8")
@@ -682,12 +682,14 @@ def _empty(tmp_path, key: str, pack: str) -> tuple[dict, list[dict]]:
     errors config check reports on it."""
     parts = key.split(".")
     head = "churned" if pack == "tabular" else ("response_type" if parts[0] == "routes" else "answerable")
-    fill = {"<head>": head, "<level>": "low", "<battery>": "pre", "<option>": "direct_answer"}
+    fill = {"<head>": head, "<level>": "low", "<battery>": "pre", "<option>": "direct_answer", "<symbol>": "XAUUSD"}
     path = [fill.get(p, p) for p in parts]
     if pack == "tabular":
         (tmp_path / "data.csv").write_text(TABLE, encoding="utf-8")
         target = {"label": "churned"} if path[1] in SHORTHAND else {"targets": {"churned": {"label": "churned"}}}
         data: dict = {"pack": "tabular", "pack_config": {"data": "data.csv", **target}}
+    elif pack == "trading":
+        data = {"pack": "trading"}
     elif parts[0] == "batteries":
         data = {"batteries": {"pre": {"version": "1", "questions": {"q": {"type": "noul", "head": "answerable"}}}}}
     else:
@@ -705,10 +707,10 @@ def test_the_reference_page_names_every_key_whose_empty_value_is_an_error(tmp_pa
     default except where the page's other bullets say otherwise (`heads.<head>.conformal:` removes the pack's
     promise, `rollout.limited.stakes:` means no level, `routes.<head>.<option>:` is an empty contract, which a
     `fallback` may name, unlike a missing option). Checked both ways on the check itself: each listed key,
-    written empty, is an error, and every other key of the schema and of both packs' pack_config is accepted,
-    except one the tables mark required. (The check's own `Key.nullable` flags miss the errors that its validators
-    raise.) Head fields, which this sweep fills with one noul head, are swept for every head type by the next
-    test."""
+    written empty, is an error, and every other key of the schema and of every built-in pack's pack_config is
+    accepted, except one the tables mark required. (The check's own `Key.nullable` flags miss the errors that its
+    validators raise.) Head fields, which this sweep fills with one noul head, are swept for every head type by the
+    next test."""
     bullet = DOC.read_text(encoding="utf-8").split("* **An empty value is an error**", 1)[1].split("\n* **", 1)[0]
     named: set[str] = set()
     parent = ""
@@ -721,11 +723,11 @@ def test_the_reference_page_names_every_key_whose_empty_value_is_an_error(tmp_pa
             word = f"{parent}.{word}"
         named |= {f"train.{k}" for k in CC.schema()["train"].keys} if word == "train.*" else {word}
     want = _not_nullable(CC.schema())
-    for pack in ("documents", "tabular"):
+    for pack in BUILTIN:
         want |= _not_nullable(CC._pack_keys(load_pack(pack)) or {}, "pack_config.")
     assert want <= named, want - named
     swept = [("documents", k) for k in _paths(CC.schema()) if k != "pack_config"]
-    swept += [(p, k) for p in ("documents", "tabular") for k in _paths(CC._pack_keys(load_pack(p)) or {}, "pack_config.")]
+    swept += [(p, k) for p in BUILTIN for k in _paths(CC._pack_keys(load_pack(p)) or {}, "pack_config.")]
     assert named <= {k for _, k in swept}, named - {k for _, k in swept}
     required = _required()
     assert {"batteries.<battery>.version", "pack_config.targets.<head>.label"} <= required <= {k for _, k in swept}

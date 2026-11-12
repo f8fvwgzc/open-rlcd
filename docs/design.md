@@ -81,7 +81,7 @@ the interfaces the packages build against.
   agreement, freshness, authority, graph path length / degree, query-term coverage of the evidence). An offline
   `hashing` encoder (signed char n-gram feature hashing) needs no download; tests and the demo bundle use it.
 * **Packs**: `documents` (RAG router / gatekeeper / evaluator), `tabular` (CSV / Parquet: churn, fraud, lead
-  scoring, approvals), `trading` (M8, its own pull request: a thin HTTP adapter to the View Engine quant
+  scoring, approvals), `trading` (a thin HTTP adapter to the View Engine quant
   sidecar's `/dataset` and `/features`; no trading logic copied).
 * **Connectors**: a local FAISS -> hnswlib -> exact numpy vector index and a local NetworkX entity graph by
   default; Qdrant, pgvector and Neo4j (optional extras, M7) in **index** mode (open-rlcd writes its own chunks /
@@ -117,8 +117,7 @@ open_rlcd/
     service.py           Service: answer questions / rank / decide / evaluate / feedback (no HTTP)
     jobs.py              Trainer: one background training job at a time
   features/  text.py  lexical.py  retrieval.py
-  packs/     base.py (Pack, FeatureProvider protocols, loader, dataset_from_labels)  documents/  tabular/
-             (trading/ arrives with M8)
+  packs/     base.py (Pack, FeatureProvider protocols, loader, dataset_from_labels)  documents/  tabular/  trading/
   connectors/ base.py  security.py  local_vector.py  local_graph.py  factory.py
              qdrant.py  pgvector.py  neo4j.py   (optional extras, imported only when configured)
   labeling/  judges.py  store.py  bootstrap.py  audit.py  active.py

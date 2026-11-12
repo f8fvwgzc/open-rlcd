@@ -1,0 +1,7 @@
+# Trading adapter pack: a thin HTTP client of the View Engine quant sidecar's /dataset and /features contract.
+# No trading logic lives here: features and labels come from the sidecar. Analysis tool, not financial advice.
+# One head per configured interval is generated at load time:
+#   setup:<interval>   choice [buy, sell, hold]: from this candle's close, which action reached its target before
+#                      its stop within the horizon (labels computed by the sidecar)
+policy:
+  abstain: hold

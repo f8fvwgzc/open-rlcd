@@ -30,15 +30,13 @@ def run(root: Path, *argv: str) -> int:
 
 
 def test_init_writes_a_project_per_pack(tmp_path):
-    for pack in ("documents", "tabular"):
+    for pack in ("documents", "tabular", "trading"):
         assert main(["init", str(tmp_path / pack), "--pack", pack]) == 0
         cfg = yaml.safe_load((tmp_path / pack / "rlcd.yaml").read_text())
         assert cfg["pack"] == pack and cfg["home"] == "./var" and cfg["security"]["allow_remote"] is False
         assert "var/" in (tmp_path / pack / ".gitignore").read_text()
     assert main(["init", str(tmp_path / "documents")]) == 1          # refuses to overwrite without --force
-    with pytest.raises(SystemExit):                                   # F34: no trading pack on this branch
-        main(["init", str(tmp_path / "trading"), "--pack", "trading"])
-    assert not (tmp_path / "trading" / "rlcd.yaml").exists()
+    assert yaml.safe_load((tmp_path / "trading" / "rlcd.yaml").read_text())["policy"]["abstain"] == "hold"
 
 
 def test_demo_trains_and_report_writes_card_and_page(demo, capsys):
