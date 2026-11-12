@@ -906,10 +906,13 @@ def _patch_table(res: dict) -> str:
 
 
 def cmd_patch(args: argparse.Namespace) -> int:
-    """EXPERIMENTAL. Exit status: 0 = promoted to rlcd-latest, 3 = kept as a non-latest version, 1 = refused."""
+    """EXPERIMENTAL. Exit status: 0 = promoted to rlcd-latest, 3 = kept as a non-latest version, 1 = refused,
+    2 = a usage or rlcd.yaml error (nothing was started)."""
     from .core import patch as PT
 
     svc = _service(args)
+    if not _config_ok(svc, block=True):       # it re-derives holdouts with the project's train settings, like a train
+        return 2
     common = {"base": args.base, "author": args.author, "tuned_on": args.tuned_on,
               "tuned_on_ids": _read_ids(args.tuned_on_ids), "description": args.description}
     try:
@@ -933,7 +936,8 @@ def cmd_patch(args: argparse.Namespace) -> int:
         for n in res.get("notes") or []:
             print(f"note: {n}")
         if res.get("promoted"):
-            print(f"\n{res['version']} is now rlcd-latest: {res['reason']}.")
+            print(f"\n{res['version']} is now rlcd-latest: {res['reason']}. `rlcd rollback` returns to "
+                  f"{res['base_version']}; `rlcd check` runs the pre-launch checklist on {res['version']}.")
         else:
             served = "it can be served by name" if res.get("servable") else "it is never served"
             print(f"\n{res['version']} is kept, NOT promoted ({served}): {res['reason']}.")

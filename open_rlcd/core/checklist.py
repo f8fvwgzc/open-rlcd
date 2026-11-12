@@ -863,7 +863,8 @@ def _rollback(ctx: _Ctx) -> Outcome:
     if not reg.get("versions"):
         return "warn", "no trained version yet: there is nothing to roll back to"
     latest = registry.latest_id()
-    # only an operator's move rehearses the rollback: every train also appends a history entry (kind "train")
+    # only an operator's move rehearses the rollback: every train, import and promoted `rlcd patch` also appends a
+    # history entry (kinds "train", "import", "patch")
     moves = sum(1 for h in reg.get("history") or [] if isinstance(h, dict) and h.get("kind") in ("promote", "rollback"))
     drill = (f"rlcd-latest has been moved {moves} time(s) by promote / rollback" if moves else
              "rlcd-latest has never been moved by promote / rollback: rehearse `rlcd rollback` and `rlcd promote` "

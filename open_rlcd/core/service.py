@@ -50,7 +50,7 @@ from .digest import digest
 from .feedback import FeedbackLog
 from .head import HeadSpec
 from .redact import kinds_from_config, redact
-from .registry import Registry, UnknownModel
+from .registry import NotServable, Registry, UnknownModel
 from .rollout import AutomationSwitch, Rollout, effective_cap
 from .routes import Constraints, RouteBook
 from .training import now_iso
@@ -218,12 +218,16 @@ class Service:
             raise ContractError(f"unknown model {model!r}", kind="unknown_model",
                                 available=self.registry.available()) from None
         if serve and not self.registry.servable(version):
-            reason = ((self.registry.entry(version) or {}).get("edit") or {}).get("reason")
-            raise ContractError(f"model {version} is a weight-edit candidate that did not pass its holdout gate "
-                                f"({reason}); it is kept for inspection and never serves", kind="unknown_model",
-                                available=[v for v in self.registry.available()
-                                           if v == LATEST or self.registry.servable(v)])
+            raise self._never_serves(version)
         return version
+
+    def _never_serves(self, version: str, reason: str | None = None) -> ContractError:
+        """The 422 for a weight-edit candidate whose holdout gate failed, asked to answer or to become latest."""
+        reason = reason or ((self.registry.entry(version) or {}).get("edit") or {}).get("reason")
+        return ContractError(f"model {version} is a weight-edit candidate that did not pass its holdout gate "
+                             f"({reason}); it is kept for inspection and never serves", kind="unknown_model",
+                             available=[v for v in self.registry.available()
+                                        if v == LATEST or self.registry.servable(v)])
 
     def bundle(self, version: str) -> Bundle | None:
         return self.registry.bundle(version)
@@ -1422,13 +1426,16 @@ class Service:
 
     def promote(self, version: str, *, reason: str | None = None, by: str | None = None,
                 kind: str = "promote") -> dict:
-        """Point rlcd-latest at `version` (kind "rollback" or "promote"): no retrain, no code change."""
+        """Point rlcd-latest at `version` (kind "rollback" or "promote"): no retrain, no code change. A weight-edit
+        candidate whose holdout gate failed is refused: it never serves."""
         reason, by = self._redacted(reason, by)
         try:
             return self.registry.set_latest(version, reason=reason, by=by, kind=kind)
         except UnknownModel:
             raise ContractError(f"unknown model {version!r}", kind="unknown_model",
                                 available=self.registry.available()) from None
+        except NotServable as e:
+            raise self._never_serves(e.version, e.reason) from None
 
     # ------------------------------------------------------------------ batteries
     def batteries_view(self, model: str | None = None) -> dict:

@@ -10,9 +10,11 @@
 touches some heads carries the others over unchanged, so a version always describes the whole model. Bundles
 are only ever loaded from inside RLCD_HOME (registry.json is data: a path in it that escapes the home is refused).
 
-A weight-edit candidate (core/patch.py, `commit_edit`) is a version like any other, plus an `edit` record. It
-becomes rlcd-latest only when its holdout gate passed and its base is still rlcd-latest; one whose gate failed is
-kept for inspection and never served (`servable`).
+A weight-edit candidate (core/patch.py, `commit_edit`) is a version like any other, plus an `edit` record: it is
+committed under the same locks, a promotion is recorded in `history` (kind "patch"), and `rlcd rollback` leaves it
+like any other version. It becomes rlcd-latest only when its holdout gate passed and its base is still
+rlcd-latest; one whose gate failed is kept for inspection and never served (`servable`), so it is never made
+latest either (`set_latest` refuses it, `previous_latest` skips it).
 """
 from __future__ import annotations
 
@@ -32,6 +34,14 @@ from .training import now_iso
 
 class UnknownModel(Exception):
     pass
+
+
+class NotServable(Exception):
+    """A weight-edit candidate whose holdout gate failed: kept for inspection, never served, so never made latest."""
+
+    def __init__(self, version: str, reason: str | None = None):
+        super().__init__(version)
+        self.version, self.reason = version, reason
 
 
 def default_home() -> Path:
@@ -85,9 +95,9 @@ class Registry:
 
     def servable(self, version: str) -> bool:
         """False only for a weight-edit candidate whose holdout gate failed: it stays addressable for reports and
-        exports, but no request is ever answered with it."""
-        e = self.entry(version) or {}
-        return (e.get("edit") or {}).get("servable", True) is not False
+        exports, but no request is ever answered with it, and it is never made latest (`set_latest` refuses it,
+        `previous_latest` skips it)."""
+        return _servable(self.entry(version) or {})
 
     def edit_attempts(self, head: str, holdout_sha256: str) -> int:
         """How many edit candidates of `head` this home has already scored on the holdout with this id hash. Each
@@ -168,7 +178,8 @@ class Registry:
 
     def _restart_ledger(self, vid: str, prev_vid: str | None, trained: dict[str, Any],
                         carried: dict[str, tuple[Path, dict]]) -> None:
-        """`vid` just became rlcd-latest: the Bernoulli ledger of each new head restarts from its new holdout."""
+        """`vid` just became rlcd-latest over `prev_vid` (a train, or a weight edit promoted over its base; called
+        under the registry's locks): the Bernoulli ledger of each new head restarts from its new holdout."""
         for name, th in trained.items():
             self.ledger.reset(name, {**th.ledger, "model_version": vid, "valid_for": [vid]})
         # A carried-over head is the very same model, so its evidence (holdout counts plus the outcomes scored
@@ -193,15 +204,19 @@ class Registry:
     def commit_edit(self, base_version: str, trained: dict[str, Any], *, edit: dict, carry: bool = True,
                     pack: dict | None = None, feature_version: str | None = None, encoder: dict | None = None,
                     data_card: dict | None = None, notes: list[str] | None = None) -> dict:
-        """Save a weight-edit candidate as a new version and decide, under the lock, whether it serves.
+        """Save a weight-edit candidate as a new version and decide, under the registry's locks, whether it serves.
 
         `trained`: the edited (head edit) or retrained (encoder edit) heads, already scored on the base's holdout;
         `carry`: copy the base version's other heads unchanged (a head edit; an encoder edit changes every head's
         features, so nothing is carried); `edit["passed"]` / `edit["reasons"]`: the gate's result (core/patch.py).
         The candidate becomes rlcd-latest only if the gate passed AND `base_version` is still rlcd-latest (an edit
-        is judged against its base, not against whatever is newer). Otherwise it is kept as a non-latest version
-        with the reason; a candidate whose gate failed is never served. Returns the final edit record + version."""
-        with self._lock:
+        is judged against its base, not against whatever is newer), read inside the same inter-process lock as
+        `commit`, `import_` and `set_latest`, so a train or a promote in another process cannot slip in between.
+        A promotion is recorded in `history` (kind "patch") like a train or an import, so `rlcd rollback` returns
+        to the base. Otherwise the candidate is kept as a non-latest version with the reason (nothing moves, so
+        nothing is recorded in `history`); a candidate whose gate failed is never served. Returns the final edit
+        record + version."""
+        with self._lock, self._file_lock:
             reg = self.registry()
             base = self.bundle(base_version)
             if base is None:
@@ -234,6 +249,9 @@ class Registry:
             self._register(reg, vid, meta, {"edit": edit_summary(edit)})
             if not promoted:
                 reg["latest"] = latest_before
+            if reg["latest"] == vid and latest_before != vid:
+                reg.setdefault("history", []).append({"at": now_iso(), "from": latest_before, "to": vid,
+                                                      "reason": None, "by": None, "kind": "patch"})
             self._write(reg)
             if promoted:
                 self._restart_ledger(vid, base_version, trained, carried)
@@ -244,11 +262,14 @@ class Registry:
         """Point `rlcd-latest` at an existing version (rollback or promotion), recorded in registry.json `history`.
         Each head of that version then gates on evidence that belongs to it: a Bernoulli table that is valid for the
         version (a carried-over head) is kept, any other restarts from the version's own holdout table (outcomes
-        scored for the version that was latest stay with that version's table, which is replaced)."""
+        scored for the version that was latest stay with that version's table, which is replaced). A weight-edit
+        candidate whose holdout gate failed never serves, so it is refused (`NotServable`)."""
         with self._lock, self._file_lock:
             reg = self.registry()
             if version not in reg["versions"]:
                 raise UnknownModel(version)
+            if not _servable(reg["versions"][version]):
+                raise NotServable(version, (reg["versions"][version].get("edit") or {}).get("reason"))
             prev = reg["latest"]
             if prev == version:
                 return {"latest": version, "previous": prev, "changed": False}
@@ -275,7 +296,8 @@ class Registry:
         """The version to roll back to (`rlcd rollback` without --to): the version that was latest before the
         current one became latest, skipping every version that was rolled back from and not made latest again
         since (a second rollback must not re-promote the version the first one removed, but a version promoted back
-        after a rollback is a good one again). Without history: the newest older version."""
+        after a rollback is a good one again). Without history: the newest older version. Never a weight-edit
+        candidate whose holdout gate failed: it never serves."""
         reg = self.registry()
         hist = reg.get("history") or []
         latest = reg["latest"]
@@ -284,18 +306,20 @@ class Registry:
             rolled_back.discard(h.get("to"))
             if h.get("kind") == "rollback":
                 rolled_back.add(h.get("from"))
+        never = {v for v, e in reg["versions"].items() if not _servable(e)}
         cur, seen = latest, {latest}
         for h in reversed(hist):
             if h.get("to") != cur:
                 continue
             cand = h.get("from")
-            if cand in reg["versions"] and cand not in rolled_back and cand not in seen:
+            if cand in reg["versions"] and cand not in rolled_back and cand not in never and cand not in seen:
                 return cand
             if cand is None or cand in seen:
                 break
             seen.add(cand)
             cur = cand
-        older = [v for v in reg["versions"] if _vkey(v) < _vkey(latest or "") and v not in rolled_back]
+        older = [v for v in reg["versions"] if _vkey(v) < _vkey(latest or "") and v not in rolled_back
+                 and v not in never]
         return max(older, key=_vkey) if older else None
 
     # ------------------------------------------------------------------ export / import
@@ -356,6 +380,11 @@ class Registry:
                 if make_latest:
                     self.ledger.reset(name, {**table, "model_version": vid, "valid_for": [vid]})
             return vid
+
+
+def _servable(entry: dict) -> bool:
+    """A registry.json version entry serves unless it is a weight-edit candidate whose holdout gate failed."""
+    return (entry.get("edit") or {}).get("servable", True) is not False
 
 
 def edit_summary(edit: dict) -> dict:

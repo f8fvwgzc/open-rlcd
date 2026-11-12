@@ -8,7 +8,10 @@
   (e) the holdout only judges: edits tuned on holdout rows are refused before anything is scored, and every
       further candidate scored on the same holdout faces a tighter bound;
   (f) an edit is judged against its base: changed rows, a moved rlcd-latest, malformed deltas and LightGBM members
-      are refused or not promoted.
+      are refused or not promoted;
+  (g) an edit is a version like any other (M10, M11): its promotion is in registry.json `history`, `rlcd rollback`
+      returns to its base with the base's own Bernoulli evidence, `rlcd check` passes on it (rollback.ready,
+      regressions.cases), and a failed candidate can never be made latest (promote, rollback, rollback --to).
 """
 import json
 import shutil
@@ -21,12 +24,14 @@ from safetensors.numpy import save_file
 from open_rlcd import LATEST
 from open_rlcd.cli import main
 from open_rlcd.core import bundle as BD
+from open_rlcd.core import checklist as CL
 from open_rlcd.core import metrics as M
 from open_rlcd.core import patch as PT
+from open_rlcd.core import regress as RG
 from open_rlcd.core.config import Project, write_config
 from open_rlcd.core.contract import ContractError, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import CalibratedEnsemble, HeadSpec, lightgbm_available
-from open_rlcd.core.registry import Registry
+from open_rlcd.core.registry import NotServable, Registry
 from open_rlcd.core.service import Service
 from open_rlcd.core.training import TrainConfig, train_head
 from open_rlcd.report.model_card import model_card
@@ -311,6 +316,119 @@ def test_paired_gain_test_needs_a_reliable_gain_on_both_scores():
         M.paired_gain_test(flat, good, y)["brier"]["lower"]
 
 
+# ----------------------------------------------------------------------------- (g) a version like any other
+
+KW = dict(pack={"name": "p"}, feature_version="f1", encoder=None, policy={})
+
+
+def _edit(passed: bool) -> dict:
+    return {"kind": "head", "passed": passed, "reasons": [] if passed else ["worse on the holdout"]}
+
+
+def test_g_a_promotion_is_in_the_history_and_a_failed_candidate_is_never_made_latest(tmp_path):
+    """registry.json `history` records each move of rlcd-latest (train, import, promote, rollback): a promoted edit
+    is one more (kind "patch"), a candidate kept out of service moves nothing. A failed candidate is never made
+    latest: `set_latest` (rlcd promote, rlcd rollback --to) refuses it and `previous_latest` (rlcd rollback)
+    skips it."""
+    reg = Registry(tmp_path / "home")
+    v1 = reg.commit({}, **KW)
+    failed = reg.commit_edit(v1, {}, edit=_edit(False))
+    promoted = reg.commit_edit(v1, {}, edit=_edit(True))
+    kept = reg.commit_edit(v1, {}, edit=_edit(True))            # judged against v1, which is no longer latest
+    assert not failed["promoted"] and not failed["servable"]
+    assert promoted["promoted"] and not kept["promoted"] and kept["servable"]
+    hist = reg.registry()["history"]
+    assert [(h["kind"], h["from"], h["to"]) for h in hist] == [("train", None, v1), ("patch", v1, promoted["version"])]
+    assert reg.latest_id() == promoted["version"] and reg.previous_latest() == v1
+    with pytest.raises(NotServable) as e:
+        reg.set_latest(failed["version"], kind="rollback")
+    assert e.value.version == failed["version"] and "worse on the holdout" in e.value.reason
+    assert reg.latest_id() == promoted["version"] and len(reg.registry()["history"]) == 2
+    assert reg.set_latest(kept["version"])["changed"]           # a candidate that passed can be promoted by name
+
+    # without a history chain to follow, `rlcd rollback` takes the newest older version that serves
+    reg = Registry(tmp_path / "other")
+    v1 = reg.commit({}, **KW)
+    bad = reg.commit_edit(v1, {}, edit=_edit(False))["version"]
+    v3 = reg.commit({}, **KW)
+    reg.commit({}, **KW)
+    reg.set_latest(v3, kind="rollback")
+    assert reg.previous_latest() == v1 != bad
+
+
+def test_g_rollback_after_a_patch_returns_to_the_base_with_its_own_evidence(tmp_path):
+    svc = trained_service(tmp_path)
+    base = svc.registry.latest_id()
+    cls = svc.ledger.table("good")["classes"][0]
+    assert svc.ledger.update("good", "before-edit", cls, 0.95, cls)["updated"]          # an outcome the base earned
+    failed = PT.edit_head(svc, head="clean", delta_path=flip_delta(svc, tmp_path / "flip.safetensors"), **manual())
+    res = PT.edit_head(svc, head="good", delta_path=no_leak_delta(svc, tmp_path / "noleak.safetensors"), **manual())
+    vid = res["version"]
+    assert not failed["servable"] and res["promoted"] and svc.registry.latest_id() == vid
+    hist = svc.registry.registry()["history"]
+    assert [h["kind"] for h in hist] == ["train", "patch"] and (hist[-1]["from"], hist[-1]["to"]) == (base, vid)
+    assert svc.ledger.table("good")["applied"] == []                  # the edited head starts from its own holdout
+    assert svc.ledger.update("good", "after-edit", cls, 0.95, cls)["updated"]
+
+    # `rlcd rollback`: back to the base, not to the failed candidate saved in between
+    assert svc.registry.previous_latest() == base
+    out = svc.promote(svc.registry.previous_latest(), reason="drill", by="qa", kind="rollback")
+    assert out["latest"] == base and out["ledger_restarted"] == ["good"]   # the carried head's table serves both
+    good = svc.ledger.table("good")
+    assert good["model_version"] == base and good["applied"] == ["before-edit"]          # the base's own evidence
+    assert base in svc.ledger.table("clean")["valid_for"]
+    assert [h["kind"] for h in svc.registry.registry()["history"]] == ["train", "patch", "rollback"]
+    ask = SystemOneRequest(state={"f": [0.1] * 6, "leak": 0.0}, questions={"good": {"type": "noul"}})
+    assert svc.systemone(ask)["model"] == base
+    assert svc.registry.previous_latest() is None      # neither the rolled-back edit nor the failed candidate
+
+    # the failed candidate cannot be promoted; the edit can, and gets its own evidence back
+    for kind in ("promote", "rollback"):
+        with pytest.raises(ContractError) as e:
+            svc.promote(failed["version"], by="qa", kind=kind)
+        assert e.value.kind == "unknown_model" and "never serves" in e.value.message
+        assert failed["version"] not in e.value.details["available"]
+    assert svc.registry.latest_id() == base and len(svc.registry.registry()["history"]) == 3
+    assert svc.promote(vid, by="qa")["ledger_restarted"] == ["good"]
+    assert svc.ledger.table("good")["applied"] == ["after-edit"]
+
+
+def test_g_rlcd_check_passes_on_a_patched_version(tmp_path):
+    """M10's pre-launch checklist on a promoted edit: `rlcd rollback` would return to the base (rollback.ready), not
+    to a failed candidate saved in between, and the project's regression cases are judged on the edited head and
+    pass (regressions.cases)."""
+    svc = trained_service(tmp_path)
+    base = svc.registry.latest_id()
+    PT.edit_head(svc, head="clean", delta_path=flip_delta(svc, tmp_path / "flip.safetensors"), **manual())
+    res = PT.edit_head(svc, head="good", delta_path=no_leak_delta(svc, tmp_path / "noleak.safetensors"), **manual())
+    vid = res["version"]
+    assert res["promoted"]
+    # regression cases from the base's answers, on states where the edit gives the same class
+    states = [{"f": [2.0, -1.0, 0.5, 1.0, 0.0, -0.5], "leak": 0.0}, {"f": [-2.0, 1.0, 0.0, 0.0, 1.5, 0.3], "leak": 0.0},
+              {"f": [1.5, 1.5, 1.5, 1.5, 1.5, 1.5], "leak": 0.0}, {"f": [-1.5] * 6, "leak": 0.0}]
+    path = RG.cases_path(svc.project)
+    probs = {}
+    for head in ("good", "clean"):
+        spec = svc.spec(head, base)
+        for i, s in enumerate(states):
+            pb, pe = (svc.probabilities(v, spec, [s])[0][0] for v in (base, vid))
+            if pb.argmax() == pe.argmax():
+                RG.add_case(path, {"kind": "head", "head": head, "state": s,
+                                   "expect": {"class": spec.labels[int(pb.argmax())]}})
+                probs[(head, i)] = (pb, pe)
+    assert any(h == "good" for h, _ in probs) and any(h == "clean" for h, _ in probs)
+    assert any(not np.allclose(pb, pe) for (h, _), (pb, pe) in probs.items() if h == "good")   # the edit is judged
+    res = CL.run(svc)
+    c = {x["id"]: x for x in res["checks"]}
+    assert res["model"] == vid and res["ok"] is True, [x for x in res["checks"] if x["status"] == "fail"]
+    assert c["rollback.ready"]["status"] == "pass" and f"({vid}) at {base}" in c["rollback.ready"]["detail"]
+    assert c["regressions.cases"]["status"] == "pass" and f"pass on {vid}" in c["regressions.cases"]["detail"]
+    assert c["model.bundle"]["status"] == "pass" and c["thresholds.holdout"]["status"] == "pass"
+    assert c["skill.good"]["status"] == "pass"         # the edit has skill where the base had none
+    back = CL.run(svc, model=base)                     # and the version `rlcd rollback` returns to passes them too
+    assert back["ok"] is True and {x["id"]: x for x in back["checks"]}["regressions.cases"]["status"] == "pass"
+
+
 # ----------------------------------------------------------------------------- CLI
 
 def test_cli_patch_exit_status_says_promoted_kept_or_refused(tmp_path, capsys):
@@ -335,3 +453,55 @@ def test_cli_patch_exit_status_says_promoted_kept_or_refused(tmp_path, capsys):
     assert res["promoted"] and res["version"] == "rlcd-0.1.3"
     assert main([*rl, "report", "--no-open", "--model", "rlcd-0.1.2"]) == 0     # a rejected candidate can be inspected
     assert main([*rl, "patch", "--delta", str(good), "--author", "manual", "--tuned-on", "none"]) == 2
+
+
+def test_cli_rollback_after_a_patch_and_no_way_to_promote_a_failed_candidate(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_config(root / "rlcd.yaml", {"name": "leak", "pack": "tests.leakpack:LeakPack", "home": "./var"})
+    rl = ["--project", str(root), "--home", str(root / "var")]
+    assert main([*rl, "train"]) == 0
+    svc = Service(Project(root=root, data={"pack": "tests.leakpack:LeakPack"}), home=root / "var")
+    flip = flip_delta(svc, tmp_path / "flip.safetensors")
+    good = no_leak_delta(svc, tmp_path / "noleak.safetensors")
+    assert main([*rl, "patch", "--delta", str(flip), "--head", "clean", "--author", "manual", "--tuned-on", "none"]) == 3
+    assert main([*rl, "patch", "--delta", str(good), "--head", "good", "--author", "manual", "--tuned-on", "none"]) == 0
+    assert "`rlcd rollback` returns to rlcd-0.1.1" in capsys.readouterr().out
+    assert main([*rl, "check"]) == 0                                         # the checklist passes on the edit
+    assert "rlcd check: model rlcd-0.1.3" in capsys.readouterr().out
+    assert main([*rl, "rollback", "--reason", "drill", "--by", "qa"]) == 0
+    assert json.loads(capsys.readouterr().out)["latest"] == "rlcd-0.1.1"
+    for argv in (["promote", "rlcd-0.1.2"], ["rollback", "--to", "rlcd-0.1.2"]):  # the failed candidate
+        assert main([*rl, *argv, "--by", "qa"]) == 1
+        assert "never serves" in capsys.readouterr().err
+    assert main([*rl, "promote", "rlcd-0.1.3", "--by", "qa"]) == 0
+    kinds = [h["kind"] for h in Registry(root / "var").registry()["history"]]
+    assert kinds == ["train", "patch", "rollback", "promote"]
+
+    # like `rlcd train`, `rlcd patch` works on a project: outside one it stops before reading or writing anything
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    for var in ("RLCD_PROJECT", "RLCD_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    assert main(["patch", "--delta", str(good), "--head", "good", "--author", "manual", "--tuned-on", "none"]) == 2
+    assert "works on a project" in capsys.readouterr().err and not (elsewhere / "var").exists()
+
+
+def test_cli_patch_refuses_to_start_on_an_rlcd_yaml_error(tmp_path, capsys):
+    """Like `rlcd train`, `rlcd patch` re-derives holdouts with the project's train settings: a broken rlcd.yaml
+    stops it before anything is read, scored or saved (`rlcd config check` says what is wrong)."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_config(root / "rlcd.yaml", {"name": "leak", "pack": "tests.leakpack:LeakPack", "home": "./var"})
+    rl = ["--project", str(root), "--home", str(root / "var")]
+    assert main([*rl, "train"]) == 0
+    svc = Service(Project(root=root, data={"pack": "tests.leakpack:LeakPack"}), home=root / "var")
+    good = no_leak_delta(svc, tmp_path / "noleak.safetensors")
+    write_config(root / "rlcd.yaml", {"name": "leak", "pack": "tests.leakpack:LeakPack", "home": "./var",
+                                      "train": {"holdout_fracton": 0.3}})
+    capsys.readouterr()
+    assert main([*rl, "patch", "--delta", str(good), "--head", "good", "--author", "manual", "--tuned-on", "none"]) == 2
+    err = capsys.readouterr().err
+    assert "train.holdout_fracton" in err and "nothing was started" in err
+    assert list(Registry(root / "var").registry()["versions"]) == ["rlcd-0.1.1"]

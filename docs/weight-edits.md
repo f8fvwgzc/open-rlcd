@@ -56,9 +56,11 @@ scored or saved).
    least the base's.
 6. **Promote, or keep with the reason.** The candidate becomes `rlcd-latest` only if every changed head passes
    **and** the base is still `rlcd-latest` (an edit is judged against its base, not against whatever is newer).
-   A candidate that passed but whose base has moved on is kept and can be served by name. A candidate that failed
-   is kept for inspection (`rlcd report --model <id>`, `/v1/calibration`) and **never serves**: every answering
-   path refuses it, and so does `rlcd import` of an exported copy.
+   That check and the save happen inside the registry's inter-process lock, so a `rlcd train`, `rlcd import` or
+   `rlcd promote` running beside it cannot slip in between. A candidate that passed but whose base has moved on
+   is kept and can be served by name. A candidate that failed is kept for inspection (`rlcd report --model <id>`,
+   `/v1/calibration`) and **never serves**: every answering path refuses it, `rlcd promote` and `rlcd rollback`
+   (with or without `--to`) never make it latest, and `rlcd import` of an exported copy keeps it out of service.
 
 An encoder edit changes every head's inputs, so every head must pass. To fix one head, edit that head.
 
@@ -90,6 +92,22 @@ all record:
 * the outcome and its reason.
 
 The policy caps of an edited head come from its `head.json`, the same as for any head.
+
+## After an edit
+
+A promoted edit is a version like any other ([control layer](control-layer.md)):
+
+* **History and rollback.** Its promotion is recorded in `registry.json` `history` (kind `patch`), like a train or
+  an import, so `rlcd rollback` returns to the version it edited. Each head gets its own Bernoulli evidence back:
+  the edited head the base's table, outcomes scored for the base included, and a carried-over head keeps its
+  table. A candidate kept out of service moves nothing and adds nothing to the history.
+* **Checks.** `rlcd check` runs the pre-launch checklist on it: `rollback.ready` names the version `rlcd rollback`
+  would return to, and `regressions.cases` runs the project's regression cases through the edited heads.
+  `rlcd replay` compares it with its base on logged decisions.
+* **Keep training on an edited encoder.** An encoder edit is served from `encoders/edited/<sha256>.onnx` in the
+  home, but `rlcd train` builds features from `pack_config.encoder` in rlcd.yaml. Until rlcd.yaml points there
+  too (`path: encoders/edited/<sha256>.onnx`, `sha256: <sha256>`; the path must stay inside the home), the next
+  train is on the original encoder again: a new feature version, so no edited head is carried over.
 
 ## Honest limits
 

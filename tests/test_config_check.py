@@ -25,6 +25,7 @@ from open_rlcd.core.contract import ContractError, TrainRequest
 from open_rlcd.core.head import HeadSpec
 from open_rlcd.core.routes import RESERVED, RouteBook
 from open_rlcd.core.service import RECEIPT_MODES, Service
+from open_rlcd.features.text import EncoderError, OnnxEncoder
 from open_rlcd.packs.base import BUILTIN, load_pack
 from open_rlcd.packs.tabular.data import BASE_KEYS, SPEC_KEYS, TARGET_KEYS, TOLERATED_KEYS
 from tests.toypack import ToyPack
@@ -450,6 +451,23 @@ def test_the_store_keys_are_the_ones_the_stores_read():
     row = re.search(r"^\| `pack_config\.vector\.batch_size` \|[^|]*\| ([^|]*) \|", DOC.read_text(encoding="utf-8"), re.M)
     pg_batch = inspect.signature(PG.PgVectorStore.__init__).parameters["batch_size"].default
     assert row and row.group(1) == f"{q.batch_size} (qdrant), {pg_batch} (pgvector)"
+
+
+def test_a_local_encoder_file_is_a_known_key_that_must_stay_inside_the_home(tmp_path):
+    """`rlcd patch --encoder` registers an edited encoder as encoders/edited/<sha256>.onnx in the home, and rlcd.yaml
+    may train on it (`pack_config.encoder.path`, with its own `tokenizer`). The check knows both keys and refuses,
+    in OnnxEncoder's own words, a path the encoder would refuse: absolute, or leaving the home."""
+    enc = {"kind": "onnx", "path": "encoders/edited/abc.onnx", "tokenizer": "encoders/edited/tokenizer.json",
+           "sha256": "abc"}
+    assert check(tmp_path, {"pack_config": {"encoder": enc}}) == []
+    rule = "must be relative to the home directory and stay inside it"
+    for key, bad in (("path", "/srv/models/e5.onnx"), ("path", "encoders/../../e5.onnx"), ("tokenizer", "../t.json")):
+        findings = check(tmp_path, {"pack_config": {"encoder": {**enc, key: bad}}})
+        where = f"pack_config.encoder.{key}"
+        assert [x["path"] for x in CC.errors(findings)] == [where]
+        assert rule in at(findings, where)
+    with pytest.raises(EncoderError, match=rule):                   # the same rule, at run time
+        OnnxEncoder._local(tmp_path, "../t.json", "tokenizer")
 
 
 def test_tabular_pack_config_keys(tmp_path):

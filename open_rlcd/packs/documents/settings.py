@@ -64,7 +64,8 @@ def retrieve_k(pack_config: dict) -> int:
 
 def config_keys() -> dict:
     """Every `pack_config` key the documents pack reads, with its type and default, for `rlcd config check`
-    (core/config_check.py). Where each is read: encoder -> features/text.py `make_encoder`; corpus, chunking ->
+    (core/config_check.py). Where each is read: encoder -> features/text.py `make_encoder` (`path` and `tokenizer`
+    must stay inside the home: `DocumentsPack.check_config`); corpus, chunking ->
     `DocumentsPack.ingest`; queries, label_top_k -> tasks.py; vector, graph, rrf_k, batch_size, on_encoder_change
     -> corpus.py `Corpus`; retrieve_k -> `retrieve_k` above; feature_cache -> `DocumentsPack.provider`;
     max_evidence_age_days, require_evidence_dates -> decide.py; allow_remote -> connectors/security.py.
@@ -119,6 +120,8 @@ def config_keys() -> dict:
             "quantize_locally": Key("bool", default=False),
             "sha256": Key("str"),
             "cache": Key("bool", default=True),
+            "path": Key("str"),          # a local ONNX file inside the home (an edited encoder, `rlcd patch`)
+            "tokenizer": Key("str"),     # its own tokenizer.json inside the home (else the Hub's of model_id)
         }),
         "corpus": Key("str"),
         "queries": Key("str"),

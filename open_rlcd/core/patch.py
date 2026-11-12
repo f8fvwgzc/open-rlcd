@@ -62,6 +62,7 @@ from .bundle import LoadedHead
 from .bundle import sha256 as file_sha256
 from .dataset import Dataset
 from .head import LogReg
+from .locks import unique_tmp
 from .policy import TIERS, PolicyConfig
 
 ALPHA = 0.05                                   # one-sided level of the paired test for a holdout's first edit
@@ -594,12 +595,14 @@ def edit_encoder(svc: Any, *, onnx_path: Path, base: str | None = None, author: 
     dest = svc.home / rel
     if not dest.is_file() or file_sha256(dest) != sha:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_suffix(".tmp")
-        shutil.copyfile(src, tmp, follow_symlinks=False)
-        if file_sha256(tmp) != sha:
+        tmp = unique_tmp(dest)        # another process may be registering the same file (core/locks.py)
+        try:
+            shutil.copyfile(src, tmp, follow_symlinks=False)
+            if file_sha256(tmp) != sha:
+                raise EditRefused(f"{src.name} changed while it was being copied")
+            os.replace(tmp, dest)
+        finally:
             tmp.unlink(missing_ok=True)
-            raise EditRefused(f"{src.name} changed while it was being copied")
-        os.replace(tmp, dest)
     new_cfg = {k: v for k, v in pconf.items() if k != "views"}
     new_cfg["encoder"] = {**enc, "path": rel, "sha256": sha}
     try:

@@ -179,6 +179,16 @@ def _lazy(module: str) -> Any:
                            f"Or use the offline hashing encoder (encoder: {{kind: hashing}}).") from e
 
 
+def local_path_problem(rel: str, what: str = "encoder") -> str | None:
+    """Why `rel` cannot name a local encoder or tokenizer file (`encoder.path`, `encoder.tokenizer`), or None: it
+    must be relative to the home directory and stay inside it. `OnnxEncoder` refuses such a path, and the documents
+    pack's `check_config` (`rlcd config check`) reports the same text, so the two cannot disagree."""
+    p = Path(rel)
+    if p.is_absolute() or ".." in p.parts:
+        return f"the {what} path {rel!r} must be relative to the home directory and stay inside it"
+    return None
+
+
 class OnnxEncoder:
     """A frozen sentence encoder run with ONNX Runtime on CPU (mean pooling + L2 normalisation).
 
@@ -245,10 +255,10 @@ class OnnxEncoder:
         if home is None:
             raise EncoderError(f"a local {what} file ({rel!r}) needs the home directory it lives in")
         root = Path(home).expanduser().resolve()
-        p = Path(rel)
-        if p.is_absolute() or ".." in p.parts:
-            raise EncoderError(f"the {what} path {rel!r} must be relative to the home directory and stay inside it")
-        full = root / p
+        why = local_path_problem(rel, what)
+        if why:
+            raise EncoderError(why)
+        full = root / Path(rel)
         if full.is_symlink() or not full.is_file() or not full.resolve().is_relative_to(root):
             raise EncoderUnavailable(f"the {what} file {rel!r} is not a regular file inside {root}")
         return full
