@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from open_rlcd.core import checklist as CL
+from open_rlcd.core import regress as RG
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError, DecideRequest, FeedbackRequest, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import lightgbm_available
@@ -372,3 +373,84 @@ def test_a_target_removed_from_pack_config_is_not_served_either(tmp_path, keep_o
         assert gone.bundle(v2).names() == ["churned"] and gone.switched_off(v2) == set()
         c = checked(gone)["routes.contracts"]
         assert c["status"] == "fail" and f"{v2} has no head 'next_plan'" in c["detail"]
+
+
+# ----------------------------------------------------------------------------- labels for a head no longer served
+
+ASSIST = {"rollout": {"mode": "assist"}}    # every decision is `confirm`, so it waits in the review queue
+
+
+def queued(svc: Service, **kw) -> set[str]:
+    """The decision ids GET /v1/review lists."""
+    return {i["decision_id"] for i in svc.review_view(limit=1000, **kw)["items"]}
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_a_switched_off_head_still_takes_the_labels_of_its_decisions(tmp_path, how):
+    """Switching a head off (in pack_config, under `heads:`, or by removing the target) stops serving it, not
+    learning from it. A late label for a decision it made is checked against the trained head the served model still
+    has, kept as a training row, scored in the head's Bernoulli ledger, and takes the decision out of the review queue
+    and the pending review load (they would keep it for as long as the head is off). So does a label for a two-head
+    decision, and one naming no decision. The rows join the first train after the head is switched on again. A label
+    tagged `regression` makes no case: `rlcd regress` could not run one for a head that is not served."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {}, **ASSIST)
+    v1 = train(on)["model"]
+    one = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    both = on.generic_decide(DecideRequest(state=ROW))
+    assert one["action"] == both["action"] == "confirm"
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, **ASSIST),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, **ASSIST),
+           "removed": lambda: small(tmp_path, None, **ASSIST)}[how]()
+    assert set(off.specs(v1)) == {"churned"} and off.switched_off(v1) == {"next_plan"}
+    assert {one["decision_id"], both["decision_id"]} <= queued(off)
+    assert off.metrics_view()["review_load"]["pending"]["confirm"] == 2
+
+    with pytest.raises(ContractError) as e:         # checked against the trained head's classes
+        off.feedback(FeedbackRequest(decision_id=one["decision_id"], label="sideways", source="crm"))
+    assert e.value.kind == "validation" and sorted(e.value.details["classes"]) == ["down", "same", "up"]
+    fb = off.feedback(FeedbackRequest(decision_id=one["decision_id"], label="same", source="crm",
+                                      tags=["regression"]))
+    assert fb["stored"] and (fb["head"], fb["label"], fb["feedback_rows"]) == ("next_plan", "same", 1)
+    assert fb["note"] == ("head 'next_plan' is switched off in rlcd.yaml: kept as an up-weighted training row for "
+                          "the first train after it is switched on again")
+    assert fb["bernoulli"]["updated"] is True and fb["bernoulli"]["correct"] is (
+        one["heads"]["next_plan"]["decision"]["class"] == "same")
+    assert fb["regression_case"]["stored"] is False and "not served by" in fb["regression_case"]["reason"]
+    assert not RG.cases_path(off.project).exists()
+    assert one["decision_id"] not in queued(off) and both["decision_id"] in queued(off, head="next_plan")
+    off.feedback(FeedbackRequest(decision_id=both["decision_id"], head="next_plan", label="up", source="crm"))
+    off.feedback(FeedbackRequest(head="next_plan", state=ROW, label="down", source="crm"))
+    assert queued(off) == set() and queued(off, head="next_plan") == set()
+    assert off.metrics_view()["review_load"]["pending"] == {"confirm": 0, "abstain": 0}
+
+    h = train(small(tmp_path, {}, **ASSIST))["heads"]["next_plan"]   # switched on again
+    assert h["data"]["by_source"]["feedback"] == 3
+
+
+def test_a_label_for_a_decision_of_a_head_the_served_model_dropped(tmp_path):
+    """A target removed under `features: auto` is dropped by the next train (its label column becomes a feature),
+    so rlcd-latest has no head to check a late label with: the label of a decision the head made is checked against
+    the version that made the decision, kept, and clears the review queue. A label naming no decision has no trained
+    head to check with and is refused, saying so when rlcd.yaml switches the head off."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {}, **ASSIST)
+    v1 = train(on)["model"]
+    d = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    gone = small(tmp_path, None, **ASSIST)
+    v2 = train(gone)["model"]
+    assert gone.bundle(v2).names() == ["churned"] and d["decision_id"] in queued(gone)
+    fb = gone.feedback(FeedbackRequest(decision_id=d["decision_id"], label="up", source="crm"))
+    assert fb["stored"] and fb["label"] == "up" and fb["bernoulli"]["updated"] is True
+    assert fb["note"] == (f"{v2} has no head 'next_plan': checked against {v1}, the version that made the decision, "
+                          f"and kept as an up-weighted training row for a later train of 'next_plan'")
+    assert queued(gone) == set()
+    with pytest.raises(ContractError) as e:
+        gone.feedback(FeedbackRequest(head="next_plan", state=ROW, label="up", source="crm"))
+    assert e.value.kind == "unknown_head" and e.value.message.startswith("no head named 'next_plan'")
+    off = small(tmp_path, {"enabled": False}, **ASSIST)
+    with pytest.raises(ContractError) as e:
+        off.feedback(FeedbackRequest(head="next_plan", state=ROW, label="up", source="crm"))
+    assert e.value.kind == "unknown_head" and e.value.message == (
+        f"head 'next_plan' is switched off in rlcd.yaml and not trained in {v2}: there is no trained head to check "
+        f"a label against")

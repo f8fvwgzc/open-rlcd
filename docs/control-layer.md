@@ -252,8 +252,11 @@ abstention keeps meaning "the model cannot vouch for this".
   random sample; the report says so.
 * **Review queue**: `GET /v1/review` / `rlcd review` lists confirm and abstain decisions without feedback
   (`POST /v1/feedback`; an outcome or a confirmation does not remove an item), with the state, uncertainty and
-  reasons a reviewer needs. Feedback with `tags: ["regression"]` turns the corrected
-  case into a regression fixture; `missing_evidence` and `note` record what the reviewer found.
+  reasons a reviewer needs. A decision of a head switched off since, or dropped by a later train, leaves it the
+  same way: its label is checked against the trained head and kept for the head's next train (`heads.<head>.enabled`
+  in [configuration.md](configuration.md)). Feedback with `tags: ["regression"]` turns the corrected case into a
+  regression fixture (not for a head rlcd-latest does not serve); `missing_evidence` and `note` record what the
+  reviewer found.
 * **Before launch**: `rlcd check` (or `GET /v1/check`; `--json` for CI, exit code 1 when an item fails) runs the
   guide's pre-launch checklist mechanically: an `rlcd.yaml` without errors (item `config.valid`, the findings of
   `rlcd config check`; every key is in [configuration.md](configuration.md)), heads trained with skill and
