@@ -251,6 +251,22 @@ def test_remote_hosts_refused_unless_allowed(monkeypatch):
     assert OpenAICompatJudge("https://api.example.com/v1", "m").url == "https://api.example.com/v1/chat/completions"
 
 
+@pytest.mark.parametrize(("host", "loopback"), [("[::1%25lo0]", True), ("::1%lo0", True), ("127.0.0.1%25lo0", False),
+                                                ("127.0.0.1%2e.evil.example", False), ("%31%32%37.0.0.1", False)])
+def test_the_judges_read_a_host_with_a_percent_as_the_connectors_do(host, loopback, monkeypatch):
+    """The judges' own loopback test (whether a request may use the proxy settings of the environment) reads a host
+    with a `%` as the shared host policy does (open_rlcd/connectors/security.py): an IPv6 address with a zone id is
+    that address, anything else is a name. (It cut the host at its first `%`.)"""
+    from open_rlcd.connectors.security import is_loopback
+    from open_rlcd.labeling.judges import _is_loopback
+
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    assert _is_loopback(host) is loopback and is_loopback(host) is loopback
+    if not loopback:
+        with pytest.raises(JudgeError):
+            OllamaJudge("m", base_url=f"http://{host}:11434")
+
+
 # ----------------------------------------------------------------------------- Anthropic API
 
 class FakeMessages:

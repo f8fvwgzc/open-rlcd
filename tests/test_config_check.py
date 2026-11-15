@@ -607,6 +607,34 @@ def test_a_url_password_in_a_value_of_any_other_key_is_found_as_in_free_text(tmp
             view["owners"]["incidents"]] == [shown] * 3, view
 
 
+@pytest.mark.parametrize("userinfo", ["ann:S3cretPassw0rd", "S3cretPassw0rd", "ann:S3cret/Passw0rd",
+                                      "ann:S3cret Passw0rd"], ids=["login", "token", "slash", "space"])
+def test_config_show_redacts_the_login_of_each_labeling_url(tmp_path, capsys, userinfo):
+    """`labeling.base_url` and the base URL of an `openai:<base_url>|<model>` judge in `labeling.judge` (split at the
+    last `|`, as make_judge splits it) are each one URL, whose user info httpx sends as basic auth: `rlcd config show`
+    prints each with the whole user info redacted, as it prints a `pack_config` key a pack declares one URL
+    (`Key.url`), and the rest of the judge string as written. The other values of the sections it prints with their
+    defaults (train, labeling, serve, security, evaluate) are scanned as the rest of the file is: a key that names a
+    secret is replaced whole. (These sections used to be printed as written.)"""
+    data = {"labeling": {"judge": f"openai:http://{userinfo}@llm.internal:8080/v1|org/qwen@q4",
+                         "base_url": f"https://{userinfo}@ollama.internal"},
+            "serve": {"api_key": "S3cretPassw0rd"}}                      # not a key of serve: printed all the same
+    root = write(tmp_path, data)
+    for argv in (["--json"], []):
+        assert main(["--project", str(root), "config", "show", *argv]) == 0
+        out = capsys.readouterr().out
+        assert "s3cret" not in out.lower() and "passw0rd" not in out.lower(), out
+    assert main(["--project", str(root), "config", "show", "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["labeling"]["judge"] == "openai:http://[REDACTED:url_password]@llm.internal:8080/v1|org/qwen@q4"
+    assert view["labeling"]["base_url"] == "https://[REDACTED:url_password]@ollama.internal"
+    assert view["serve"]["api_key"] == "[REDACTED:secret_field]"
+    plain = {"judge": "openai:http://127.0.0.1:8080/v1|org/qwen@q4", "model": "qwen", "batch": 5}
+    assert main(["--project", str(write(tmp_path, {"labeling": plain})), "config", "show", "--json"]) == 0
+    labeling = json.loads(capsys.readouterr().out)["labeling"]
+    assert labeling == {**CC._with_defaults(CC.schema()["labeling"], {}), **plain}, labeling   # as written
+
+
 def test_a_url_with_an_at_after_its_host_is_no_secret_in_another_key(tmp_path, capsys):
     """An `@` after `host:port/` in the value of a key not declared one URL is no user info: no url_password warning,
     and `rlcd config show` prints the value as written."""

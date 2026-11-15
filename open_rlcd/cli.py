@@ -438,8 +438,14 @@ def cmd_train(args: argparse.Namespace) -> int:
     with suppress(OSError):
         sys.stdout.flush()
     failed = [n for n, h in job["heads"].items() if h.get("status") == "failed"]
-    if failed and not job.get("model"):     # the table above says why, head by head
-        print(f"\nrlcd: no head could be trained ({', '.join(failed)}): nothing was saved.", file=sys.stderr)
+    if job["status"] == "failed":
+        if any(h.get("status") == "trained" for h in job["heads"].values()):
+            # the heads trained and a later step raised: saving the new version (no model), or reading it back
+            saved = f"{job['model']} was saved" if job.get("model") else "nothing was saved"
+            print(f"\nrlcd: the job failed after its heads trained ({saved}): {job.get('error') or 'no error given'}",
+                  file=sys.stderr)
+        else:                               # every head failed: the table above says why, head by head
+            print(f"\nrlcd: no head could be trained ({', '.join(failed)}): nothing was saved.", file=sys.stderr)
         return 1
     if failed:
         print(f"\nnot trained: {', '.join(failed)} (see the table); the other heads were saved.", file=sys.stderr)

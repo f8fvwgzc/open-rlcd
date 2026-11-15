@@ -25,11 +25,15 @@ def _env_allows() -> bool:
 
 
 def is_loopback(host: str) -> bool:
+    """`host` (as a URL holds it, as httpx sends it) is a loopback name or address. Read as the socket layer reads the
+    host httpx connects to: an IPv6 address with a zone id (`::1%lo0`, `%25lo0` in a URL) is that address, whatever
+    the zone; any other host with a `%` is no address but a name it looks up (IPv4 has no zone ids, and httpx decodes
+    no percent-encoding in a host), so `127.0.0.1%2e.evil.example` is not 127.0.0.1."""
     h = host.strip().strip("[]").lower().rstrip(".")
     if h in LOOPBACK_NAMES:
         return True
     try:
-        ip = ipaddress.ip_address(h.split("%", 1)[0])
+        ip = ipaddress.ip_address(h)          # an IPv6 zone id is read here, and refused after an IPv4 address
     except ValueError:
         return False
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:

@@ -959,6 +959,19 @@ def _with_defaults(key: Key, value: Any) -> Any:
     return out
 
 
+def _judge_shown(judge: str) -> str:
+    """`labeling.judge` as `rlcd config show` prints it: scanned as free text, except the base URL of an
+    `openai:<base_url>|<model>` judge (up to the last `|`, as labeling/judges.py `make_judge` splits it), which is one
+    URL whose user info httpx sends as basic auth, so its whole user info is redacted (core/redact.py `url`)."""
+    kind, colon, arg = judge.partition(":")
+    if not colon or kind.strip().lower() != "openai":
+        return redact_text(judge)[0]
+    base, bar, model = arg.rpartition("|")
+    if not bar:                              # no model: make_judge refuses it, and all of it is the URL
+        base, model = arg, ""
+    return f"{kind}:{redact_text(base, url=True)[0]}{bar}{redact_text(model)[0]}"
+
+
 def environment() -> dict:
     """The environment variables open-rlcd reads: the value of a setting, `set` / `not set` for a secret."""
     out: dict[str, Any] = {}
@@ -971,8 +984,10 @@ def environment() -> dict:
 def effective(project: Project, pack: Any = None) -> dict:
     """What the project resolves to: the file, the pack's defaults and the code's defaults merged, as
     `rlcd config show` prints it. A part that cannot be resolved carries {"error": ...} instead of raising.
-    `pack_config`, `routes` and `owners` are echoed as written, with anything that looks like a secret redacted (the
-    whole user info of a `pack_config` key the pack declares as one URL, `Key.url`)."""
+    `pack_config`, `routes`, `owners` and the sections shown with their defaults (`train`, `labeling`, `serve`,
+    `security`, `evaluate`) are echoed as written, with anything that looks like a secret redacted (the whole user info
+    of a `pack_config` key the pack declares as one URL, `Key.url`, of `labeling.base_url`, and of the base URL of an
+    `openai:` judge in `labeling.judge`: `_judge_shown`)."""
     data = project.data if isinstance(project.data, dict) else {}
     s = schema()
     notes: list[dict] = []
@@ -1028,7 +1043,12 @@ def effective(project: Project, pack: Any = None) -> dict:
     out["policy"] = attempt(policy)
     out["rollout"] = attempt(lambda: Rollout.from_config(data.get("rollout")).to_dict())
     for name in ("train", "labeling", "serve", "security", "evaluate"):
-        out[name] = _with_defaults(s[name], data.get(name))
+        out[name] = redact(_with_defaults(s[name], data.get(name)))[0]
+    labeling = data.get("labeling") if isinstance(data.get("labeling"), dict) else {}
+    if isinstance(labeling.get("base_url"), str):
+        out["labeling"]["base_url"] = redact_text(labeling["base_url"], url=True)[0]
+    if isinstance(labeling.get("judge"), str):
+        out["labeling"]["judge"] = _judge_shown(labeling["judge"])
 
     def batteries() -> dict:
         defaults = (pack.defaults() or {}).get("batteries") if pack is not None else None

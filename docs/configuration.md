@@ -174,12 +174,12 @@ Command-line flags of `rlcd train` and fields of `POST /v1/train` win over these
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `labeling.judge` | text | `claude-cli` | `claude-cli[:model]`, `anthropic[:model]`, `ollama:<model>` or `openai:<base_url>\|<model>`. `--judge` overrides it. `claude-cli` and `anthropic` send item text to Anthropic and are refused unless `security.allow_remote` is on. |
+| `labeling.judge` | text | `claude-cli` | `claude-cli[:model]`, `anthropic[:model]`, `ollama:<model>` or `openai:<base_url>\|<model>`. `--judge` overrides it. `claude-cli` and `anthropic` send item text to Anthropic and are refused unless `security.allow_remote` is on. The `openai:` base URL is everything up to the last `\|`; a `user:password@` in it goes to the server as HTTP basic auth, and `rlcd config show` prints that URL with the whole user info redacted, user name included. |
 | `labeling.model` | text | none | The model, when `labeling.judge` names none: `judge: ollama` with `model: llama3` is `ollama:llama3`. Not read when `--judge` is given. |
 | `labeling.batch` | whole number >= 1 | 20 | Items per judge call. `--batch` overrides it. |
 | `labeling.timeout` | number > 0 | 300 | Seconds before one judge call is given up. |
 | `labeling.executable` | text | `claude` | The Claude Code command the `claude-cli` judge runs. |
-| `labeling.base_url` | text | `http://127.0.0.1:11434` | Where the `ollama` judge finds Ollama. A host that is not loopback also needs remote hosts allowed (below). |
+| `labeling.base_url` | text | `http://127.0.0.1:11434` | Where the `ollama` judge finds Ollama. A host that is not loopback also needs remote hosts allowed (below). A `user:password@` in it goes to Ollama as HTTP basic auth, and `rlcd config show` prints the URL with the whole user info redacted, user name included. |
 
 Judge API keys are read from the environment only (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`).
 
@@ -476,9 +476,12 @@ and `head_override_keys()` names extra fields your pack accepts under `heads.<he
 ## Environment variables
 
 Secrets are read from the environment only, except a `user:password@` in the trading pack's
-[`quant_url`](#pack_config-of-the-trading-pack). A value in `rlcd.yaml` that looks like one (a key named
-`password`, `token`, `api_key`, ...; a string shaped like a known key) is a warning from `rlcd config check`.
-`rlcd config show` prints whether a secret is set, never its value.
+[`quant_url`](#pack_config-of-the-trading-pack), in `labeling.base_url` or in the URL of an `openai:` judge in
+`labeling.judge`. A value in `rlcd.yaml` that looks like one (a key named `password`, `token`, `api_key`, ...;
+a string shaped like a known key) is a warning from `rlcd config check`. `rlcd config show` prints whether a
+secret is set, never its value. In the sections it echoes from `rlcd.yaml` (`pack_config`, `train`, `labeling`,
+`serve`, `security`, `evaluate`, `routes`, `owners`) it redacts what looks like a secret: the value of a key named
+like one, a string shaped like a known key, the password of a URL, and the whole user info of those three URLs.
 
 | variable | what it does |
 |---|---|
