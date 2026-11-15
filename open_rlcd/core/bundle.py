@@ -1,8 +1,10 @@
 """The open-weight bundle: one trained model version as a directory of plain files.
 
     <bundle>/
-      model.json                      format, version, created_at, pack {name, version, config}, feature_version,
-                                      encoder, policy, heads {name: summary + dir + files with sha256}, data_card
+      model.json                      format, version, created_at, pack {name, version, config, carry_key?},
+                                      feature_version, encoder, policy, retrained, heads {name: summary + dir +
+                                      files with sha256}, data_card, notes; when they apply, not_carried_over and
+                                      imported_from (core/registry.py), edit (a weight edit: core/patch.py)
       heads/<dir>/ensemble.json       spec, members (kind, params, calibrator JSON)
       heads/<dir>/member_<k>.safetensors | member_<k>.txt     logreg weights | LightGBM native text model
       heads/<dir>/head.json           metrics, verdict, calibration, conformal, data, notes
@@ -100,7 +102,7 @@ def write_bundle(dest: Path, *, version: str, created_at: str, pack: dict, featu
                  notes: list[str] | None = None, extra: dict | None = None) -> dict:
     """Write a bundle directory. `trained`: name -> TrainedHead; `carried`: name -> (old head dir, old entry)
     for heads copied unchanged from the previous version; `extra`: more top-level model.json keys (a weight edit's
-    provenance: core/patch.py)."""
+    provenance: core/patch.py; `not_carried_over`, the heads of rlcd-latest a train left out: core/registry.py)."""
     dest = Path(dest)
     if dest.exists():
         raise BundleError(f"{dest} already exists")

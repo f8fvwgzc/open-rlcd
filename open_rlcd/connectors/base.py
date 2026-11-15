@@ -2,11 +2,15 @@
 
 Local implementations live next to this file (`local_vector.LocalVectorStore`, `local_graph.LocalGraphStore`);
 remote ones (`qdrant.QdrantVectorStore`, `pgvector.PgVectorStore`, `neo4j.Neo4jGraphStore`) implement the same
-protocols. A store that cannot be reached is reported as HTTP 503 (`connector_unavailable`): the local stores raise
-`ConnectorError` (the API boundary turns it into a 503 with `unavailable(...)`); the remote stores raise that
-ContractError themselves, with a message that names the store and the exception type but never a URL, DSN,
-password or path (the details go to the server log, scrubbed of the secrets the store read). A dead database is
-"service unavailable", never a bad request or a silent empty result.
+protocols. A store that cannot be reached is reported as HTTP 503 (`connector_unavailable`). The local stores raise
+`ConnectorError`, and the documents pack turns an error in opening or searching the local corpus into that 503
+itself (`_retrieve` in packs/documents/decide.py): its message carries the error's type and text, with absolute
+paths shortened, and the server logs no details for it. A `ConnectorError` raised elsewhere that reaches the API
+boundary becomes a 503 there (serve/api.py) whose message gives only its type, with the details in the server log.
+The remote stores raise that 503 themselves (a ContractError from `unavailable(...)`), with a message that names
+the store and the exception type (or the extra to install) but never a URL, DSN, password or path (the details go
+to the server log, scrubbed of the secrets the store read). A dead database is "service unavailable", never a bad
+request or a silent empty result.
 
 The helpers below are shared by the remote stores: the lazy import that names the missing extra, credentials read
 only from environment variables named in config (never from rlcd.yaml values), and the mapping of a store's

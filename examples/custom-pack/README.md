@@ -224,8 +224,8 @@ and a running `rlcd serve` answers every decision (and `GET /v1/heads`) with a 4
 
 ```
 rlcd: model rlcd-0.1.1 was trained with pack 'tickets', which is neither this project's pack ('tabular') nor a
-built-in pack ['documents', 'tabular']. A bundle never names code to import: set `pack:` in rlcd.yaml to the
-pack it was trained with
+built-in pack ['documents', 'tabular', 'trading']. A bundle never names code to import: set `pack:` in
+rlcd.yaml to the pack it was trained with
 ```
 
 In a project that was already serving a model, `rlcd rollback` brings back the version that served before the

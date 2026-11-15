@@ -257,8 +257,9 @@ refuse non-loopback hosts unless you allow them (`security.allow_remote: true` o
 includes the `claude-cli` and `anthropic` judges, which send the text of the items being labelled to Anthropic:
 `rlcd label bootstrap` refuses them until you opt in. Choose a local judge (`ollama:<model>`) for data that must
 not leave your machines. Secrets come from environment variables only: connector configs name the
-variable (`api_key_env`, `password_env`, `dsn_env`), and a password, key or DSN written into rlcd.yaml
-is refused.
+variable (`api_key_env`, `password_env`, `dsn_env`), and a password, key or DSN written into one is
+refused. The exception is the trading pack's `quant_url`: a `user:password@` in it goes to the quant sidecar
+as HTTP basic auth, and `rlcd config check` warns about it.
 
 ## Run it on a server
 

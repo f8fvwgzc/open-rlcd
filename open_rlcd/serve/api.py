@@ -13,8 +13,14 @@ trained model can decide: `not_ready`), 500 `internal`. GET /health (liveness) a
 need a key.
 `retryable` says whether the same request may succeed later unchanged (409 busy, 503): a client retries those
 with backoff (a `Retry-After` header gives the delay) and never retries the others — a 422 needs a different
-request, not another attempt. A 500 or 503 body never carries exception text (it can hold absolute paths or a
-DSN): the details go to the server log, the client gets the exception type and a generic message.
+request, not another attempt. A 500 `internal` body never carries exception text (it can hold absolute paths or a
+DSN): the details go to the server log, the client gets the exception type and a generic message. (A 500
+`bad_config` is a ContractError: its body names the rlcd.yaml setting that is not valid, and nothing is logged.)
+Nor does a 503 from a remote store (Qdrant, pgvector, Neo4j), from the trading pack's quant sidecar or from a
+`ConnectorError` that reaches the API: it gives the exception type or the sidecar's status, with the details in the
+server log, or the extra to install. The documents pack's own 503s differ: `encoder_unavailable`
+(packs/documents/__init__.py) and a local corpus's `connector_unavailable` (packs/documents/decide.py) carry the
+error message itself, the local corpus's with absolute paths shortened, and the server logs no details for them.
 """
 from __future__ import annotations
 

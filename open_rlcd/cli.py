@@ -38,6 +38,7 @@ import json
 import os
 import re
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -360,6 +361,43 @@ def _gate_block(svc: Any, job: dict) -> list[str]:
     return lines
 
 
+def _not_carried_over_line(svc: Any, job: dict) -> str:
+    """One line naming the heads of the replaced rlcd-latest that the new version lacks (the job's
+    `not_carried_over`: not retrained, and trained with another feature version, pack or pack settings, or by an
+    open-rlcd release that did not record them); '' when there are none. Each one the project serves answers with
+    the uninformed prior (calibrated false, so its decisions abstain) until a train retrains it, which the line
+    gives as `rlcd train --heads`; one the project switched off or no longer defines is not served, and `--heads`
+    would refuse it."""
+    dropped = [str(n) for n in job.get("not_carried_over") or []]
+    if not dropped:
+        return ""
+    model = job.get("model")
+    try:        # the version this train replaced as rlcd-latest (its history entry), named in the line
+        prev = next((h.get("from") for h in reversed(svc.registry.registry().get("history") or [])
+                     if h.get("to") == model and h.get("kind") == "train"), None)
+    except Exception:
+        prev = None
+    line = (f"not carried over {f'from {prev}' if prev else f'into {model}'}: {', '.join(dropped)} (trained with "
+            f"another feature version, pack or pack settings, or by an open-rlcd release that did not record them)")
+    try:
+        defined = set(svc.pack.heads(svc.project))
+    except Exception:      # a reading aid: never fail a finished training over it
+        return line + "; until a train retrains them, those this project serves answer with the uninformed prior"
+    served = [n for n in dropped if n in defined]
+    other = [n for n in dropped if n not in defined]
+    if served:
+        one = len(served) == 1
+        who = ", ".join(served) if other else ("it" if one else "they")
+        line += (f"; until a train retrains {'it' if one else 'them'}, {who} {'answers' if one else 'answer'} with "
+                 f"the uninformed prior: rlcd train --heads {','.join(served)}")
+    if other:
+        one = len(other) == 1
+        who = ", ".join(other) if served else ("it" if one else "they")
+        line += (f"; {who} {'is' if one else 'are'} not served now (switched off, or no longer one of this project's "
+                 f"heads)")
+    return line
+
+
 def cmd_train(args: argparse.Namespace) -> int:
     from .core.contract import TrainRequest
 
@@ -395,12 +433,19 @@ def cmd_train(args: argparse.Namespace) -> int:
     if gate:
         print("\nLive decisions (verdict act): `act` also needs the Bernoulli gate, which counts right and wrong per "
               "(class, probability bin), starting from the holdout rows.\n" + "\n".join(gate))
+    # stdout is block-buffered when piped: flush the table, so the stderr lines below come after it. A flush into a
+    # pipe whose reader has gone fails, and the lines below still go out.
+    with suppress(OSError):
+        sys.stdout.flush()
     failed = [n for n, h in job["heads"].items() if h.get("status") == "failed"]
     if failed and not job.get("model"):     # the table above says why, head by head
         print(f"\nrlcd: no head could be trained ({', '.join(failed)}): nothing was saved.", file=sys.stderr)
         return 1
     if failed:
         print(f"\nnot trained: {', '.join(failed)} (see the table); the other heads were saved.", file=sys.stderr)
+    dropped = _not_carried_over_line(svc, job)
+    if dropped:
+        print(f"\n{dropped}", file=sys.stderr)
     print("\nNext: `rlcd report` for the reliability page, `rlcd serve` for the API.")
     return 0
 

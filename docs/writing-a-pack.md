@@ -159,9 +159,9 @@ The contract:
 **When to bump `feature_version`.** Whenever the same state would give a different row: a column added,
 removed, renamed or reordered, a changed computation, another vocabulary or encoder. The service refuses to
 score a state with a version other than the one the head was trained on, and a head is carried over into a
-partial retrain (`rlcd train --heads ...`) only while the version is unchanged. Change the prefix by hand
-(`tickets-v1` to `tickets-v2`) when you change the code; put a hash of what is learned from data into it (here
-`text.signature`), so a retrain on new tickets changes it by itself.
+partial retrain (`rlcd train --heads ...`) only while the version, and the pack's `carry_key` (section 7), are
+unchanged. Change the prefix by hand (`tickets-v1` to `tickets-v2`) when you change the code; put a hash of what
+is learned from data into it (here `text.signature`), so a retrain on new tickets changes it by itself.
 
 **Same features at train and serve time.** When a version is served, the provider is rebuilt from the bundle's
 config, not from today's data:
@@ -319,7 +319,7 @@ class TicketsPack(BasePack):
 
 | hook | what it gives |
 |---|---|
-| `config_keys()` | `{key: Key(...)}`: the keys of `pack_config`, with kind (`str`, `bool`, `int`, `number`, `list`, `map`, ...), `default`, `choices`, `min` / `max`. An unknown key is then an error with a suggestion, a wrong type or range an error. Returning `None` (the default) leaves `pack_config` unchecked. |
+| `config_keys()` | `{key: Key(...)}`: the keys of `pack_config`, with kind (`str`, `bool`, `int`, `number`, `list`, `map`, ...), `default`, `choices`, `min` / `max`. An unknown key is then an error with a suggestion, a wrong type or range an error. Returning `None` (the default) leaves `pack_config` unchecked. `url=True` on a key that `config_keys()` returns (on a key inside a `map` it has no effect) declares that the key holds one URL whose user info your pack sends as credentials, as the trading pack's `quant_url` does (its `user:password@` goes to the sidecar as HTTP basic auth): `rlcd config check` then warns about any user info in it, and `rlcd config show` redacts the whole user info, user name included, however it is written. Set it only on such a key: it reads everything up to the value's last `@` as user info, so a URL without credentials but with an `@` in its path or query would be warned about and redacted too. Without it, the value is scanned as free text, like the rest of `pack_config`: the password of a well-formed `user:password@` is redacted and the user name kept, so a token alone, or a password with a space or a `/` in it, is shown and not warned about. |
 | `check_config(project)` | More findings, `[{level: "error" \| "warn", path, message}]`, for what a key list cannot say (a file that is missing, two keys that contradict). It runs after the key and type checks passed and must not need the network. |
 | `head_override_keys()` | Extra fields your pack accepts under `heads.<head>` in rlcd.yaml, beyond the head fields of section 2. |
 
@@ -344,6 +344,7 @@ error  pack_config.txt: unknown key. Did you mean 'text'?
 | `synth(seed, n)` | synthetic data for tests and demos (with known answers). |
 | `rank_head` (attribute) | the default head of `POST /v1/rank`. |
 | `switched_off(project, trained)` | The service (which heads of a trained version it serves), `rlcd check` and `rlcd config check` (whose route contracts, rollout modes and policy overrides they keep without comparing them with the head): the heads the project switches off, given a version's trained heads. The default is `heads.<head>.enabled: false`; extend it when your `pack_config` can switch a head off too (the tabular pack adds `pack_config.targets.<head>.enabled: false` and every trained head that is no longer a target). |
+| `carry_key(provider)` | Every train: a head the train does not retrain is carried over from the previous `rlcd-latest` only when that version has the same pack name, feature version and `carry_key`; otherwise it is left out of the new version. The new version's notes then say "not carried over (trained with another feature version, pack or pack settings, or by an open-rlcd release that did not record them): [...]", `rlcd train` names the head on stderr, and the new version's `model.json` and the train job (`GET /v1/train/{job_id}`) list it under `not_carried_over`. Return what your heads depend on that `feature_version` does not capture, such as settings that define the labels, as a JSON value computed from `provider` (the provider the version is trained with). A value that is not None is stored in the bundle (`model.json` `pack.carry_key`). A version without one counts as None, so the first train after your pack starts returning a value carries none of the previous version's heads over. The default is None. The trading pack returns its `sl_pips`, `tp_pips`, `tp2_pips` and `horizon`. |
 
 The example needs none of them to train, serve and take feedback; it has `synth` only to write its demo data.
 
@@ -400,8 +401,8 @@ an import path. A project configured with another pack refuses the bundle:
 
 ```
 rlcd: model rlcd-0.1.1 was trained with pack 'tickets', which is neither this project's pack ('tabular') nor a
-built-in pack ['documents', 'tabular']. A bundle never names code to import: set `pack:` in rlcd.yaml to the
-pack it was trained with
+built-in pack ['documents', 'tabular', 'trading']. A bundle never names code to import: set `pack:` in
+rlcd.yaml to the pack it was trained with
 ```
 
 So ship the pack's code the way you ship any code you trust (a repository, an internal package), and the

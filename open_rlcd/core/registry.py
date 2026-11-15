@@ -6,14 +6,21 @@
       bernoulli.json             the live Beta-Bernoulli ledger (restarts from each new holdout)
       feedback.jsonl, decisions.jsonl
 
-`rlcd-latest` is an alias of the newest version; old versions stay addressable through `model`. A retrain that
-touches some heads carries the others over unchanged, so a version always describes the whole model. Bundles
-are only ever loaded from inside RLCD_HOME (registry.json is data: a path in it that escapes the home is refused).
+`rlcd-latest` is an alias of the version served by default. Each train makes its new version rlcd-latest; an
+import does too unless it is kept out of service (`rlcd import --keep-latest`, or a weight-edit candidate whose
+gate failed), a weight edit only when it is promoted, and `set_latest` (`rlcd promote`, `rlcd rollback`) moves it.
+Old versions stay addressable through `model`. A train that retrains some heads carries the other heads of
+rlcd-latest over unchanged when rlcd-latest was trained with the same pack, feature version and `carry_key`, as its
+model.json records them (`commit`). Otherwise it leaves them out: the new version lacks them, and its model.json
+names them (`not_carried_over`). Bundles are only ever loaded from inside RLCD_HOME (registry.json is data: a path
+in it that escapes the home is refused).
 
 A weight-edit candidate (core/patch.py, `commit_edit`) is a version like any other, plus an `edit` record: it is
 committed under the same locks, a promotion is recorded in `history` (kind "patch"), and `rlcd rollback` leaves it
-like any other version. It becomes rlcd-latest only when its holdout gate passed and its base is still
-rlcd-latest; one whose gate failed is kept for inspection and never served (`servable`), so it is never made
+like any other version. Its attempt number on each holdout it was scored on is fixed under those locks when it is
+saved, from the candidates already saved on that holdout (`rejudge`), so candidates scored at the same time are
+numbered in the order they are saved. It becomes rlcd-latest only when its holdout gate passed and its base is
+still rlcd-latest; one whose gate failed is kept for inspection and never served (`servable`), so it is never made
 latest either (`set_latest` refuses it, `previous_latest` skips it).
 """
 from __future__ import annotations
@@ -22,6 +29,7 @@ import json
 import os
 import shutil
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -100,13 +108,10 @@ class Registry:
         return _servable(self.entry(version) or {})
 
     def edit_attempts(self, head: str, holdout_sha256: str) -> int:
-        """How many edit candidates of `head` this home has already scored on the holdout with this id hash. Each
-        scoring spends some of the holdout's credibility (core/patch.py tightens the bound accordingly)."""
-        n = 0
-        for e in self.registry()["versions"].values():
-            if ((e.get("edit") or {}).get("holdouts") or {}).get(head) == holdout_sha256:
-                n += 1
-        return n
+        """How many edit candidates of `head` saved in this home were scored on the holdout with this id hash. Each
+        scoring spends some of the holdout's credibility (core/patch.py tightens the bound accordingly). A count
+        read here can be stale by the time a candidate is saved: `commit_edit` counts again under its lock."""
+        return _attempts(self.registry(), head, holdout_sha256)
 
     # ------------------------------------------------------------------ bundles
     def _dir(self, version: str) -> Path:
@@ -143,7 +148,14 @@ class Registry:
     def commit(self, trained: dict[str, Any], *, pack: dict, feature_version: str, encoder: dict | None,
                policy: dict, data_card: dict | None = None, notes: list[str] | None = None) -> str:
         """Save freshly trained heads as a new version, carrying over the previous version's other heads when
-        they were trained on the same pack and feature version."""
+        they were trained on the same pack and feature version, with the same `carry_key` (what else a pack's heads
+        depend on that the feature version does not capture, `BasePack.carry_key`: the trading pack's sl_pips,
+        tp_pips, tp2_pips and horizon, which define its labels and go with every feature request). Otherwise the
+        previous version's heads that this train does not retrain are left out of the new version, whose model.json
+        names them in its notes and lists them under `not_carried_over` (sorted; absent when there are none), which
+        the train job copies (core/jobs.py). The previous version's `carry_key` is the one its model.json stores: a
+        version saved by an open-rlcd release that did not record it has none, so a pack that gives one carries none
+        of that version's heads over, even ones trained with the same settings."""
         with self._lock, self._file_lock:
             reg = self.registry()
             vid = f"{MODEL_PREFIX}{int(reg['next'])}"
@@ -151,8 +163,10 @@ class Registry:
             dropped: list[str] = []
             prev = self.bundle(reg["latest"]) if reg["latest"] else None
             if prev is not None:
+                prev_pack = prev.meta.get("pack") or {}
                 same = (prev.meta.get("feature_version") == feature_version
-                        and (prev.meta.get("pack") or {}).get("name") == pack.get("name"))
+                        and prev_pack.get("name") == pack.get("name")
+                        and prev_pack.get("carry_key") == pack.get("carry_key"))
                 for name in prev.names():
                     if name in trained:
                         continue
@@ -163,10 +177,13 @@ class Registry:
                     else:
                         dropped.append(name)
             if dropped:
-                notes = [*(notes or []), f"not carried over (other feature version or pack): {sorted(dropped)}"]
+                notes = [*(notes or []), f"not carried over (trained with another feature version, pack or pack "
+                                         f"settings, or by an open-rlcd release that did not record them): "
+                                         f"{sorted(dropped)}"]
             meta = BD.write_bundle(self.home / "models" / vid, version=vid, created_at=now_iso(), pack=pack,
                                    feature_version=feature_version, encoder=encoder, policy=policy, trained=trained,
-                                   carried=carried, data_card=data_card, notes=notes)
+                                   carried=carried, data_card=data_card, notes=notes,
+                                   extra={"not_carried_over": sorted(dropped)} if dropped else None)
             prev_vid = reg["latest"]
             self._register(reg, vid, meta)
             if reg["latest"] == vid and prev_vid != vid:
@@ -203,12 +220,18 @@ class Registry:
 
     def commit_edit(self, base_version: str, trained: dict[str, Any], *, edit: dict, carry: bool = True,
                     pack: dict | None = None, feature_version: str | None = None, encoder: dict | None = None,
-                    data_card: dict | None = None, notes: list[str] | None = None) -> dict:
+                    data_card: dict | None = None, notes: list[str] | None = None,
+                    rejudge: Callable[[dict[str, int]], dict] | None = None) -> dict:
         """Save a weight-edit candidate as a new version and decide, under the registry's locks, whether it serves.
 
         `trained`: the edited (head edit) or retrained (encoder edit) heads, already scored on the base's holdout;
         `carry`: copy the base version's other heads unchanged (a head edit; an encoder edit changes every head's
         features, so nothing is carried); `edit["passed"]` / `edit["reasons"]`: the gate's result (core/patch.py).
+        `rejudge`: the candidate's attempt number on each holdout it was scored on (`edit["holdouts"]`: head ->
+        holdout id hash) is fixed here, from the candidates already saved on that holdout in the registry read
+        under the locks. `rejudge({head: that count + 1})` returns the edit record to decide on and save
+        (core/patch.py judges again each head whose number went up since it was scored), so candidates scored at
+        the same time are numbered in the order they are saved. It is called before anything is written.
         The candidate becomes rlcd-latest only if the gate passed AND `base_version` is still rlcd-latest (an edit
         is judged against its base, not against whatever is newer), read inside the same inter-process lock as
         `commit`, `import_` and `set_latest`, so a train or a promote in another process cannot slip in between.
@@ -221,6 +244,8 @@ class Registry:
             base = self.bundle(base_version)
             if base is None:
                 raise UnknownModel(base_version)
+            if rejudge is not None:
+                edit = rejudge({h: _attempts(reg, h, sha) + 1 for h, sha in (edit.get("holdouts") or {}).items()})
             vid = f"{MODEL_PREFIX}{int(reg['next'])}"
             carried: dict[str, tuple[Path, dict]] = {}
             if carry:
@@ -385,6 +410,12 @@ class Registry:
 def _servable(entry: dict) -> bool:
     """A registry.json version entry serves unless it is a weight-edit candidate whose holdout gate failed."""
     return (entry.get("edit") or {}).get("servable", True) is not False
+
+
+def _attempts(reg: dict, head: str, holdout_sha256: str) -> int:
+    """The edit candidates of `head` in registry.json `reg` that were scored on the holdout with this id hash."""
+    return sum(((e.get("edit") or {}).get("holdouts") or {}).get(head) == holdout_sha256
+               for e in reg["versions"].values())
 
 
 def edit_summary(edit: dict) -> dict:

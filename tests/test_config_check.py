@@ -579,6 +579,49 @@ def test_secrets_written_into_the_file_are_warnings_that_never_quote_the_value(t
     assert "environment" in text
 
 
+@pytest.mark.parametrize(("password", "found"), [("hunter2@s3cr3t", True), ("hunter2?s3cr3t", True),
+                                                 ("hunter2#s3cr3t", True), ("hunter2 s3cr3t", False),
+                                                 ("hunter2/s3cr3t", False)])
+def test_a_url_password_in_a_value_of_any_other_key_is_found_as_in_free_text(tmp_path, capsys, password, found):
+    """A URL value of a key not declared one URL (`Key.url`, which only the trading pack's quant_url is), in each part
+    `rlcd config show` echoes, is scanned as free text: its password runs to the last `@` before a `/` or a space, so
+    one with an unencoded `@`, `?` or `#` is warned about (url_password) and redacted whole, user name kept, while one
+    with a space or a `/` is neither: in free text there is no telling it from the path or the next word. The warning
+    says where such a secret belongs: in the environment. (A password with an `@` used to leave what followed it in
+    `rlcd config show`.)"""
+    dsn = f"postgres://rlcd:{password}@db.internal/q"
+    data = {"pack_config": {"queries": dsn}, "routes": {"route": {"vector": {"endpoint": dsn}}},
+            "owners": {"incidents": dsn}}
+    paths = ("pack_config.queries", "routes.route.vector.endpoint", "owners.incidents")
+    f = check(tmp_path, data)
+    assert CC.errors(f) == [], f
+    warned = [x for x in f if "(url_password)" in x["message"]]
+    assert [x["path"] for x in warned] == (list(paths) if found else []), f
+    assert all(x["message"].endswith("secrets belong in the environment (see docs/configuration.md), never in "
+                                     "rlcd.yaml") for x in warned), warned
+    root = write(tmp_path, data)
+    assert main(["--project", str(root), "config", "show", "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    shown = "postgres://rlcd:[REDACTED:url_password]@db.internal/q" if found else dsn
+    assert [view["pack_config"]["queries"], view["routes"]["route"]["vector"]["endpoint"],
+            view["owners"]["incidents"]] == [shown] * 3, view
+
+
+def test_a_url_with_an_at_after_its_host_is_no_secret_in_another_key(tmp_path, capsys):
+    """An `@` after `host:port/` in the value of a key not declared one URL is no user info: no url_password warning,
+    and `rlcd config show` prints the value as written."""
+    data = {"pack": "documents",
+            "pack_config": {"queries": "https://logs.example.com:8443/export?user=ann@example.com"},
+            "owners": {"incidents": "https://chat.example.com:443/@oncall"}}
+    assert check(tmp_path, data) == []
+    root = write(tmp_path, data)
+    assert main(["--project", str(root), "config", "show", "--json"]) == 0
+    io = capsys.readouterr()
+    view = json.loads(io.out)
+    assert view["pack_config"]["queries"] == data["pack_config"]["queries"], view["pack_config"]
+    assert view["owners"] == data["owners"] and io.err == "", (view["owners"], io.err)
+
+
 # ----------------------------------------------------------------------------- the file itself
 
 def test_yaml_that_does_not_parse_is_one_finding_with_the_line(tmp_path):

@@ -247,6 +247,86 @@ def test_contextual_secrets_keep_their_context(text, expected):
     assert out == expected and len(found) == 1
 
 
+def test_a_url_password_with_an_unencoded_at_is_redacted_whole_in_free_text():
+    """In free text a URL's password runs to the last `@` before a `/` or a space. (It ended at the first `@`, so the
+    rest of the password was left in the log: 'http://quant:[REDACTED:url_password]@Passw0rd@127.0.0.1:8090'.)"""
+    for text in ("http://quant:S3cret@Passw0rd@127.0.0.1:8090/x", "sent to http://quant:Xy7@kL9mQ2#pZ@127.0.0.1 ok"):
+        out, found = RD.redact_text(text)
+        assert found == ["url_password"] and "quant:[REDACTED:url_password]@127.0.0.1" in out, out
+        assert "Passw0rd" not in out and "kL9mQ2" not in out, out
+    # it still ends at a `/` or a space: in free text there is no telling a password from the path or the next word
+    for text in ("http://quant:S3cret Passw0rd@127.0.0.1:8090", "see http://localhost:5173/@vite/client",
+                 "https://example.com:8443/x?email=ann@example.com and more"):
+        assert RD.redact_text(text) == (text, []), text
+
+
+# (a value declared one URL, `url`: the trading pack's quant_url; what it is redacted to): its whole user info, from
+# the start of the URL to its last `@`, however malformed: the user name and a token alone too, and whatever follows
+# the host. A value with no user info is kept
+URL_VALUES = [
+    ("http://quant:S3cretPassw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret@Passw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret Passw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret/Passw0rd@127.0.0.1:8090/base", "http://[REDACTED:url_password]@127.0.0.1:8090/base"),
+    ("http://quant:S3cret?Passw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret#Passw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret@Passw0rd/x@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret\nPassw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://S3cretPassw0rd@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),       # a token alone
+    ("http://S3cret Passw0rd:@127.0.0.1:8090", "http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("https://ann@S3cret:Passw0rd@host/x", "https://[REDACTED:url_password]@host/x"),       # an `@` in the user name
+    ("HTTP://qu\"ant:S3cret' Passw0rd@:8090 ", "HTTP://[REDACTED:url_password]@:8090 "),
+    (" http://quant:S3cret Passw0rd@127.0.0.1:8090", " http://[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http://quant:S3cret Pass@w0rd@127.0.0.1:8090/x y", "http://[REDACTED:url_password]@127.0.0.1:8090/x y"),
+    ("http://quant:S3cretPassw0rd@[::1]:8090/x?q=a b", "http://[REDACTED:url_password]@[::1]:8090/x?q=a b"),
+    ("//quant:S3cret Passw0rd@127.0.0.1:8090", "//[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http:/quant:S3cret Passw0rd@127.0.0.1:8090", "http:/[REDACTED:url_password]@127.0.0.1:8090"),
+    ("http:\\\\quant:S3cretPassw0rd@127.0.0.1:8090", "http:\\\\[REDACTED:url_password]@127.0.0.1:8090"),
+    ("quant:S3cret Passw0rd@127.0.0.1:8090", "[REDACTED:url_password]@127.0.0.1:8090"),          # no `http://`
+    (" http:quant:S3cretPassw0rd@127.0.0.1:8090", " [REDACTED:url_password]@127.0.0.1:8090"),
+    *[(v, v) for v in ("http://127.0.0.1:8090", "https://quant.example.com:8443/base", "http://@127.0.0.1:8090",
+                       "${QUANT_URL}", "")],
+]
+
+
+@pytest.mark.parametrize("value,expected", URL_VALUES)
+def test_a_value_declared_one_url_has_its_whole_user_info_redacted(value, expected):
+    """`url` (a value declared one URL, `Key.url`: what `rlcd config show` and `rlcd config check` do with the trading
+    pack's quant_url): the whole user info is redacted, from the start of the URL (after any leading whitespace, a
+    scheme and its slashes) to its last `@`, however malformed, the user name and a token alone included. (Free text
+    keeps the user name, a token alone, and a password with a space, a `/` or a line break in it.)"""
+    out, found = RD.redact_text(value, url=True)
+    assert out == expected and found == (["url_password"] if out != value else []), out
+    assert RD.redact({"v": [value]}, url=True) == ({"v": [out]}, found)
+    assert RD.redact_text(out, url=True)[0] == out                                   # a fixed point
+
+
+# the values of every other key are free text, as they always were: (value, what it is redacted to). Connectors' DSNs
+# and URLs, and URLs with an `@` after the host, which free text does not take for user info
+FREE_TEXT_VALUES = [
+    ("postgres://admin:s3cr3t@db.internal:5432/x", "postgres://admin:[REDACTED:url_password]@db.internal:5432/x"),
+    ("postgresql+psycopg://u:pw@localhost:5432/db?sslmode=require",
+     "postgresql+psycopg://u:[REDACTED:url_password]@localhost:5432/db?sslmode=require"),
+    ("mongodb+srv://user:pw@cluster0.example.net/?retryWrites=true&w=majority",
+     "mongodb+srv://user:[REDACTED:url_password]@cluster0.example.net/?retryWrites=true&w=majority"),
+    ("neo4j://neo4j:secretpw@localhost:7687", "neo4j://neo4j:[REDACTED:url_password]@localhost:7687"),
+    ("http://u:pw@[::1]:8090/x", "http://u:[REDACTED:url_password]@[::1]:8090/x"),
+    *[(v, v) for v in ("http://localhost:6333", "postgresql:///db?host=/var/run/postgresql",
+                       "https://token@github.com/org/repo", "ssh://git@github.com:22/org/repo.git",
+                       "mailto:ann@example.com", "git@github.com:org/repo.git",
+                       "https://logs.example.com:8443/export?user=ann@example.com",
+                       "https://chat.example.com:443/@oncall", "http://localhost:4873/@myorg/pkg")],
+]
+
+
+@pytest.mark.parametrize("value,expected", FREE_TEXT_VALUES)
+def test_a_value_not_declared_one_url_is_redacted_as_free_text(value, expected):
+    """Without `url`, a URL's password ends at a `/` or a space and its user name is kept, so an `@` after
+    `host:port/` is not taken for the end of a user info: the last three are kept, and nothing is found in them."""
+    assert RD.redact_text(value) == (expected, ["url_password"] if expected != value else [])
+    assert RD.redact({"v": [value]}) == ({"v": [expected]}, ["url_password"] if expected != value else [])
+
+
 def test_several_secrets_in_one_string_are_all_redacted_and_listed():
     text = "AKIAIOSFODNN7EXAMPLE then ghp_" + "a" * 36 + " and password=hunter2xyz in Zürich"
     out, found = RD.redact_text(text)

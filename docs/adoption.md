@@ -155,9 +155,11 @@ capped for too few act-tier rows.
 | your own | `source: ground_truth` rows, or the audit if the pack implements `label_tasks` | the judge, if the pack implements `label_tasks` |
 
 What a documents query log yields: every query gives items for `response_type`, `route` and `needs_graph`.
-`chunk_relevant` needs an ingested corpus (`rlcd ingest`): one item per retrieved chunk. `answerable` needs
-retrieved chunks or `evidence` logged with the query. `grounded`, `complete` and `risk_tier` get an item only for a `queries.jsonl` row that
-carries the drafted `answer`. Logged `evidence` is optional there: without it the top retrieved chunks stand in.
+`chunk_relevant` needs something to retrieve from: a corpus ingested with `rlcd ingest`, or a store attached with
+`pack_config.vector` in attach mode, which needs no ingest (`rlcd ingest` is refused there): one item per
+retrieved chunk. `answerable` needs retrieved chunks or `evidence` logged with the query. `grounded`, `complete`
+and `risk_tier` get an item only for a `queries.jsonl` row that carries the drafted `answer`. Logged `evidence` is
+optional there: without it the top retrieved chunks stand in.
 A plain question log therefore yields no `grounded` labels at all.
 
 **LLM judge, then human audit** (documents and packs with `label_tasks`):

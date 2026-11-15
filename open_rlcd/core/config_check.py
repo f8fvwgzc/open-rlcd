@@ -82,6 +82,10 @@ class Key:
               is the placeholder the reference shows, e.g. heads.<head>.stakes
     unknown   what a key outside `keys` is: "error", "warn" (read by nothing), or "open" (the map belongs to the
               caller; only a near miss of a known key is reported, as a warning)
+    url       a key a pack declares at the top of `pack_config` whose text is one URL, and whose user info may carry
+              credentials: `rlcd config check` warns about any user info in it (url_password), and `rlcd config show`
+              redacts the whole user info, however malformed (core/redact.py `url`). Every other value is scanned as
+              free text, where a URL's password ends at a `/` or a space and its user name is kept
     """
     kind: str = "any"
     default: Any = None
@@ -96,6 +100,7 @@ class Key:
     each: Key | None = None
     label: str = "name"
     unknown: str = "error"
+    url: bool = False
 
     def type_text(self) -> str:
         if self.choices:
@@ -416,6 +421,11 @@ def _pack_keys(pack: Any) -> dict[str, Key] | None:
     if not isinstance(declared, dict):
         declared = {str(k): None for k in declared}
     return {str(k): v if isinstance(v, Key) else Key("any") for k, v in declared.items()}
+
+
+def _url_keys(pack: Any) -> list[str]:
+    """The `pack_config` keys `pack` declares as one URL (`Key.url`)."""
+    return [k for k, key in (_pack_keys(pack) or {}).items() if key.url] if pack is not None else []
 
 
 def _check_pack_name(project: Project, out: list[dict]) -> None:
@@ -791,9 +801,13 @@ def _cross(project: Project, specs: dict | None, off: set[str], ro: Rollout | No
                                         f"{refused}" + (f". Did you mean {hint!r}?" if hint else "")))
 
 
-def _secrets(data: dict, out: list[dict]) -> None:
-    """Values that look like secrets. The value itself is never put into the message."""
+def _secrets(data: dict, out: list[dict], urls: frozenset[str] = frozenset()) -> None:
+    """Values that look like secrets. The value itself is never put into the message. `urls`: the paths of the values
+    that are one URL (`Key.url`), where any user info is a secret. Its pack reads that login from the URL, so the
+    advice there is not to move it to the environment but to protect the file."""
     advice = "secrets belong in the environment (see docs/configuration.md), never in rlcd.yaml"
+    in_url = ("the user info of this URL is a login written into rlcd.yaml, where its pack reads it: keep the file out "
+              "of version control and readable only by the service (see docs/configuration.md)")
 
     def text(v: Any, path: str, named: bool) -> None:
         if not isinstance(v, str) or not v.strip() or _ENV_REF.match(v.strip()):
@@ -802,9 +816,10 @@ def _secrets(data: dict, out: list[dict]) -> None:
             out.append(_finding("warn", path, f"the key names a secret and has a value written into the file: "
                                               f"{advice}"))
             return
-        _, found = redact_text(v, ("secrets",), skip=("assignment",))
+        _, found = redact_text(v, ("secrets",), skip=("assignment",), url=path in urls)
         if found:
-            out.append(_finding("warn", path, f"contains what looks like a secret ({', '.join(found)}): {advice}"))
+            why = in_url if path in urls and "url_password" in found else advice
+            out.append(_finding("warn", path, f"contains what looks like a secret ({', '.join(found)}): {why}"))
 
     def walk(v: Any, path: str, depth: int) -> None:
         if depth > 32:
@@ -912,7 +927,7 @@ def check_project(project: Project, pack: Any = None) -> list[dict]:
     off = _switched_off(project, pack, specs, out)
     _overrides(project, specs, off, out)
     _cross(project, specs, off, ro, book, out)
-    _secrets(data, out)
+    _secrets(data, out, frozenset(f"pack_config.{k}" for k in _url_keys(pack)))
     return out
 
 
@@ -956,7 +971,8 @@ def environment() -> dict:
 def effective(project: Project, pack: Any = None) -> dict:
     """What the project resolves to: the file, the pack's defaults and the code's defaults merged, as
     `rlcd config show` prints it. A part that cannot be resolved carries {"error": ...} instead of raising.
-    `pack_config`, `routes` and `owners` are echoed as written, with anything that looks like a secret redacted."""
+    `pack_config`, `routes` and `owners` are echoed as written, with anything that looks like a secret redacted (the
+    whole user info of a `pack_config` key the pack declares as one URL, `Key.url`)."""
     data = project.data if isinstance(project.data, dict) else {}
     s = schema()
     notes: list[dict] = []
@@ -966,12 +982,15 @@ def effective(project: Project, pack: Any = None) -> dict:
     home_from = ("--home" if project.home_override is not None else "RLCD_HOME" if env_home
                  else "rlcd.yaml" if data.get("home") else "default")
     pack_from = "rlcd.yaml" if data.get("pack") else "RLCD_PACK" if os.environ.get("RLCD_PACK") else "default"
+    config = project.pack_config
+    shown = redact(config)[0]
+    shown.update(redact({k: config[k] for k in _url_keys(pack) if k in config}, url=True)[0])
     out: dict[str, Any] = {
         "project": {"name": project.name, "config": str(project.path) if project.path else None,
                     "root": str(project.root), "home": str(project.home), "home_from": home_from},
         "pack": {"name": project.pack, "from": pack_from, "class": type(pack).__name__ if pack is not None else None,
                  "version": getattr(pack, "version", None)},
-        "pack_config": redact(project.pack_config)[0],
+        "pack_config": shown,
     }
     if pack is None:
         out["pack"]["error"] = notes[0]["message"] if notes else "not loaded"

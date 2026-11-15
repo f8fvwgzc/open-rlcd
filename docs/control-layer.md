@@ -224,10 +224,13 @@ them yourself.
 | expand | widen the slice, then `full`, as `GET /v1/metrics` shows the evidence |
 
 Per-head modes (`rollout.heads: {needs_graph: shadow}`) put one question behind a flag; `heads.<name>.enabled:
-false` in rlcd.yaml stops serving a head altogether (the trained head stays in the bundle, so enabling it again
-needs no retrain). Rollout only ever takes
-automation away: it never lifts a cap the evidence imposed, and it caps at `confirm`, never at the abstain action,
-so abstention keeps meaning "the model cannot vouch for this".
+false` in rlcd.yaml stops serving a head altogether. Enabling it again needs no retrain while the served model
+still has the trained head: a train carries it over only while the feature version is unchanged (in the trading
+pack, also `sl_pips`, `tp_pips`, `tp2_pips` and `horizon`), and `rlcd train` names a head it leaves out, as trained
+with another feature version, pack or pack settings, or by an open-rlcd release that did not record them
+([configuration](configuration.md#heads-change-a-question-the-pack-defines)). Rollout only ever takes automation
+away: it never lifts a cap the evidence imposed, and it caps at `confirm`, never at the abstain action, so
+abstention keeps meaning "the model cannot vouch for this".
 
 * **Kill switch**: `rlcd automation off --reason "incident 42"` or `POST /v1/automation {"enabled": false}`:
   every decision is capped at confirm at once, while decisions are still made, logged and returned. With

@@ -28,8 +28,12 @@ fit, so:
     row ids it looked at (`tuned_on_ids`). `holdout`, or any listed id that is a holdout row of the base, is
     refused before anything is scored;
   * every scoring spends some of the holdout's credibility: the k-th candidate scored on the same holdout (same
-    head, same row ids) is tested at alpha = 0.05 / k, and the attempt number is published with the result. Many
-    attempts on one holdout call for fresh trusted labels (a new holdout), not a looser bound.
+    head, same row ids) is tested at alpha = 0.05 / k, and the attempt number is published with the result. The
+    number is fixed when the candidate is saved, under the registry's lock: `Registry.commit_edit` counts the
+    candidates already saved on that holdout, and a head whose number went up since it was scored (another run
+    saved a candidate there meanwhile) is judged again at it, with the same inputs and seed. So candidates scored
+    at the same time are numbered in the order they are saved. Many attempts on one holdout call for fresh
+    trusted labels (a new holdout), not a looser bound.
 
 Before an edit is scored, the base's holdout is re-derived from today's rows with the base's split settings. It
 must be the one the base was scored on (same row ids, the base's published Brier / log loss reproduce, and for a
@@ -48,7 +52,8 @@ import os
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -313,6 +318,7 @@ class HeadEdit:
     holdout_sha256: str
     parameters_touched: int
     parameters_total: int
+    judge_at: Callable[[int], dict] = field(repr=False)   # the same `judge`, inputs and seed, at another attempt
 
 
 def patch_head(head: LoadedHead, ds: Dataset, delta: dict[str, np.ndarray], prov: Provenance, cfg: T.TrainConfig,
@@ -320,7 +326,9 @@ def patch_head(head: LoadedHead, ds: Dataset, delta: dict[str, np.ndarray], prov
                attempts: Callable[[str, str], int] | None = None) -> HeadEdit:
     """Apply a delta to one head, recalibrate every member on its trusted calibration block and score the edited
     head once on the base's untouched holdout. `cfg` is the base's `split_config`; `attempts(head, holdout_sha)`
-    counts earlier candidates judged on that holdout (the registry's). Nothing is saved here."""
+    counts earlier candidates judged on that holdout (the registry's). That count can grow before the candidate is
+    saved: `Registry.commit_edit` fixes the attempt number under its lock, and `judge_at` judges the head again at
+    it. Nothing is saved here."""
     spec = head.spec
     base = reproduce(head, ds, cfg)
     refuse_holdout_tuning(prov, set(base.ids.tolist()), f"{base_version}:{spec.name}")
@@ -345,12 +353,13 @@ def patch_head(head: LoadedHead, ds: Dataset, delta: dict[str, np.ndarray], prov
              f"touched; every member recalibrated on its trusted calibration block, scored once on the untouched "
              f"holdout"]
     th = T.finish_head(spec, ds, cfg, plan, members, oof_P, ens.kind, notes)
-    attempt = (attempts(spec.name, base.holdout_sha256) if attempts else 0) + 1
-    j = judge(base.P, th.holdout_P, base.y, base.blocks, head.verdict, th.verdict, cfg.policy, attempt, cfg.seed)
+    judge_at = partial(judge, base.P, th.holdout_P, base.y, base.blocks, head.verdict, th.verdict, cfg.policy,
+                       seed=cfg.seed)
+    j = judge_at((attempts(spec.name, base.holdout_sha256) if attempts else 0) + 1)
     th.edit = {"experimental": True, "kind": "head", "base_version": base_version, "sha256": edit_sha256,
                "provenance": prov.to_dict(), "parameters_touched": touched, "parameters_total": total,
                "holdout_ids_sha256": base.holdout_sha256, **j}
-    return HeadEdit(th, j, base.holdout_sha256, touched, total)
+    return HeadEdit(th, j, base.holdout_sha256, touched, total, judge_at)
 
 
 # ----------------------------------------------------------------------------- ONNX initializers (no onnx package)
@@ -514,6 +523,34 @@ def _data_card(b: Any, trained: dict[str, T.TrainedHead], edit: dict, provider: 
     return card
 
 
+def _outcome(heads: dict[str, dict]) -> tuple[bool, list[str]]:
+    """(passed, reasons) of a candidate from its heads' judgements: it passes only if every head it changes does."""
+    reasons = [f"{n}: {r}" for n, j in heads.items() for r in j.get("reasons") or []]
+    return not reasons and all(j.get("passed") for j in heads.values()), reasons
+
+
+def _rejudge(edit: dict, trained: dict[str, T.TrainedHead],
+             judge_at: dict[str, Callable[[int], dict]]) -> Callable[[dict[str, int]], dict]:
+    """The `rejudge` of `Registry.commit_edit`, which calls it under the registry's lock with the attempt number the
+    candidate gets on each holdout (1 + the candidates already saved on it). Another run may have saved a candidate
+    on the same holdout since this one was scored: each head whose number went up is judged again at that number
+    (`judge_at`: the same `judge`, inputs and seed), and the edit record and the head's own `edit` (its head.json)
+    carry the new judgement. A number never goes down: a lower count keeps the attempt already used."""
+
+    def rejudge(attempts: dict[str, int]) -> dict:
+        heads = dict(edit["heads"])
+        again = [n for n in judge_at if int(attempts.get(n) or 0) > int(heads[n]["attempt"])]
+        if not again:
+            return edit
+        for n in again:
+            heads[n] = judge_at[n](int(attempts[n]))
+            trained[n].edit = {**(trained[n].edit or {}), **heads[n]}
+        passed, reasons = _outcome(heads)
+        return {**edit, "heads": heads, "passed": passed, "reasons": reasons}
+
+    return rejudge
+
+
 def edit_head(svc: Any, *, head: str, delta_path: Path, base: str | None = None, author: str | None = None,
               tuned_on: str | None = None, tuned_on_ids: list[str] | None = None,
               description: str | None = None) -> dict:
@@ -534,15 +571,16 @@ def edit_head(svc: Any, *, head: str, delta_path: Path, base: str | None = None,
         raise EditRefused(f"{head}: no labelled rows today, so the edit cannot be recalibrated or scored")
     he = patch_head(lh, ds, delta, prov, cfg, edit_sha256=sha, base_version=version,
                     attempts=svc.registry.edit_attempts)
-    j = he.judgement
+    heads = {head: he.judgement}
+    passed, reasons = _outcome(heads)
     edit = {"experimental": True, "kind": "head", "base_version": version, "sha256": sha,
             "file": Path(delta_path).name, "provenance": prov.to_dict(), "author": prov.author,
             "parameters_touched": he.parameters_touched, "parameters_total": he.parameters_total,
-            "holdouts": {head: he.holdout_sha256}, "heads": {head: j}, "passed": j["passed"],
-            "reasons": [f"{head}: {r}" for r in j["reasons"]]}
-    res = svc.registry.commit_edit(version, {head: he.trained}, edit=edit, data_card=_data_card(b, {head: he.trained},
-                                                                                                  edit),
-                                   notes=[f"weight edit of {head} ({sha[:12]}) on {version}"])
+            "holdouts": {head: he.holdout_sha256}, "heads": heads, "passed": passed, "reasons": reasons}
+    trained = {head: he.trained}
+    res = svc.registry.commit_edit(version, trained, edit=edit, data_card=_data_card(b, trained, edit),
+                                   notes=[f"weight edit of {head} ({sha[:12]}) on {version}"],
+                                   rejudge=_rejudge(edit, trained, {head: he.judge_at}))
     svc._providers.pop(res["version"], None)
     return res
 
@@ -614,7 +652,7 @@ def edit_encoder(svc: Any, *, onnx_path: Path, base: str | None = None, author: 
 
     trained, status, cand_ds = svc.trainer.train_heads(provider, names, tcfg, fw,
                                                        specs={n: b.head(n).spec for n in names}, configs=cfgs)
-    heads, holdouts, reasons = {}, {}, []
+    heads, holdouts, judge_at = {}, {}, {}
     for n in names:
         base = baselines[n]
         holdouts[n] = base.holdout_sha256
@@ -632,14 +670,14 @@ def edit_encoder(svc: Any, *, onnx_path: Path, base: str | None = None, author: 
                 if not np.array_equal(cand_ds[n].y[th.holdout_idx][order], base.y):
                     heads[n] = {"passed": False, "reasons": ["holdout labels differ between the base rows and today's"]}
                 else:
-                    attempt = svc.registry.edit_attempts(n, base.holdout_sha256) + 1
-                    heads[n] = judge(base.P, th.holdout_P[order], base.y, base.blocks, b.head(n).verdict, th.verdict,
-                                     policy, attempt, cfgs[n].seed)
+                    judge_at[n] = partial(judge, base.P, th.holdout_P[order], base.y, base.blocks, b.head(n).verdict,
+                                          th.verdict, policy, seed=cfgs[n].seed)
+                    heads[n] = judge_at[n](svc.registry.edit_attempts(n, base.holdout_sha256) + 1)
             th.edit = {"experimental": True, "kind": "encoder", "base_version": version, "sha256": sha,
                        "provenance": prov.to_dict(), "holdout_ids_sha256": base.holdout_sha256,
                        "note": "retrained from scratch on the edited encoder's features (a new feature version: "
                                "no head trained on the old encoder is valid on it)", **heads[n]}
-        reasons += [f"{n}: {r}" for r in heads[n]["reasons"]]
+    passed, reasons = _outcome(heads)    # a head that could not be retrained or paired fails with its reason
     if not trained:
         raise EditRefused("no head could be retrained on the edited encoder: " + "; ".join(reasons))
 
@@ -658,15 +696,15 @@ def edit_encoder(svc: Any, *, onnx_path: Path, base: str | None = None, author: 
             "encoder_path": rel, "base_encoder_sha256": enc.get("sha256"), "provenance": prov.to_dict(),
             "author": prov.author, "parameters_touched": touched, "parameters_total": total,
             "feature_version": provider.feature_version, "holdouts": holdouts, "heads": heads,
-            "retrained": sorted(trained), "passed": not reasons and len(trained) == len(names),
-            "reasons": reasons, "notes": notes}
+            "retrained": sorted(trained), "passed": passed, "reasons": reasons, "notes": notes}
     pinfo = pack.info(provider)
     pc = pinfo.get("config") if isinstance(pinfo, dict) else None
     res = svc.registry.commit_edit(version, trained, edit=edit, carry=False, pack=pinfo,
                                    feature_version=provider.feature_version,
                                    encoder=pc.get("encoder") if isinstance(pc, dict) else None,
                                    data_card=_data_card(b, trained, edit, provider),
-                                   notes=[f"encoder edit {sha[:12]} on {version}", *notes])
+                                   notes=[f"encoder edit {sha[:12]} on {version}", *notes],
+                                   rejudge=_rejudge(edit, trained, judge_at))
     svc._providers.pop(res["version"], None)
     return res
 

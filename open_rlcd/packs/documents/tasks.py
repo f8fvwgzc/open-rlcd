@@ -5,10 +5,13 @@
 A JSONL row: `{"query": "...", "time": ISO | epoch, "group": "...", "answer": "...", "evidence": [...]}`; only
 `query` is required. `time` is also each state's `now`, the reference time of the document-age features; log it:
 /v1/decide measures age from the time of the request, and a row without `time` measures it relative to the newest
-candidate (another distribution) or not at all. `evidence` (what the production system actually showed the LLM) is a list of chunk objects
-`{id, text, title?, ...}`, chunk ids of the local corpus, or plain strings.
+candidate (another distribution) or not at all. `evidence` (what the production system actually showed the LLM)
+is a list of chunk objects `{id, text, title?, ...}`, chunk ids of the corpus, or plain strings (a string that
+names no chunk of the corpus is taken as evidence text).
 
-For every query, retrieval runs against the local corpus (top `label_top_k`, default 5) and yields:
+The corpus is the one `rlcd ingest` built under the home or, with `pack_config.vector` in attach mode, the attached
+store (nothing is ingested there). For every query, retrieval runs against it (top `label_top_k`, default 5) and
+yields:
   * one `query` item (response_type, route, needs_graph), with the retrieved candidates;
   * one `query_chunk` item per top-k candidate (chunk_relevant);
   * one `query_evidence` item with the top-k as evidence, plus one with the logged evidence when there is some
@@ -20,8 +23,9 @@ and `rlcd label audit` read the same thing a person would. Item ids hash the sta
 log adds nothing twice.
 
 What this does not do: it does not label anything (that is `rlcd label bootstrap` / `audit`), it does not
-deduplicate near-identical queries, and without an ingested corpus it can only produce `query` items (plus
-evidence / answer items for rows that carry their own evidence).
+deduplicate near-identical queries, and with nothing to retrieve from (no ingested corpus and no attached store)
+it can only produce `query` items, plus a `query_evidence` item for a row that carries its own evidence and a
+`query_evidence_answer` item for a row with an answer.
 """
 from __future__ import annotations
 
@@ -158,8 +162,9 @@ def _item_id(view: str, state: dict) -> str:
 # ----------------------------------------------------------------------------- tasks
 
 def label_tasks(project: Project, provider: Any, corpus: Any = None) -> list[LabelItem]:
-    """Label items for every query of `pack_config.queries`. `corpus` defaults to the project's local corpus
-    (opened with the provider's encoder); without one, retrieval is skipped."""
+    """Label items for every query of `pack_config.queries`. `corpus` defaults to the project's corpus, opened
+    with the provider's encoder: the one `rlcd ingest` built under the home or, with `pack_config.vector` in attach
+    mode, the attached store. Without either, retrieval is skipped."""
     cfg = project.pack_config
     if not cfg.get("queries"):
         raise ContractError("pack_config.queries is not set: point it at a query log (CSV with a 'query' column, or "
