@@ -107,8 +107,26 @@ class BasePack:
         return dict(self.defaults().get("policy") or {"abstain": self.abstain})
 
     def info(self, provider: FeatureProvider | None = None) -> dict:
-        return {"name": self.name, "version": self.version,
-                "config": provider.to_config() if provider is not None else {}}
+        """The pack info a trained version stores (model.json `pack`): name, version, the provider's config and,
+        when `carry_key` gives one, `carry_key`."""
+        out = {"name": self.name, "version": self.version,
+               "config": provider.to_config() if provider is not None else {}}
+        key = self.carry_key(provider)
+        if key is not None:
+            # in its JSON form (a tuple becomes a list): `Registry.commit` compares it with the value a version
+            # stored in its model.json
+            out["carry_key"] = json.loads(json.dumps(key))
+        return out
+
+    def carry_key(self, provider: FeatureProvider | None = None) -> Any:
+        """What this pack's trained heads depend on that the feature version does not capture, as a JSON value
+        (None, the default: nothing). `info` stores it with the version. A train carries a head of rlcd-latest over
+        into the new version only when the pack name, the feature version and this value are all the same
+        (`Registry.commit`); otherwise a head the train does not retrain is left out of the new version, whose
+        model.json names it (its notes and `not_carried_over`), as `rlcd train` does. A version that stored none (its
+        pack gave None, or an open-rlcd release that did not record it saved the version) matches only a pack that
+        gives None: a pack that starts giving one carries none of that version's heads over."""
+        return None
 
     # optional hooks; packs override what they support
     def decide(self, service: Any, request: dict) -> dict:
@@ -141,7 +159,10 @@ class BasePack:
         """The heads this project switches off. The service does not serve them, even when a trained version has
         them (`Service.specs`), and `rlcd check` and `rlcd config check` keep their route contracts, rollout modes
         and policy overrides without comparing them with a head: all three read this one list (through
-        `switched_off` below). A switched-off head stays in the bundle, so switching it on again needs no retrain.
+        `switched_off` below). A switched-off head stays in the bundle, and a train carries it over into its new
+        version only when rlcd-latest records the same pack, feature version and `carry_key` (`Registry.commit`):
+        switching it on again needs no retrain while the version served has it, and a version that lacks it answers
+        it with the uninformed prior until a train retrains it.
         `trained`: the heads of the trained version in question (none when no model is involved).
 
         Here, what rlcd.yaml switches off with `heads.<head>.enabled: false` (`heads()` leaves those heads out

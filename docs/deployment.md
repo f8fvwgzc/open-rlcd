@@ -239,7 +239,8 @@ root filesystem read-only, with a tmpfs `/tmp`).
 | `labels/` | items and judge / human labels | by `rlcd label ...` | **precious** where labeling happens (usually the training machine, not the server) |
 | `tabular/category_salt` | salt for hashed categorical columns (tabular pack) | once | keep with the home; each bundle also stores the salt it was trained with |
 | `corpus/` | documents pack: chunks, vector index, entity graph, BM25. With a remote store in index mode (`pack_config.vector` / `graph`) the vectors or the graph live in that store instead; with `vector` in attach mode `corpus/` is not used | by `rlcd ingest` | rebuildable from the source documents (re-ingest); back up a remote store with that store's own tools |
-| `encoders/` | the downloaded ONNX encoder (~135 MB) | first use | rebuildable (downloads again, unless `HF_HUB_OFFLINE=1`) |
+| `encoders/` | the ONNX encoder and its `tokenizer.json`, downloaded from the Hugging Face Hub (~135 MB) | first use | rebuildable (downloads again, unless `HF_HUB_OFFLINE=1`), except `encoders/edited/` and any other local file that an encoder's `path` or `tokenizer` names (`pack_config.encoder`, or `encoder` in a version's `model.json`): nothing downloads those |
+| `encoders/edited/<sha256>.onnx` | an edited encoder that `rlcd patch --encoder` registered ([weight edits](weight-edits.md)); every version trained on it loads it by this path | by `rlcd patch --encoder` | **precious**: no bundle carries it and nothing downloads it. Without it, every decision of such a version that runs a trained head fails with 503 `encoder_unavailable`. The same holds for any other local file that an encoder's `path` or `tokenizer` names |
 | `cache/embeddings/*.sqlite` | embedding cache, one file per encoder hash | continuously | rebuildable; safe to delete while stopped |
 | `cache/huggingface/` | the Hugging Face client's own files | first download | rebuildable |
 | `reports/` | `rlcd report` output | on demand | rebuildable |
@@ -284,8 +285,9 @@ Record the head after the stop. A decision logged between the two steps would be
 recorded head, and the restore check below would then fail for a good backup. `-T` keeps the command's stderr
 out of the JSON. (`rlcd_rlcd-home` is the compose volume. `open-rlcd:local` is the image `compose.yaml` builds;
 any image of this project will do, since only its `tar` runs.) A filesystem or volume snapshot taken while
-stopped is equally good. Add `--exclude ./encoders --exclude ./corpus` if you would rather re-download and
-re-ingest.
+stopped is equally good. Add `--exclude ./corpus` if you would rather re-ingest. Do not exclude `./encoders`:
+the downloaded encoder downloads again on first use (unless `HF_HUB_OFFLINE=1`), but an edited one under
+`encoders/edited/`, or any other local file an encoder's `path` or `tokenizer` names, cannot be downloaded at all.
 
 A copy taken while the service runs is usable but not guaranteed consistent: a log may end in a half-written line
 (readers skip it and `verify` lists it under `unreadable`), and the ledger may be one feedback ahead of or behind
@@ -418,7 +420,7 @@ What a bundle does not carry, for the documents pack:
 
 | needed at serve time | how it gets to the server |
 |---|---|
-| the encoder (ONNX) | downloaded from the Hugging Face Hub into `encoders/` on first use, and its sha256 must match the bundle's. No egress: copy `encoders/` from the training home and set `HF_HUB_OFFLINE=1` |
+| the encoder (ONNX) and its tokenizer | downloaded from the Hugging Face Hub into `encoders/` on first use, and the ONNX file's sha256 must match the bundle's. No egress: copy `encoders/` from the training home and set `HF_HUB_OFFLINE=1`. A file that the bundle's `model.json` `encoder` names in `path` (the ONNX file) or `tokenizer` (its `tokenizer.json`) is a local file of the home, loaded from there and never downloaded: copy each one from the training home to the same path in the server's home before you import the bundle, or every decision that runs a trained head fails with 503 `encoder_unavailable`. A version made by `rlcd patch --encoder` names `encoders/edited/<sha256>.onnx` in `path` and keeps the base's `tokenizer` when the base has one; a version trained with `pack_config.encoder.path` or `tokenizer` names those files |
 | the corpus, if callers rely on open-rlcd's own retrieval | `rlcd ingest` on the server against the mounted documents, or copy `corpus/` from the training home. Callers that send their own `candidates` need none. A copied `corpus/` names the remote stores that hold its index (Qdrant, pgvector, Neo4j in index mode): the server needs the same `pack_config.vector` / `graph`, network access to them and their credentials in its environment. A store in attach mode needs only the last two |
 | feedback posted in production | it is in the server's `feedback.jsonl`. Training reads the home it runs against: train where the feedback is, or copy the file to the training home |
 
@@ -483,7 +485,7 @@ instead.
 | endpoint | key | use |
 |---|---|---|
 | `GET /health` | none | liveness: 200 whenever the process is up. The image's `HEALTHCHECK` and the proxy's upstream check call it |
-| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served. It builds no encoder and opens no corpus, so it still answers 200 when a missing extra or encoder files missing under `HF_HUB_OFFLINE=1` fail every decision that runs a trained head with 503 `encoder_unavailable`, and when a broken corpus fails retrieval (a `/v1/decide` sent without `candidates`: see the smoke decisions below) |
+| `GET /ready` | none | readiness: 200 when a trained model can decide, 503 (`kind: not_ready`, with `reasons`) while the service is untrained, its pack cannot load or its policy cannot be served. It builds no encoder and opens no corpus, so it still answers 200 when a missing extra, encoder files missing under `HF_HUB_OFFLINE=1` or a missing local encoder or tokenizer file (such as one under `encoders/edited/`) fail every decision that runs a trained head with 503 `encoder_unavailable`, and when a broken corpus fails retrieval (a `/v1/decide` sent without `candidates`: see the smoke decisions below) |
 | `GET /v1/check` | API | the pre-launch checklist as JSON: `ok`, and per item pass / warn / fail |
 | `GET /v1/metrics?since=2026-11-01` | API | action mix, false automation, online reliability against the holdout, review load, latency. JSON, not Prometheus format |
 | `GET /v1/calibration?head=answerable` | API | the holdout numbers a head was accepted on |
@@ -536,11 +538,18 @@ corpus, so also send smoke decisions:
 Outcome-based numbers (false automation, drift) only exist if callers post `/v1/feedback` and `/v1/outcome`.
 
 **Logs.** The service writes to stdout / stderr: uvicorn's access line per request and the `open_rlcd` logger for
-errors. A 500, and a 503 from a configured vector or graph store, carry only the exception's type in the body;
-the details are in the container log (`docker compose logs -f rlcd`). The documents pack's own 503s differ:
+errors. A 500 `internal`, and a 503 from a configured vector or graph store, carry only the exception's type in the
+body; the details are in the container log (`docker compose logs -f rlcd`). A store whose client library is not
+installed is a 503 that names the extra to install, and nothing is logged for it. A 500 `bad_config` names the
+`rlcd.yaml` setting that is not valid, and nothing is logged for it either. The trading pack's 503
+`connector_unavailable`, when its quant sidecar cannot be reached or answers with a 5xx, names only the request and
+the exception's type or the status; the details go to the container log as a WARNING on the logger
+`open_rlcd.packs.trading`, which quotes `quant_url` with `***@` in place of its user info, and the exception's
+message or the sidecar's answer with the user name, the password and the basic-auth header scrubbed where it echoes
+them. The documents pack's own 503s differ:
 `encoder_unavailable` and a local-corpus `connector_unavailable` carry the error message in the body (the encoder
-one can include the absolute path of `encoders/` in the home), and nothing is logged for them. Their reason is
-in the response the caller received. Verbosity: override the command with
+one can include the absolute path of the home or of its `encoders/`), and nothing is logged for them. Their reason
+is in the response the caller received. Verbosity: override the command with
 `["serve", "--host", "0.0.0.0", "--port", "8095", "--log-level", "warning"]`. Request bodies are
 not logged here; they are in `decisions.jsonl` (redacted) when `serve.log_states` is on. The proxy logs JSON
 access lines with status codes.

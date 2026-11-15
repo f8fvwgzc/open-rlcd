@@ -6,7 +6,8 @@
       hash-checked head.json and MODEL_CARD.md;
   (d) edited bundles still pass `bundle.validate`, tampered ones still fail, and nothing is ever a pickle;
   (e) the holdout only judges: edits tuned on holdout rows are refused before anything is scored, and every
-      further candidate scored on the same holdout faces a tighter bound;
+      further candidate scored on the same holdout faces a tighter bound, numbered when it is saved (candidates
+      scored side by side are numbered in the order they are saved, and a number is never lowered);
   (f) an edit is judged against its base: changed rows, a moved rlcd-latest, malformed deltas and LightGBM members
       are refused or not promoted;
   (g) an edit is a version like any other (M10, M11): its promotion is in registry.json `history`, `rlcd rollback`
@@ -77,6 +78,67 @@ def flip_delta(svc: Service, path: Path) -> Path:
 
 def manual(**kw):
     return {"author": "manual", "tuned_on": "development", **kw}
+
+
+def marginal_deltas(svc: Service, root: Path) -> tuple[Path, Path]:
+    """Two deltas of `good`, saved in `root`: `worse`, a fixed random nudge of the genuine coefficients, which fails
+    the gate, and `marginal`, the same nudge with part of the leak removed, which passes the paired test as its
+    holdout's first candidate (one-sided 0.95) but not as the second (0.975). The fraction removed is bisected to
+    the edge where the gate starts to pass at attempt 1. Nothing is saved in the home."""
+    version = svc.registry.latest_id()
+    lh = svc.bundle(version).head("good")
+    tcfg, fw = PT._settings(svc)
+    cfg = PT.split_config(lh, tcfg, svc.policy(version))
+    ds = svc.pack_for(version).datasets(svc.project, svc.provider(version), ["good"], svc.logs.feedback(), fw)["good"]
+    prov = PT.provenance({}, author="manual", tuned_on="development")
+    ms = lh.ensemble.members
+    li = lh.ensemble.feature_names.index("leak")
+    rng = np.random.default_rng(0)
+    nudge = [rng.normal(size=base.coef.shape) * np.abs(base.coef[:, :li]).mean() for base, _ in ms]
+
+    def delta(frac: float) -> dict:
+        out = {}
+        for k, (base, _) in enumerate(ms):
+            d = nudge[k].copy()
+            d[:, li] = -frac * base.coef[:, li]
+            out[f"member_{k}.coef"] = d
+        return out
+
+    def passes(frac: float, attempt: int) -> bool:
+        return PT.patch_head(lh, ds, delta(frac), prov, cfg, edit_sha256="0" * 64, base_version=version,
+                             attempts=lambda h, s: attempt - 1).judgement["passed"]
+
+    lo, hi = 0.0, 1.0
+    assert not passes(lo, 1) and passes(hi, 1)
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if not passes(mid, 1):
+            lo = mid
+        elif passes(mid, 2):
+            hi = mid
+        else:
+            save_file(delta(0.0), str(root / "worse.safetensors"))
+            save_file(delta(mid), str(root / "marginal.safetensors"))
+            return root / "worse.safetensors", root / "marginal.safetensors"
+    raise AssertionError("no delta of `good` passes the gate at attempt 1 and fails it at attempt 2")
+
+
+def scored_side_by_side(monkeypatch, owner, second) -> list[dict]:
+    """Two `rlcd patch` runs on one holdout, as when they run side by side: the next candidate to reach
+    `owner.commit_edit` (a Registry, or the class) has been scored and waits there, not yet saved, while `second()`
+    runs a whole other edit and saves it. Returns a list that gets the waiting candidate's edit record as it was
+    scored."""
+    real = owner.commit_edit
+    scored: list[dict] = []
+
+    def commit_edit(*a, **kw):
+        if not scored:
+            scored.append(kw["edit"])
+            second()
+        return real(*a, **kw)
+
+    monkeypatch.setattr(owner, "commit_edit", commit_edit)
+    return scored
 
 
 # ----------------------------------------------------------------------------- (a) harmful edits are rejected
@@ -255,6 +317,70 @@ def test_e_every_further_attempt_on_a_holdout_faces_a_tighter_bound_and_base_mus
     assert svc.resolve(again["version"]) == again["version"]
     # the other head's holdout has not judged any edit yet
     assert svc.registry.edit_attempts("clean", first["holdouts"]["good"]) == 0
+
+
+def test_e_candidates_scored_side_by_side_are_numbered_in_the_order_they_are_saved(tmp_path, monkeypatch):
+    """The attempt number is fixed when a candidate is saved, under the registry's lock. A, scored as its holdout's
+    first candidate, waits to be saved while B runs a whole `rlcd patch` on the same holdout and is saved first: B
+    is attempt 1, and A is attempt 2, judged again at one-sided 0.975, in every record of each. A is a marginal
+    edit that passes at 0.95 only, so it is not promoted, as when the two run one after the other."""
+    svc = trained_service(tmp_path)
+    base = svc.registry.latest_id()
+    worse, marginal = marginal_deltas(svc, tmp_path)
+    out = {}
+    scored = scored_side_by_side(monkeypatch, svc.registry, lambda: out.update(
+        B=PT.edit_head(svc, head="good", delta_path=worse, base=base, **manual())))
+    out["A"] = PT.edit_head(svc, head="good", delta_path=marginal, base=base, **manual())
+    a, b = out["A"], out["B"]
+    as_scored = scored[0]["heads"]["good"]
+    assert as_scored["attempt"] == 1 and as_scored["alpha"] == 0.05 and as_scored["passed"] is True
+    assert (b["version"], a["version"]) == ("rlcd-0.1.2", "rlcd-0.1.3")        # B was saved first
+    for res, k, alpha, confidence in ((b, 1, 0.05, 0.95), (a, 2, 0.025, 0.975)):
+        bundle = svc.bundle(res["version"])
+        records = [res["heads"]["good"],                     # what `rlcd patch` returns and prints
+                   bundle.meta["edit"]["heads"]["good"],     # model.json: the edit record
+                   bundle.meta["heads"]["good"]["edit"],     # model.json: the head's entry
+                   bundle.head("good").summary["edit"]]      # head.json (hash-checked)
+        for j in records:
+            assert j["attempt"] == k and j["alpha"] == alpha
+            assert j["paired_test"]["alpha"] == alpha and j["paired_test"]["confidence"] == confidence
+            assert {key: j[key] for key in records[0]} == records[0]
+        assert bundle.meta["edit"]["passed"] is res["passed"] and bundle.meta["edit"]["reason"] == res["reason"]
+        entry = svc.registry.entry(res["version"])["edit"]
+        assert (entry["passed"], entry["promoted"], entry["servable"], entry["reason"]) == \
+            (res["passed"], res["promoted"], res["servable"], res["reason"])
+    # judged as the second candidate, A fails: kept for inspection, never served, and the base still serves
+    assert a["passed"] is False and a["promoted"] is False and a["servable"] is False
+    assert a["reasons"] == [f"good: {r}" for r in a["heads"]["good"]["reasons"]]
+    assert a["reason"] == "; ".join(a["reasons"]) and "one-sided 0.975, attempt 2 on this holdout" in a["reason"]
+    assert b["passed"] is False and svc.registry.latest_id() == base
+    assert svc.registry.edit_attempts("good", a["holdouts"]["good"]) == 2
+
+
+def test_e_an_attempt_number_is_never_lowered(tmp_path, monkeypatch):
+    """`Registry.commit_edit` hands `rejudge` the attempt number it counts under its lock. A head is judged again
+    only at a higher number than it was scored at; a lower count (a candidate removed from registry.json by hand in
+    the meantime) keeps the number already used, so the bound is never loosened."""
+    svc = trained_service(tmp_path)
+    base = svc.registry.latest_id()
+    path = no_leak_delta(svc, tmp_path / "noleak.safetensors")
+    PT.edit_head(svc, head="good", delta_path=path, **manual())
+    seen = {}
+    real = svc.registry.commit_edit
+
+    def commit_edit(*a, **kw):
+        seen.update(kw)
+        return real(*a, **kw)
+
+    monkeypatch.setattr(svc.registry, "commit_edit", commit_edit)
+    res = PT.edit_head(svc, head="good", delta_path=path, base=base, **manual())
+    assert res["heads"]["good"]["attempt"] == 2
+    rejudge, edit = seen["rejudge"], seen["edit"]
+    assert rejudge({"good": 1}) is edit and rejudge({"good": 2}) is edit and rejudge({}) is edit
+    tighter = rejudge({"good": 3})
+    j = tighter["heads"]["good"]
+    assert j["attempt"] == 3 and j["alpha"] == 0.016667 and j["paired_test"]["confidence"] == 0.983333
+    assert edit["heads"]["good"]["attempt"] == 2                    # the record handed in is not changed
 
 
 # ----------------------------------------------------------------------------- (f) judged against its base
@@ -453,6 +579,30 @@ def test_cli_patch_exit_status_says_promoted_kept_or_refused(tmp_path, capsys):
     assert res["promoted"] and res["version"] == "rlcd-0.1.3"
     assert main([*rl, "report", "--no-open", "--model", "rlcd-0.1.2"]) == 0     # a rejected candidate can be inspected
     assert main([*rl, "patch", "--delta", str(good), "--author", "manual", "--tuned-on", "none"]) == 2
+
+
+def test_cli_patch_prints_the_attempt_number_fixed_when_the_candidate_is_saved(tmp_path, capsys, monkeypatch):
+    """Two `rlcd patch` runs on one holdout, and the run that scored first is saved second: it is judged as the
+    holdout's second candidate, and what it prints says so. For a marginal edit that means exit 3 (kept, never
+    served) where a count taken while scoring would have promoted it (exit 0)."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_config(root / "rlcd.yaml", {"name": "leak", "pack": "tests.leakpack:LeakPack", "home": "./var"})
+    rl = ["--project", str(root), "--home", str(root / "var")]
+    assert main([*rl, "train"]) == 0
+    svc = Service(Project(root=root, data={"pack": "tests.leakpack:LeakPack"}), home=root / "var")
+    worse, marginal = marginal_deltas(svc, tmp_path)
+    other = {}
+    scored_side_by_side(monkeypatch, Registry, lambda: other.update(
+        res=PT.edit_head(svc, head="good", delta_path=worse, **manual())))
+    capsys.readouterr()
+    assert main([*rl, "patch", "--delta", str(marginal), "--head", "good", "--author", "manual", "--tuned-on",
+                 "development"]) == 3
+    out = capsys.readouterr().out
+    assert other["res"]["version"] == "rlcd-0.1.2" and other["res"]["heads"]["good"]["attempt"] == 1
+    assert "-> rlcd-0.1.3" in out and "FAIL" in out and "never served" in out
+    assert "one-sided 0.975, attempt 2 on this holdout" in out
+    assert Registry(root / "var").latest_id() == "rlcd-0.1.1"
 
 
 def test_cli_rollback_after_a_patch_and_no_way_to_promote_a_failed_candidate(tmp_path, capsys, monkeypatch):

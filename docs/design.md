@@ -254,14 +254,32 @@ class Pack(Protocol):
     version: str
     def heads(self, project) -> dict[str, HeadSpec]
     def provider(self, project, config: dict | None = None) -> FeatureProvider   # config from a bundle
-    def datasets(self, project, provider, heads: list[str]) -> dict[str, Dataset]
+    def datasets(self, project, provider, heads: list[str], feedback: list[dict] | None = None,
+                 feedback_weight: float = 5.0) -> dict[str, Dataset]
+
+class BasePack:                          # what a pack subclasses: the plumbing, and a default for each optional hook
+    yaml_path: Path | None = None        # the pack's YAML: heads, policy, batteries
+    abstain = "escalate"                 # the abstaining action when that YAML has no `policy`
+    rank_head: str | None = None         # the default head of POST /v1/rank
+    def defaults(self) -> dict                         # that YAML, read
+    def policy_defaults(self) -> dict                  # its `policy`, else {abstain: abstain}
+    def heads(self, project) -> dict[str, HeadSpec]    # its heads + rlcd.yaml `heads:`, minus `enabled: false`
+    def info(self, provider=None) -> dict              # model.json `pack`: name, version, config, carry_key
+    def supports(self, hook: str) -> bool              # does the pack override this hook?
     # optional hooks
-    def decide(self, service, request: dict) -> dict
-    def evaluate(self, service, request: dict) -> dict
-    def ingest(self, project, args) -> dict
-    def label_tasks(self, project) -> Iterable[LabelTask]
-    def synth(self, seed: int, n: int) -> dict
+    def decide(self, service, request: dict) -> dict              # POST /v1/decide; default: the generic decide
+    def evaluate(self, service, request: dict) -> dict            # POST /v1/evaluate; default: 422 `unsupported`
+    def ingest(self, project, args: dict) -> dict                 # rlcd ingest; default: refused
+    def label_tasks(self, project, provider=None) -> Iterable[LabelItem]   # rlcd label bootstrap; default: none
+    def synth(self, seed: int = 7, n: int = 1000) -> dict         # synthetic data with known answers
+    def switched_off(self, project, trained=()) -> set[str]       # heads not served; default: `enabled: false`
+    def carry_key(self, provider=None) -> Any                     # JSON; a head carries over only if it is unchanged
+    def config_keys(self) -> dict | None                          # `rlcd config check`: the pack_config keys
+    def check_config(self, project) -> list[dict]                 # `rlcd config check`: more findings, offline
+    def head_override_keys(self) -> set[str]                      # extra fields of a `heads.<head>` override
 ```
+
+[writing-a-pack.md](writing-a-pack.md) says what each hook is used for (sections 6 and 7).
 
 Every head also accepts a precomputed state `{x, feature_names, feature_version}`; a mismatched
 `feature_version` is a 422 (`feature_version_mismatch`), as in the reference.
@@ -270,9 +288,11 @@ Every head also accepts a precomputed state `{x, feature_names, feature_version}
 
 ```
 <bundle>/
-  model.json                      format "open-rlcd-bundle/1", version id, created_at, pack {name, version, config},
-                                  feature_version, encoder {id, sha256, dim}, policy config, heads {name: {spec,
-                                  dir, files {name: sha256}, metrics, verdict, calibration, conformal}}, data_card
+  model.json                      format "open-rlcd-bundle/1", version id, created_at, pack {name, version, config,
+                                  carry_key when the pack gives one}, feature_version, encoder {id, sha256, dim},
+                                  policy config, heads {name: {spec, dir, files {name: sha256}, metrics, verdict,
+                                  calibration, conformal}}, data_card, notes, not_carried_over when the train
+                                  left heads of the previous rlcd-latest out
   heads/<dir>/ensemble.json       spec, members (kind, params, calibrator JSON), feature names, missing-input rates
   heads/<dir>/member_<k>.safetensors   logreg: coef, intercept, mean, scale, fill
   heads/<dir>/member_<k>.txt           lightgbm: native text model
@@ -285,8 +305,14 @@ Every head also accepts a precomputed state `{x, feature_names, feature_version}
 
 Loading reads only JSON, safetensors and LightGBM text: it never executes code. `registry.py` keeps
 `RLCD_HOME/registry.json` (`latest`, `next`, `versions`) and one bundle per version under `models/<version>/`;
-a retrain that touches some heads carries the others over. Import validates names, extensions, sizes and
-refuses symlinks and path traversal.
+a train carries each head it does not retrain over from the previous `rlcd-latest` when that version has the same
+pack name, feature version and `carry_key` (`BasePack.carry_key`, stored as `pack.carry_key`: what the heads depend
+on that the feature version does not capture, such as the trading pack's `sl_pips`, `tp_pips`, `tp2_pips` and
+`horizon`, which define its labels; a version saved without one has None); otherwise it leaves the head out of the
+new version. A note of the new version names the heads it left out ("not carried over (trained with another feature
+version, pack or pack settings, or by an open-rlcd release that did not record them): [...]"), and its `model.json`
+lists them under `not_carried_over`, which the train job copies (`GET /v1/train/{job_id}`) and `rlcd train` prints
+on stderr with the same reason. Import validates names, extensions, sizes and refuses symlinks and path traversal.
 
 ## 8. The documents pack
 
@@ -394,8 +420,9 @@ pgvector and Neo4j with fakes that record every statement, its parameters and it
   The worst a prompt-injected document can do is earn itself a wrong weak label, which never calibrates.
 * Tabular bundles carry the most frequent values of categorical columns; `pack_config.hash_categories: true`
   stores salted hashes instead, and `rlcd export` / `rlcd push` warn. `rlcd push --private` refuses a public repo.
-* Secrets come from the environment only; `.gitignore` covers `var/`, `*.npz`, `.env`, caches and bundles other
-  than the demo.
+* Secrets come from the environment only, except a `user:password@` in the trading pack's `quant_url`, which goes
+  to the sidecar as HTTP basic auth; `.gitignore` covers `var/`, `*.npz`, `.env`, caches and bundles other than
+  the demo.
 
 ## 11. What it is not
 

@@ -62,9 +62,11 @@ A key written with no value (`timeout:`, or `timeout: null`) usually means the d
   automates nothing (the check warns).
 * **`routes.<head>.<option>:` with no value is an empty contract**, not a missing one: the option has no limits,
   and a `fallback` may name it.
-* **In a remote store's attach mode, an empty `*_field` means the store has no such field**, not the default:
-  `pack_config.vector.doc_id_field:` leaves every candidate's `doc_id` empty. `text_field` and a pgvector
-  `id_field` cannot be empty; a Qdrant `id_field:` means the point id is the chunk id, as when it is missing.
+* **In a remote store's attach mode, an empty `doc_id_field`, `title_field`, `updated_at_field` or
+  `authority_field` means the store has no such field**, not the default: `pack_config.vector.doc_id_field:`
+  leaves every candidate's `doc_id` empty. The other `*_field` keys follow the general rule or refuse an empty
+  value: `text_field` and a pgvector `id_field` cannot be empty, a Qdrant `id_field:` means the point id is the
+  chunk id, as when it is missing, and a pgvector `vector_field:` is the default column, `embedding`.
 
 ## Top level
 
@@ -87,7 +89,7 @@ column. The trading pack has one head per interval and no others: add the interv
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. A battery that asks the head then fails as a whole (422 `unknown_head`, and `rlcd check` fails `batteries.bound`): give the battery a version without that question (worked example 1). Its route contracts are kept and not consulted, so neither check compares them with the head; a malformed contract (such as `requires: 5`) is still an error, because every decide reads the whole `routes` section. |
+| `heads.<head>.enabled` | true / false | true | `false` switches the head off: it is not trained and not served, without a retrain. A battery that asks the head then fails as a whole (422 `unknown_head`, and `rlcd check` fails `batteries.bound`): give the battery a version without that question (worked example 1). Its route contracts are kept and not consulted, so neither check compares them with the head; a malformed contract (such as `requires: 5`) is still an error, because every decide reads the whole `routes` section. Switching it on again serves the trained head without a retrain while the served model still has it: a train carries a head it does not retrain over only while the feature version is unchanged (in the trading pack, also `sl_pips`, `tp_pips`, `tp2_pips` and `horizon`: see [its `pack_config`](#pack_config-of-the-trading-pack)). A train that leaves it out names it (`rlcd train` on stderr, as trained with another feature version, pack or pack settings, or by an open-rlcd release that did not record them; `not_carried_over` in the train job); switched on, it then answers with the uninformed prior and its decisions abstain until a train retrains it. |
 | `heads.<head>.stakes` | a stakes level | the pack's (`medium`; documents `grounded`: `high`) | Which thresholds of `policy.stakes` its decisions use when the request names none. Must be a level the policy has. |
 | `heads.<head>.conformal` | number in (0, 0.5) | the pack's (documents: 0.05 on `answerable` and `grounded`, none on the others; tabular: none) | A promised error rate. For a `gate` head, the error among its yeses: the threshold is chosen on the calibration blocks and checked on the holdout. Too few calibration rows (45 at 0.05 with the default `train.conformal_delta`) or a holdout that breaks the promise caps the head at confirm. For a choice or score head, the miscoverage of the `prediction_set` returned next to the answer in each decision (`/v1/decide`, `/v1/evaluate`, `rlcd decide`); System One answers (`/v1/systemone`, `rlcd ask`) and `/v1/rank` carry none. A noul head with decision `argmax` gets no set: its coverage is only measured, in the training report (`rlcd calibration <head>`). It never caps a decision. |
 | `heads.<head>.model` | `logreg`, `lightgbm`, `auto` | the pack's (`logreg`) | The base model. `auto` is LightGBM when it can be imported, else logistic regression. |
@@ -222,25 +224,31 @@ applies them to every head it decides; the documents pack's decide applies them 
 `route`.
 
 A contract under a name that is not a head of the project is only a warning, because the served model may still
-have that head: a head the pack stops defining stays in the bundle, and each train carries over the heads it does
-not retrain while the feature version is unchanged. The documents pack (and a custom pack, unless its
-`switched_off` hook says otherwise) keeps serving such a head, and applies its contracts as any served head's,
-which `rlcd check` compares with the head under `routes.contracts`. The tabular pack serves only the targets
-rlcd.yaml lists (in `pack_config`, or under `heads:` with a `label`): a target removed from there is not served,
-at once and without a retrain.
+have that head: a head the pack stops defining stays in the bundle, and a train carries it over only while the
+feature version is unchanged (in the trading pack, also `sl_pips`, `tp_pips`, `tp2_pips` and `horizon`) and names
+it when it leaves it out (see [`heads.<head>.enabled`](#heads-change-a-question-the-pack-defines)). The documents
+pack (and a custom pack, unless its `switched_off` hook says otherwise) keeps serving such a head, and applies its
+contracts as any served head's, which `rlcd check` compares with the head under `routes.contracts`. The tabular
+pack serves only the targets rlcd.yaml lists (in `pack_config`, or under `heads:` with a `label`), and the trading
+pack only the heads of the intervals `pack_config.intervals` lists: a target or an interval removed from there is
+not served, at once and without a retrain.
 
 A switched-off head keeps its contracts, and no decision consults them: a head switched off with
-`heads.<head>.enabled: false`, in the tabular pack also with `pack_config.targets.<head>.enabled: false`, and a
-removed tabular target the served model still has. `rlcd check` does not compare them with the head and names
-them under `routes.contracts`; config check does not compare them either, and warns that a removed target is not
-a head of the project (it sees no model). A removed target stays in the model while the feature version is
-unchanged, which needs its label column to stay out of the features (under `exclude`, outside an explicit
-`features` list, or no longer in the file). Switching the head on again, or listing the target again, serves the
-trained head and its contracts again without a retrain. A name that is neither served nor switched off (the
-model has no head of that name, and rlcd.yaml does not switch it off) has contracts no decision consults either,
-and `rlcd check` fails `routes.contracts` until the model has that head or the contracts are gone. That is what
-becomes of a target removed under `features: auto`: its label column becomes a feature, so the next train has
-other features and drops the head.
+`heads.<head>.enabled: false`, in the tabular pack also with `pack_config.targets.<head>.enabled: false`, and the
+head of a removed tabular target or trading interval that the served model still has. `rlcd check` does not
+compare them with the head and names them under `routes.contracts`; config check does not compare them either,
+and warns that a removed target's or interval's head is not a head of the project (it sees no model). A train
+carries a switched-off head over only while the feature version is unchanged (in the trading pack, also `sl_pips`,
+`tp_pips`, `tp2_pips` and `horizon`), and for a removed target's head the feature version stays the same only while
+the target's label column stays out of the features (under `exclude`, outside an explicit `features` list, or no
+longer in the file). While the served model has the head, switching it on again, or listing the target or interval
+again, serves the trained head and its contracts again without a retrain. A train that leaves it out names it (see
+[`heads.<head>.enabled`](#heads-change-a-question-the-pack-defines)); switched on or listed again, it then answers
+with the uninformed prior until a train retrains it. A name that is neither served nor switched off (the model has no
+head of that name, and rlcd.yaml does not switch it off) has contracts no decision consults either, and `rlcd check`
+fails `routes.contracts` until the model has that head or the contracts are gone. That is what becomes of a target
+removed under `features: auto`: its label column becomes a feature, so the next train has other features and drops
+the head.
 
 | key | type | default | what it does |
 |---|---|---|---|
@@ -326,7 +334,7 @@ the `*_env` keys name the environment variables that hold them.
 | `pack_config.vector.vector_field` | text | `embedding` | pgvector: the `vector` column. |
 | `pack_config.vector.create_index` | true / false | true | pgvector, index mode: create an HNSW cosine index on the vector column. |
 | `pack_config.vector.timeout` | whole number >= 1 | 10 | qdrant, pgvector: seconds before a request (qdrant) or a connection attempt (pgvector) gives up. |
-| `pack_config.vector.batch_size` | whole number >= 1 | 256 (qdrant), 500 (pgvector) | qdrant, pgvector: points / rows `rlcd ingest` writes per batch. |
+| `pack_config.vector.batch_size` | whole number >= 1 | 256 (qdrant), 500 (pgvector) | qdrant, pgvector: the most points / rows the store writes at once. It is handed at most `pack_config.batch_size` chunks at a time (at ingest, and when the corpus is embedded again), so the smaller of the two is the largest write: 64 with the defaults. A smaller `vector.batch_size` that does not divide `pack_config.batch_size` also writes the remainder of each batch on its own: with 50, every 64 chunks are written as 50 and 14. |
 | `pack_config.vector.id_field` | text | none (qdrant: the point id), `id` (pgvector) | qdrant, pgvector, attach mode: the payload key / column that holds the chunk id. |
 | `pack_config.vector.text_field` | text | `text` | qdrant, pgvector, attach mode: the payload key / column that holds the chunk text. |
 | `pack_config.vector.doc_id_field` | text | `doc_id` | qdrant, pgvector, attach mode: ... the document id. |
@@ -351,7 +359,7 @@ the `*_env` keys name the environment variables that hold them.
 | `pack_config.retrieve_k` | whole number >= 1 | 5 | Top-k of each retriever at decide time (fused, up to 3k candidates). |
 | `pack_config.label_top_k` | whole number >= 1 | 5 | Chunks retrieved per query when label tasks are built. |
 | `pack_config.rrf_k` | number > 0 | 60 | The constant of reciprocal rank fusion. |
-| `pack_config.batch_size` | whole number >= 1 | 64 | Chunks embedded per batch at ingest. |
+| `pack_config.batch_size` | whole number >= 1 | 64 | Chunks per batch at ingest, and when the corpus is embedded again: each batch is embedded (the onnx encoder runs `encoder.batch_size` texts at a time) and handed to the vector store in one call, so it also caps a remote store's `vector.batch_size`. |
 | `pack_config.on_encoder_change` | `error`, `reembed` | `error` | What opening a corpus built with another encoder does: refuse, or embed it again. |
 | `pack_config.feature_cache` | whole number >= 0 | 1024 | Featurised states kept in memory (0: off). |
 | `pack_config.max_evidence_age_days` | number >= 0 | none | Evidence older than this (by its `updated_at`) caps `answerable` at confirm. |
@@ -395,7 +403,7 @@ any of the target keys) directly under `pack_config`. Not both.
 | `pack_config.targets.<head>.description` | text | empty | As `heads.<head>.description`; how the type and the classes were chosen is appended. |
 | `pack_config.targets.<head>.params` | mapping | empty | As `heads.<head>.params`. |
 | `pack_config.targets.<head>.input` | mapping | empty | As `heads.<head>.input`. |
-| `pack_config.targets.<head>.enabled` | true / false | true | `false` switches the head off as `heads.<head>.enabled: false` does: it is not trained, and not served even when the model has it trained, at once and without a retrain. Its route contracts, rollout modes and policy overrides are kept and not compared with it. Its label column still stays out of the features, so a train carries the trained head over while the feature version is unchanged (a train whose features differ drops it, for example after a new value enters a categorical feature column's vocabulary, its `max_categories` most frequent values), and `true` serves it again without a retrain while the model has it. A `heads.<head>.enabled` written for the same head wins. Removing the target from `targets` stops serving the head at once too (see [`routes`](#routes-what-an-option-of-a-choice-head-commits-you-to)). |
+| `pack_config.targets.<head>.enabled` | true / false | true | `false` switches the head off as `heads.<head>.enabled: false` does: it is not trained, and not served even when the model has it trained, at once and without a retrain. Its route contracts, rollout modes and policy overrides are kept and not compared with it. Its label column still stays out of the features, so a train carries the trained head over while the feature version is unchanged (a train whose features differ drops it, for example after a new value enters a categorical feature column's vocabulary, its `max_categories` most frequent values; `rlcd train` names a head it drops), and `true` serves it again without a retrain while the model has it. A `heads.<head>.enabled` written for the same head wins. Removing the target from `targets` stops serving the head at once too (see [`routes`](#routes-what-an-option-of-a-choice-head-commits-you-to)). |
 | `pack_config.label` | column | none | Shorthand: the label column of the only head. |
 | `pack_config.question` | text | `outcome` | Shorthand: the name of that head. |
 | `pack_config.type` | `noul`, `choice`, `score` | inferred | Shorthand for `targets.<head>.type`. |
@@ -423,9 +431,9 @@ error unless it switches that head off (`enabled: false`). Analysis tool, not fi
 
 | key | type | default | what it does |
 |---|---|---|---|
-| `pack_config.quant_url` | text | `http://127.0.0.1:8090` | The sidecar's http(s) base URL. A host that is not loopback is refused unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1` (this pack has no `pack_config.allow_remote`). |
+| `pack_config.quant_url` | text | `http://127.0.0.1:8090` | The sidecar's http(s) base URL. A host that is not loopback is refused unless `security.allow_remote: true` or `RLCD_ALLOW_REMOTE=1` (this pack has no `pack_config.allow_remote`). A `user:password@` in it goes to the sidecar as HTTP basic auth, percent-decoded, and no part of it is in a URL that httpx or the pack logs or quotes (the pack's log lines show `***@` in its place). `rlcd config check` warns about any user info in it: this pack has no environment variable for the sidecar's login, so the login is then written in `rlcd.yaml`, and the warning says to keep that file out of version control and readable only by the service. `rlcd config show` prints the URL with the whole user info redacted, user name included. Percent-encode each `%`, `@`, `/`, `?`, `#` or space in the user name or password (`%25`, `%40`, `%2F`, `%3F`, `%23`, `%20`), as in any URL. A `%` followed by two hex digits is decoded (`S3%41cret` is sent as `S3Acret`). A URL that httpx cannot read, or reads with an `@` outside its user info (what a `/`, `?` or `#` left in the user name or password gives, and a user info with no `//` in front of it, as in `quant:pw@127.0.0.1:8090`), is refused with a 422 and is an error in `rlcd config check`, so `rlcd train` and `rlcd serve` do not start; neither message quotes any part of it. |
 | `pack_config.symbols` | list | `[XAUUSD]` | The symbols to train on, one `/dataset` export each. A symbol the sidecar refuses, or whose export has another feature version, is skipped with a note; a sidecar that cannot be reached fails the train (and a decision, with 503). |
-| `pack_config.intervals` | list of `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d` | `[15m]` | One head per interval. Removing an interval switches its head off at once, as `heads.<head>.enabled: false` does: not trained, and not served even when the model has it trained; listing it again serves it again without a retrain while the model has it. |
+| `pack_config.intervals` | list of `1m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d` | `[15m]` | One head per interval. Removing an interval switches its head off at once, as `heads.<head>.enabled: false` does: not trained, and not served even when the model has it trained; listing it again serves it again without a retrain while the model has it. A train keeps it in the model only while `sl_pips`, `tp_pips`, `tp2_pips`, `horizon` and the sidecar's feature version stay the same (see below). |
 | `pack_config.sl_pips` | number > 0 | 20 | Stop distance in pips, sent to the sidecar, which labels each candle with it. |
 | `pack_config.tp_pips` | number > 0 | 50 | First target in pips, sent to the sidecar. |
 | `pack_config.tp2_pips` | number > 0 | 100 | Second target in pips, sent to the sidecar. |
@@ -434,7 +442,19 @@ error unless it switches that head off (`enabled: false`). Analysis tool, not fi
 | `pack_config.pips.<symbol>` | list of numbers > 0 | none | Pip sizes to train for that symbol, each one an export and a segment of its own. Without it the sidecar's pip size for the symbol is used. |
 
 `sl_pips`, `tp_pips`, `tp2_pips` and `horizon` are stored with the trained version, and its decisions ask the sidecar
-for features with the values it was trained with: an edit takes effect at the next `rlcd train`.
+for features with the values it was trained with: an edit takes effect at the next `rlcd train`. They define the
+labels, so a train carries a head of the previous version (the one that was `rlcd-latest`) over only when that
+version recorded the same four values (`pack.carry_key` in its `model.json`) and the sidecar's feature version is
+the same: every head of a version was trained with its values. A version trained by an open-rlcd release that did
+not record them has no `pack.carry_key` (the same values under `pack.config.params` do not count), so a train
+carries none of its heads over. A head of the previous version that a train neither carries over nor retrains (not
+named by `rlcd train --heads`, switched off with `enabled: false`, its interval removed, or failed to train) is not
+in the new version. Listed and switched on, it is answered as a head the model lacks (the uninformed prior,
+`calibrated: false`, the abstain action `hold`) until a train retrains it. `rlcd train` names such heads on stderr,
+after its table, as trained with another feature version, pack or pack settings, or by an open-rlcd release that did
+not record them, and the train job lists them under `not_carried_over` (`GET /v1/train/{job_id}`). While the four
+values and the feature version stay those the previous version recorded, a head is carried over, and switching it
+on or listing its interval again serves it without a retrain.
 
 ## A pack of your own
 
@@ -455,7 +475,8 @@ and `head_override_keys()` names extra fields your pack accepts under `heads.<he
 
 ## Environment variables
 
-Secrets are read from the environment only. A value in `rlcd.yaml` that looks like one (a key named
+Secrets are read from the environment only, except a `user:password@` in the trading pack's
+[`quant_url`](#pack_config-of-the-trading-pack). A value in `rlcd.yaml` that looks like one (a key named
 `password`, `token`, `api_key`, ...; a string shaped like a known key) is a warning from `rlcd config check`.
 `rlcd config show` prints whether a secret is set, never its value.
 

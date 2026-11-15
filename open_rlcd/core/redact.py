@@ -12,7 +12,9 @@ secret shapes and each match is replaced by `[REDACTED:<kind>]`:
     api_key       sk-... style keys (OpenAI, Anthropic sk-ant-..., Stripe sk_live_ / rk_live_)
     jwt           three base64url segments starting with eyJ
     bearer        "Bearer <token>" in text
-    url_password  the password of user:password@host in a URL
+    url_password  the password of user:password@host in a URL, up to the last `@` before a `/` or a space; in a value
+                  declared to be one URL (`url`: an rlcd.yaml key such as the trading pack's quant_url), the whole user
+                  info, user name included, up to its last `@`, whatever it holds
     assignment    NAME = value where NAME contains api_key / secret / token / password / access_key ... (the value only;
                   also DB_PASSWORD=..., "client_secret": "...", export API_TOKEN=...)
     secret_field  a string stored under a key that names a secret ({"password": "..."}), replaced whole
@@ -44,7 +46,8 @@ _SECRETS: list[tuple[str, re.Pattern[str]]] = [
     ("api_key", re.compile(r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,200}|(?:sk|rk)_live_[A-Za-z0-9]{16,200})\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b")),
     ("bearer", re.compile(r"(?i)(?<=\bbearer )[A-Za-z0-9\-._~+/]{16,}=*")),
-    ("url_password", re.compile(r"(?<=://)([^\s:/@]{1,64}):([^\s/@]{1,128})(?=@)")),
+    # the password runs to the last `@` before a `/` or a space, so an unencoded `@` in it is not left behind
+    ("url_password", re.compile(r"(?<=://)([^\s:/@]{1,64}):([^\s/]{1,128})(?=@)")),
     # NAME = value, NAME: value, "NAME": "value", export NAME=value, where NAME contains a secret word anywhere
     # (DB_PASSWORD, AWS_SECRET_ACCESS_KEY, client_secret, my_api_key, API_TOKEN): only the value is replaced
     # (name parts are bounded and the suffix possessive: constant work per start position, no catastrophic
@@ -62,6 +65,21 @@ _SECRET_KEYS = ("password", "passwd", "pwd", "passphrase", "secret", "token", "a
                 "secretkey", "clientsecret", "credential", "credentials", "authorization", "cookie", "sessionid")
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,255}\.[A-Za-z]{2,24}\b")
 _CARD = re.compile(r"\b(?:\d[ -]?){12,18}\d\b")
+# the start of a value that is one URL (`url`): leading whitespace, a scheme and its slashes (or backslashes), or `//`
+_URL_START = re.compile(r"\s*(?:[A-Za-z][A-Za-z0-9+.\-]{0,31}:[/\\]+|//)")
+
+
+def _userinfo(text: str) -> str | None:
+    """`text`, one URL (`url`), with its whole user info redacted, however malformed: everything from the start of the
+    URL (`_URL_START`; without a scheme and its slashes, the first character that is not whitespace) to its last `@`,
+    so a user name, a password or a token alone is redacted whole, whatever `@`, space, `/`, `?`, `#` or line break it
+    holds, and whatever follows the host. None when there is no `@`, or nothing before it."""
+    start = _URL_START.match(text)
+    begin = start.end() if start else len(text) - len(text.lstrip())
+    userinfo, _, rest = text[begin:].rpartition("@")
+    if not userinfo:
+        return None
+    return f"{text[:begin]}[REDACTED:url_password]@{rest}"
 
 
 def _luhn(digits: str) -> bool:
@@ -83,8 +101,12 @@ SHAPES = ("private_key", "aws_key", "github_token", "slack_token", "api_key", "j
           "token_shapes", "basic_auth")
 
 
-def redact_text(text: str, kinds: Iterable[str] = ("secrets",), skip: Iterable[str] = ()) -> tuple[str, list[str]]:
-    """(text with every match replaced, the kinds found). `skip`: secret kinds not to look for."""
+def redact_text(text: str, kinds: Iterable[str] = ("secrets",), skip: Iterable[str] = (),
+                url: bool = False) -> tuple[str, list[str]]:
+    """(text with every match replaced, the kinds found). `skip`: secret kinds not to look for. `url`: `text` is one
+    URL whose user info may carry credentials (an rlcd.yaml key declared so, for `rlcd config show` and
+    `rlcd config check`), so its whole user info is redacted (`_userinfo`); in free text a URL's password ends at a
+    `/` or a space, and its user name is kept."""
     kinds = set(kinds)
     skip = set(skip)
     found: list[str] = []
@@ -94,7 +116,8 @@ def redact_text(text: str, kinds: Iterable[str] = ("secrets",), skip: Iterable[s
             if kind in skip:
                 continue
             if kind == "url_password":
-                new = pat.sub(lambda m: f"{m.group(1)}:[REDACTED:url_password]", out)
+                new = _userinfo(out) if url else None
+                new = new or pat.sub(lambda m: f"{m.group(1)}:[REDACTED:url_password]", out)
             elif kind == "assignment":
                 new = pat.sub(lambda m: m.group(0)[: m.start(2) - m.start(0)] + "[REDACTED:assignment]", out)
             else:
@@ -124,11 +147,11 @@ def _secret_key(key: Any) -> bool:
     return bool(k) and k.endswith(_SECRET_KEYS)
 
 
-def redact(obj: Any, kinds: Iterable[str] = ("secrets",)) -> tuple[Any, list[str]]:
+def redact(obj: Any, kinds: Iterable[str] = ("secrets",), url: bool = False) -> tuple[Any, list[str]]:
     """A copy of a JSON-like value with every string redacted, and the sorted kinds that were found. Structure,
     keys and non-string values are unchanged, except that (with `secrets`) a string stored under a key that names a
     secret (password, api_key, client_secret, token, ...) is replaced whole; nesting deeper than MAX_DEPTH is
-    replaced by a marker."""
+    replaced by a marker. `url`: each string is one URL (`redact_text`)."""
     kinds = tuple(kinds)
     by_key = "secrets" in kinds
     found: set[str] = set()
@@ -141,7 +164,7 @@ def redact(obj: Any, kinds: Iterable[str] = ("secrets",)) -> tuple[Any, list[str
             if under and v:                    # a string anywhere below a key that names a secret
                 found.add("secret_field")
                 return "[REDACTED:secret_field]"
-            t, f = redact_text(v, kinds)
+            t, f = redact_text(v, kinds, url=url)
             found.update(f)
             return t
         if isinstance(v, dict):

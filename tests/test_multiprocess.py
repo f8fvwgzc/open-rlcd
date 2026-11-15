@@ -1,7 +1,8 @@
 """Several processes writing one RLCD_HOME at once (a server plus `rlcd train` / `import` / `promote`).
 
 Each store's read-modify-write must be one critical section across processes: no lost ledger updates, no torn or
-swallowed log lines, no version id handed out twice. The workers are real processes (spawn), started together.
+swallowed log lines, no version id or weight-edit attempt number handed out twice. The workers are real processes
+(spawn), started together.
 """
 import json
 import multiprocessing as mp
@@ -89,6 +90,33 @@ def _edit_worker(args) -> list[str]:
             base = reg.latest_id()
             res = reg.commit_edit(base, {}, edit={"kind": "head", "passed": True, "reasons": []})
             out.append(json.dumps({"version": res["version"], "base": base, "promoted": res["promoted"]}))
+        except Exception as e:
+            out.append(f"error: {type(e).__name__}: {e}")
+    return out
+
+
+def _attempt_worker(args) -> list[str]:
+    """`rlcd patch` saving candidates scored on one holdout: `commit_edit` hands `rejudge` each candidate's attempt
+    number on it, which `rejudge` records and puts in the edit record to save (as core/patch.py does). `rejudge`
+    takes a while and runs under the registry's locks: a process that counted the candidates before taking the
+    locks would miss the ones saved while it waited."""
+    home, base, n, hold_s, start_at = args
+    reg = Registry(home)
+    edit = {"kind": "head", "passed": False, "reasons": ["x"], "holdouts": {"h": "s"},
+            "heads": {"h": {"attempt": 1, "passed": False, "reasons": ["x"]}}}
+    handed: list[int] = []
+
+    def rejudge(attempts: dict) -> dict:
+        handed.append(attempts["h"])
+        time.sleep(hold_s)
+        return {**edit, "heads": {"h": {**edit["heads"]["h"], "attempt": attempts["h"]}}}
+
+    _wait(start_at)
+    out = []
+    for _ in range(n):
+        try:
+            res = reg.commit_edit(base, {}, edit=edit, rejudge=rejudge)
+            out.append(json.dumps({"version": res["version"], "attempt": handed[-1]}))
         except Exception as e:
             out.append(f"error: {type(e).__name__}: {e}")
     return out
@@ -321,6 +349,28 @@ def test_registry_patch_commits_share_the_lock_and_the_history_with_trains(tmp_p
             assert (moved[e["version"]]["kind"], moved[e["version"]]["from"]) == ("patch", e["base"])
         else:   # its base had moved on: kept, servable by name, and `latest` did not move
             assert e["version"] not in moved and reg["versions"][e["version"]]["edit"]["servable"] is True
+
+
+def test_registry_patch_commits_number_their_attempts_on_a_holdout_inside_the_lock(tmp_path, pool):
+    """Several `rlcd patch` runs save candidates scored on one holdout at the same time: `commit_edit` counts the
+    candidates already saved on that holdout inside the inter-process lock, so the attempt numbers it hands to
+    `rejudge` are 1..N, each once, in the order the candidates are saved, and each saved edit record carries its own.
+    Counted before the lock, processes that arrive together get the same number (and the looser bound of an
+    earlier attempt)."""
+    home = tmp_path / "home"
+    base = Registry(home).commit({}, pack={"name": "p"}, feature_version="f1", encoder=None, policy={})
+    n = 3
+    start = _soon()
+    results = pool.map(_attempt_worker, [(home, base, n, 0.03, start) for _ in range(PROCS)])
+    assert [x for r in results for x in r if x.startswith("error")] == []
+    saved = [json.loads(x) for r in results for x in r]
+    assert sorted(s["attempt"] for s in saved) == list(range(1, PROCS * n + 1))
+    for s in saved:     # the k-th candidate saved is attempt k (its version id is handed out under the same lock)
+        assert s["attempt"] == int(s["version"].rsplit(".", 1)[1]) - int(base.rsplit(".", 1)[1])
+        meta = json.loads((home / "models" / s["version"] / "model.json").read_text(encoding="utf-8"))
+        assert meta["edit"]["holdouts"] == {"h": "s"} and meta["edit"]["heads"]["h"]["attempt"] == s["attempt"]
+    reg = Registry(home)
+    assert reg.latest_id() == base and reg.edit_attempts("h", "s") == PROCS * n
 
 
 def test_registry_sees_another_process_write(tmp_path):

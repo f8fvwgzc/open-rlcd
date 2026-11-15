@@ -56,11 +56,12 @@ scored or saved).
    least the base's.
 6. **Promote, or keep with the reason.** The candidate becomes `rlcd-latest` only if every changed head passes
    **and** the base is still `rlcd-latest` (an edit is judged against its base, not against whatever is newer).
-   That check and the save happen inside the registry's inter-process lock, so a `rlcd train`, `rlcd import` or
-   `rlcd promote` running beside it cannot slip in between. A candidate that passed but whose base has moved on
-   is kept and can be served by name. A candidate that failed is kept for inspection (`rlcd report --model <id>`,
-   `/v1/calibration`) and **never serves**: every answering path refuses it, `rlcd promote` and `rlcd rollback`
-   (with or without `--to`) never make it latest, and `rlcd import` of an exported copy keeps it out of service.
+   That check, the attempt number (next section) and the save happen inside the registry's inter-process lock, so
+   a `rlcd train`, `rlcd import`, `rlcd promote` or another `rlcd patch` running beside it cannot slip in between.
+   A candidate that passed but whose base has moved on is kept and can be served by name. A candidate that failed
+   is kept for inspection (`rlcd report --model <id>`, `/v1/calibration`) and **never serves**: every answering
+   path refuses it, `rlcd promote` and `rlcd rollback` (with or without `--to`) never make it latest, and
+   `rlcd import` of an exported copy keeps it out of service.
 
 An encoder edit changes every head's inputs, so every head must pass. To fix one head, edit that head.
 
@@ -74,22 +75,35 @@ If an edit is chosen while looking at holdout rows, the gate turns into a fit an
   author has to be honest about it, and the provenance records what they declared.
 * Each scoring uses up some of the holdout's credibility. The k-th candidate scored on the same holdout (same
   head, same row ids) is tested at a one-sided level of 0.05 / k, and the attempt number is published with the
-  result. This slows the search but does not make an unlimited one safe. After many attempts, the remedy is fresh
-  trusted labels, which give a new holdout.
+  result. The number is fixed when the candidate is saved, inside the registry's inter-process lock, from the
+  candidates already saved on that holdout. If another candidate was saved on it after this one was scored
+  (another `rlcd patch` running at the same time), this one is judged again at its new number, on the same rows
+  with the same seed, before it is saved. So candidates scored at the same time are numbered in the order they
+  are saved, as if they had run one after the other. This slows the search but does not make an unlimited one
+  safe. After many attempts, the remedy is fresh trusted labels, which give a new holdout.
 
 ## Provenance
 
-`model.json` (`edit`), each changed head's hash-checked `head.json` (`edit`), `registry.json` and `MODEL_CARD.md`
-all record:
+The candidate's `model.json` (`edit`) records:
 
 * the edit's sha256;
 * who or what produced it;
 * what it was tuned on (listed ids as a count and a hash);
 * the number of parameters touched and the total (for ONNX, counted by diffing the graph initializers);
-* the base version and the holdout-id hash;
-* the paired-test result and the attempt number;
+* the base version and, per changed head, the holdout-id hash;
+* per changed head, the paired-test result and the attempt number;
 * the verdicts before and after;
 * the outcome and its reason.
+
+Each changed head's hash-checked `head.json` (`edit`) keeps that head's part: the sha256, the producer and what
+the edit was tuned on, the base version, its holdout-id hash, its paired-test result, attempt number and verdicts,
+and whether it passed (with its reasons). A head edit's `head.json` also has the parameter counts. The outcome of
+the whole candidate (promoted or not, and why) is not in it. `registry.json` keeps a summary in the version's
+entry: the kind, the base version, the sha256, the producer, the parameters touched, the outcome (`passed`,
+`promoted`, `servable`) and its reason, and the holdout-id hash per changed head, from which later candidates'
+attempt numbers are counted. It has no paired-test result and no attempt number. `MODEL_CARD.md`, which
+`rlcd report` and `rlcd export` write from `model.json` and the `head.json` files, shows everything in the list
+above except the holdout-id hashes.
 
 The policy caps of an edited head come from its `head.json`, the same as for any head.
 
@@ -107,7 +121,11 @@ A promoted edit is a version like any other ([control layer](control-layer.md)):
 * **Keep training on an edited encoder.** An encoder edit is served from `encoders/edited/<sha256>.onnx` in the
   home, but `rlcd train` builds features from `pack_config.encoder` in rlcd.yaml. Until rlcd.yaml points there
   too (`path: encoders/edited/<sha256>.onnx`, `sha256: <sha256>`; the path must stay inside the home), the next
-  train is on the original encoder again: a new feature version, so no edited head is carried over.
+  train is on the original encoder again: a new feature version, so no edited head is carried over (`rlcd train`
+  names the heads it drops). `encoders/edited/<sha256>.onnx` is in no bundle and cannot be downloaded: back it up
+  with the home (do not exclude `encoders/`), and copy it to the same path in every home that imports a version
+  trained on it. The same goes for a local `tokenizer` file, which an encoder edit keeps from its base
+  ([deployment](deployment.md#moving-a-model-from-a-laptop-to-the-server)).
 
 ## Honest limits
 

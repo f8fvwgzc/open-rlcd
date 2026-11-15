@@ -264,7 +264,10 @@ class Service:
         """The pack's current heads, overlaid by the heads this version was trained with. A head the project switches
         off (`switched_off`: `heads.<name>.enabled: false`; in the tabular pack also a target switched off in
         `pack_config` or no longer listed there) is not served even when the version has it trained: switching a
-        question off is not a retrain (the trained head stays in the bundle, so switching it on again needs none)."""
+        question off is not a retrain. The trained head stays in the bundle, and a train carries it over into its new
+        version only when rlcd-latest records the same pack, feature version and `carry_key` (`Registry.commit`):
+        switching it on again needs no retrain while the version served has it, and a version that lacks it answers
+        it with the uninformed prior until a train retrains it."""
         out = dict(self.pack_for(version).heads(self.project))
         b = self.bundle(version)
         if b is not None:

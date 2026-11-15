@@ -1,7 +1,7 @@
 """Encoder edits, offline: a replacement ONNX text encoder is a new feature version, so every head of the base is
-retrained on it (never reused), each is judged against its base head on the same holdout rows, and the candidate
-serves only if every head passes. The encoder is a tiny Gather-over-embeddings ONNX graph (tests/tinyonnx.py)
-run by the real ONNX Runtime through the documents pack."""
+retrained on it (never reused), each is judged against its base head on the same holdout rows (at the attempt
+number fixed when the candidate is saved), and the candidate serves only if every head passes. The encoder is a
+tiny Gather-over-embeddings ONNX graph (tests/tinyonnx.py) run by the real ONNX Runtime through the documents pack."""
 from __future__ import annotations
 
 import os
@@ -24,6 +24,7 @@ from open_rlcd.packs.documents import write_synth  # noqa: E402
 from open_rlcd.packs.documents.world import build_world  # noqa: E402
 from open_rlcd.report.model_card import model_card  # noqa: E402
 from tests.leakpack import LeakPack  # noqa: E402
+from tests.test_patch import scored_side_by_side  # noqa: E402
 from tests.tinyonnx import tiny_onnx, tiny_tokenizer  # noqa: E402
 
 HEADS = ["answerable", "grounded"]
@@ -90,6 +91,36 @@ def test_an_encoder_edit_retrains_every_head_and_is_judged_on_the_same_holdout(b
     assert not any(p.suffix == ".onnx" for p in cand.path.rglob("*"))         # bundles never carry the encoder
     card = model_card(cand)
     assert "**encoder** edit" in card and "parameters touched: 320" in card
+
+
+def test_encoder_candidates_scored_side_by_side_are_numbered_in_the_order_they_are_saved(base, tmp_path, monkeypatch):
+    """Two encoder edits of one base: B is retrained, scored and saved while A, already scored, waits to be saved.
+    The attempt number on each head's holdout is fixed when a candidate is saved: B gets the next number, and A the
+    one after it, judged again at the tighter level, in every record of each."""
+    svc, b = base.svc, base.svc.bundle(base.version)
+    before = {n: svc.registry.edit_attempts(n, b.head(n).report["split"]["holdout_ids_sha256"]) for n in HEADS}
+    out = {}
+    scored = scored_side_by_side(monkeypatch, svc.registry, lambda: out.update(
+        B=PT.edit_encoder(svc, onnx_path=edited_file(base, tmp_path / "b.onnx", rows=7), base=base.version,
+                          author="manual", tuned_on="none")))
+    out["A"] = PT.edit_encoder(svc, onnx_path=edited_file(base, tmp_path / "a.onnx", rows=5), base=base.version,
+                               author="manual", tuned_on="none")
+    for n in HEADS:
+        assert scored[0]["heads"][n]["attempt"] == before[n] + 1               # A was scored before B was saved
+        for res, k in ((out["B"], before[n] + 1), (out["A"], before[n] + 2)):
+            cand = svc.bundle(res["version"])
+            records = [res["heads"][n],                      # what `rlcd patch` returns and prints
+                       cand.meta["edit"]["heads"][n],        # model.json: the edit record
+                       cand.meta["heads"][n]["edit"],        # model.json: the head's entry
+                       cand.head(n).summary["edit"]]         # head.json (hash-checked)
+            for j in records:
+                assert j["attempt"] == k and j["alpha"] == j["paired_test"]["alpha"] == round(0.05 / k, 6)
+                assert {key: j[key] for key in records[0]} == records[0]
+    for res in out.values():       # it passes only if every head does, and registry.json says the same
+        assert res["passed"] is all(j["passed"] for j in res["heads"].values())
+        assert res["reasons"] == [f"{n}: {r}" for n, j in res["heads"].items() for r in j["reasons"]]
+        entry = svc.registry.entry(res["version"])["edit"]
+        assert (entry["passed"], entry["promoted"], entry["reason"]) == (res["passed"], res["promoted"], res["reason"])
 
 
 def test_encoder_edits_are_refused_when_they_cannot_be_judged(base, tmp_path):

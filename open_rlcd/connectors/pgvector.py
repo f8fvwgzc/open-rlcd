@@ -18,9 +18,11 @@ Two modes:
   (`INSERT ... ON CONFLICT (id) DO UPDATE`) and deletes the old chunks of a changed document.
 * **attach**: read-only search of a table that already exists: the connection's transactions are `READ ONLY`
   (psycopg `read_only = True`, so Postgres itself refuses any write), `upsert` / `delete` raise before a statement
-  is sent, and nothing is created. The `*_field` keys name the columns (`id_field` and `vector_field` too; `null`
-  = the table has no such column). The vector column must be a `vector` whose dimension (its type modifier, or
-  `vector_dims` of a stored row) equals the encoder's, otherwise the store refuses to search
+  is sent, and nothing is created. The `*_field` keys name the columns, `id_field` and `vector_field` too. `null`
+  means the table has no such column for `doc_id_field`, `title_field`, `updated_at_field` and `authority_field`;
+  `id_field` and `text_field` cannot be `null`, and `vector_field: null` is the default, `embedding`
+  (`vector_field` is read in index mode too). The vector column must be a `vector` whose dimension (its type
+  modifier, or `vector_dims` of a stored row) equals the encoder's, otherwise the store refuses to search
   (`encoder_mismatch`). **Query vectors come from open-rlcd's encoder** (pack_config.encoder): the table must have
   been embedded with that same model; equal dimensions are necessary, not sufficient. Otherwise pass
   `candidates` in the request.

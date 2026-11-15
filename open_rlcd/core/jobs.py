@@ -2,8 +2,11 @@
 
 A job asks the project's pack for each head's rows (labelled rows + feedback rows), trains every head
 independently (a failure of one head never costs the others), commits the trained heads as a new version
-(the others are carried over) and restarts the Bernoulli ledger of each retrained head from its new holdout.
-Job state lives in memory; the trained model is on disk.
+(rlcd-latest's other heads are carried over when its model.json records the same pack, feature version and pack
+settings: `Registry.commit`) and restarts the Bernoulli ledger of each retrained head from its new holdout. The
+heads the new version leaves out are listed in the job record (`not_carried_over`, absent when there are none; set
+before `model`, so a record that has `model` has the list too, unless reading the new version back fails, which
+fails the job), which GET /v1/train/{job_id} returns. Job state lives in memory; the trained model is on disk.
 """
 from __future__ import annotations
 
@@ -33,7 +36,11 @@ class Trainer:
         return next((j for j in self.jobs.values() if j["status"] in ("queued", "running")), None)
 
     def get(self, job_id: str) -> dict | None:
-        return self.jobs.get(job_id)
+        """The job record as it is now, as a shallow copy: the training thread adds keys to the record while it runs
+        (`not_carried_over`, `trace`), and a dict that gains a key while GET /v1/train/{job_id} serialises it fails
+        that request. `dict()` copies it in one step (C code, under the GIL)."""
+        job = self.jobs.get(job_id)
+        return dict(job) if job is not None else None
 
     def config(self, req: TrainRequest) -> TrainConfig:
         t = self.svc.project.section("train")
@@ -167,12 +174,20 @@ class Trainer:
                 if callable(extra):
                     card.update(extra())
                 pconf = provider.to_config()
-                job["model"] = svc.registry.commit(trained, pack=pack.info(provider),
-                                                   feature_version=provider.feature_version,
-                                                   encoder=pconf.get("encoder") if isinstance(pconf, dict) else None,
-                                                   policy=cfg.policy.to_dict(), data_card=card,
-                                                   notes=[f"job {job['job_id']}"])
-                svc._providers.pop(job["model"], None)
+                vid = svc.registry.commit(trained, pack=pack.info(provider), feature_version=provider.feature_version,
+                                          encoder=pconf.get("encoder") if isinstance(pconf, dict) else None,
+                                          policy=cfg.policy.to_dict(), data_card=card, notes=[f"job {job['job_id']}"])
+                svc._providers.pop(vid, None)
+                # the heads of the replaced rlcd-latest that the new version lacks (neither retrained nor carried over):
+                # each one the project serves answers with the uninformed prior until a train retrains it. Set before
+                # `model`, so a client that sees `model` (GET /v1/train/{job_id}) sees them too; `model` is set also
+                # when reading them fails, as the version is saved.
+                try:
+                    dropped = svc.registry.bundle(vid).meta.get("not_carried_over") or []
+                    if dropped:
+                        job["not_carried_over"] = list(dropped)
+                finally:
+                    job["model"] = vid
             failed = [k for k, v in job["heads"].items() if v["status"] == "failed"]
             job["status"] = "succeeded" if not failed else ("partial" if trained else "failed")
             if failed:
