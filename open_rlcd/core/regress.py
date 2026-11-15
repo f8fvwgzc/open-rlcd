@@ -29,9 +29,10 @@ with that error kind (an incomplete or malformed state must stay refused). Optio
 
 Cases judge the model and its policy as trained, not the deployment: they run with rollout mode `full`, the kill
 switch on, the Bernoulli gate on each version's own holdout table instead of the live ledger, and every head the
-version has trained, also one rlcd.yaml switches off (`as_trained`). So switching automation or a head off during an
-incident cannot make a case pass or fail, the outcomes posted since cannot make it flip, and a case gives the same
-result wherever the version is installed. Every case runs inside `service.dry_run()`: nothing is logged.
+version has trained, also one rlcd.yaml switches off, routed by its contracts as while it was on
+(`as_trained`). So switching automation or a head off during an incident cannot make a case pass or fail, the
+outcomes posted since cannot make it flip, and a case gives the same result wherever the version is installed. Every
+case runs inside `service.dry_run()`: nothing is logged.
 
 What it does not do: it does not write cases by itself (an incident review does: `rlcd case add --from-decision`,
 or feedback tagged "regression"), it does not decide what to do about a failing case, and an untrained head can
@@ -447,13 +448,15 @@ def as_trained(service: Any) -> Any:
     """A view of `service` that decides as each version was trained: rollout mode `full`, the kill switch on, the
     Bernoulli gate on the version's own holdout table instead of the live ledger, and every head the version has
     trained, also one rlcd.yaml switches off (`switched_off`: switching a head off is not a retrain, so the trained
-    head still answers its cases). A shallow copy: it shares the registry, logs, caches and the dry-run flag with
-    `service`; only those four lookups differ."""
+    head still answers its cases). Its route contracts still apply, without the check that they name only its
+    options (`contracts_unchecked`, asked of `service`, whose `switched_off` is the deployment's). A shallow copy: it shares
+    the registry, logs, caches and the dry-run flag with `service`; only those five lookups differ."""
     view = copy.copy(service)
     view.rollout = _full_rollout
     view.switch = _SwitchOn()
     view.gate_table = _own_holdout
     view.switched_off = _none_switched_off
+    view.contracts_unchecked = service.contracts_unchecked
     return view
 
 

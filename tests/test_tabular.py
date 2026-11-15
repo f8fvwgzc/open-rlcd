@@ -445,8 +445,8 @@ def test_a_label_for_a_decision_of_a_head_the_served_model_dropped(tmp_path):
     assert gone.bundle(v2).names() == ["churned"] and d["decision_id"] in queued(gone)
     fb = gone.feedback(FeedbackRequest(decision_id=d["decision_id"], label="up", source="crm", tags=["regression"]))
     assert fb["stored"] and fb["label"] == "up" and fb["bernoulli"]["updated"] is True
-    assert fb["regression_case"] == {"stored": False, "reason": f"{v2} has no head 'next_plan', so `rlcd regress` "
-                                                                f"could not judge a case for it"}
+    assert fb["regression_case"] == {"stored": False, "reason": f"{v2} has no trained head 'next_plan', so "
+                                                                f"`rlcd regress` could not judge a case for it"}
     assert not RG.cases_path(gone.project).exists()
     assert fb["note"] == (f"{v2} has no head 'next_plan': checked against {v1}, the version that made the decision, "
                           f"and kept as an up-weighted training row for a later train of 'next_plan'")
@@ -495,6 +495,92 @@ def test_regression_cases_of_a_switched_off_head_still_judge_the_trained_head(tm
     with pytest.raises(ContractError) as e:
         RG.case_from_decision(off, d["decision_id"], head="next_plan", expect={"class": "sideways"})
     assert e.value.kind == "bad_case" and "not a class of head 'next_plan'" in e.value.message
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_regression_cases_ignore_contracts_for_options_a_switched_off_head_lacks(tmp_path, how):
+    """The route contracts of a switched-off head are kept and not checked, so they may name an option the trained
+    head lacks: config check and `rlcd check` routes.contracts pass them. Regression cases still decide the trained
+    head and apply its contracts without that check, ignoring the missing option: a decide case that names no head
+    is answered (not refused with 500 bad_config) and `rlcd check` passes `regressions.cases`. Switched on again,
+    the contracts are checked and refused, as before."""
+    small_table(tmp_path / "small.csv")
+    v1 = train(small(tmp_path, {}))["model"]
+    routes = {"next_plan": {"up": {"requires": ["crm"]}, "sideways": {"requires": ["crm"]}}}
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, routes=routes),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, routes=routes),
+           "removed": lambda: small(tmp_path, None, routes=routes)}[how]()
+    assert off.switched_off(v1) == off.contracts_unchecked(v1) == {"next_plan"}
+    assert [f for f in off.project.check(off.pack) if f["level"] == "error"] == []
+    path = RG.cases_path(off.project)
+    RG.add_case(path, {"kind": "decide", "request": {"state": ROW}, "expect": {"action_at_most": "act"}})
+    [r] = RG.run_cases(off, RG.load_cases(path))["results"]
+    assert r["status"] == "passed", r["why"]
+    with off.dry_run():
+        heads = RG.as_trained(off).generic_decide(DecideRequest(state=ROW, model=v1))["heads"]
+    assert set(heads) == {"churned", "next_plan"}
+    assert [c["option"] for c in heads["next_plan"]["considered"]] == ["down", "same", "up"]   # `sideways` ignored
+    c = checked(off)
+    assert c["routes.contracts"]["status"] == c["regressions.cases"]["status"] == "pass"
+    on = small(tmp_path, {}, routes=routes)
+    assert on.contracts_unchecked(v1) == set()
+    with pytest.raises(ContractError) as e:
+        on.generic_decide(DecideRequest(state=ROW))
+    assert e.value.kind == "bad_config" and "routes.next_plan has contracts for options ['sideways']" in e.value.message
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads"])
+def test_switching_a_head_off_does_not_change_how_its_contracts_route_a_case(tmp_path, how):
+    """A contract that fits the trained head still routes its regression cases while the head is switched off:
+    switching a head off is not a retrain, and a case judges the model as trained. Only the check that every
+    contract names one of its options is skipped."""
+    small_table(tmp_path / "small.csv")
+    routes = {"next_plan": {"up": {"enabled": False}}}
+    on = small(tmp_path, {}, routes=routes)
+    v1 = train(on)["model"]
+    path = RG.cases_path(on.project)
+    RG.add_case(path, {"kind": "decide", "request": {"state": ROW, "heads": ["next_plan"]},
+                       "expect": {"action_at_most": "act"}})
+    cases = RG.load_cases(path)
+
+    def got(s):
+        return [(r["status"], r["got"]) for r in RG.run_cases(s, cases)["results"]]
+
+    when_on = got(on)
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, routes=routes),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, routes=routes)}[how]()
+    assert off.contracts_unchecked(v1) == {"next_plan"}
+    assert got(off) == when_on
+    with off.dry_run():
+        d = RG.as_trained(off).generic_decide(DecideRequest(state=ROW, model=v1, heads=["next_plan"]))
+    assert [c["option"] for c in d["heads"]["next_plan"]["considered"] if not c["kept"]] == ["up"]
+
+
+def test_a_label_tagged_regression_makes_no_case_for_a_head_rlcd_latest_has_not_trained(tmp_path):
+    """A partial train whose features differ leaves next_plan out of rlcd-latest, while the pack still defines and
+    serves it (with the uninformed prior). A late label for one of its decisions is checked against the pack's
+    current definition and kept, but makes no regression case: `rlcd regress` could not judge one (the uninformed
+    prior can neither pass nor fail a case), and `rlcd check` would fail regressions.cases on it."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {})
+    v1 = train(on)["model"]
+    d = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    moved =small(tmp_path, {}, {"exclude": ["plan"]})       # another feature version
+    job = train(moved, heads=["churned"])
+    v2 = job["model"]
+    assert job["not_carried_over"] == ["next_plan"] and moved.bundle(v2).names() == ["churned"]
+    assert set(moved.specs(v2)) == {"churned", "next_plan"} and moved.switched_off(v2) == set()
+    with pytest.raises(ContractError) as e:         # checked against the pack's current definition
+        moved.feedback(FeedbackRequest(decision_id=d["decision_id"], label="sideways", source="crm"))
+    assert e.value.kind == "validation" and sorted(e.value.details["classes"]) == ["down", "same", "up"]
+    fb = moved.feedback(FeedbackRequest(decision_id=d["decision_id"], label="same", source="crm",
+                                        tags=["regression"]))
+    assert fb["stored"] and (fb["head"], fb["label"]) == ("next_plan", "same") and v1 != v2
+    assert fb["note"] == "used as an up-weighted training row at the next train"
+    assert fb["regression_case"] == {"stored": False, "reason": f"{v2} has no trained head 'next_plan', so "
+                                                                f"`rlcd regress` could not judge a case for it"}
+    assert not RG.cases_path(moved.project).exists()
+    assert checked(moved)["regressions.cases"]["status"] == "info"
 
 
 @pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])

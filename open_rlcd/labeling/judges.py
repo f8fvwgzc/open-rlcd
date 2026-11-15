@@ -24,7 +24,6 @@ use trusted (human / ground-truth / synthetic) rows only.
 from __future__ import annotations
 
 import contextlib
-import ipaddress
 import json
 import os
 import shutil
@@ -68,21 +67,13 @@ def _env_allows_remote() -> bool:
 
 
 def _is_loopback(host: str | None) -> bool:
-    """Literal loopback addresses and `localhost` only; names are not resolved (no DNS rebinding games). A host with
-    a `%` is read as connectors/security.py `is_loopback` reads it: an IPv6 zone id is part of the address, anything
-    else with a `%` is a name."""
+    """`host` is loopback by the shared host policy, connectors/security.py `is_loopback`, which `check_host` applies:
+    the names in its LOOPBACK_NAMES and literal loopback addresses. Names are not resolved (no DNS rebinding games). A
+    host with a `%` is an IPv6 address with a zone id, or else a name."""
     if not host:
         return False
-    h = host.strip("[]").lower().rstrip(".")
-    if h == "localhost":
-        return True
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        return ip.ipv4_mapped.is_loopback
-    return ip.is_loopback
+    from ..connectors.security import is_loopback  # noqa: PLC0415
+    return is_loopback(host)
 
 
 def _local_check(url: str, allow_remote: bool) -> None:

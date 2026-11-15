@@ -267,6 +267,39 @@ def test_the_judges_read_a_host_with_a_percent_as_the_connectors_do(host, loopba
             OllamaJudge("m", base_url=f"http://{host}:11434")
 
 
+@pytest.mark.parametrize("host", ["localhost.localdomain", "ip6-localhost", "ip6-loopback"])
+def test_a_loopback_name_of_the_shared_policy_never_goes_through_the_proxy(host, monkeypatch):
+    """A judge on a name the shared host policy counts as loopback (connectors/security.py LOOPBACK_NAMES), which
+    `check_host` lets through without allow_remote, sends its request without the proxy of the environment, as for
+    `localhost`: through HTTP_PROXY / HTTPS_PROXY the item texts would leave this machine. The request is answered
+    by a stub of httpx.HTTPTransport, so nothing touches the network."""
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    for var in ("NO_PROXY", "no_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(var, raising=False)
+    for var in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"):
+        monkeypatch.setenv(var, "http://proxy.invalid:3128")
+    through: list = []                                     # the proxy of the transport that carried each request
+    init = httpx.HTTPTransport.__init__
+
+    def recording_init(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        self.proxy_seen = kwargs.get("proxy")
+
+    def answer(self, request: httpx.Request) -> httpx.Response:
+        through.append(self.proxy_seen)
+        content = canned(_ids_in(json.loads(request.content)["messages"]))
+        if request.url.path == "/api/chat":
+            return httpx.Response(200, json={"message": {"role": "assistant", "content": content}})
+        return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": content}}]})
+
+    monkeypatch.setattr(httpx.HTTPTransport, "__init__", recording_init)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", answer)
+    for judge in (OllamaJudge("m", base_url=f"http://{host}:11434"), OpenAICompatJudge(f"http://{host}:8080/v1", "m")):
+        answers, problems = judge.label(ITEMS, [POLITE])
+        assert len(answers) == 2 and problems == []
+    assert through == [None, None], through
+
+
 # ----------------------------------------------------------------------------- Anthropic API
 
 class FakeMessages:

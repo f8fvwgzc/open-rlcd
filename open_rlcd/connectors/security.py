@@ -6,7 +6,7 @@ variable `RLCD_ALLOW_REMOTE=1`, `security.allow_remote: true` in rlcd.yaml, or `
 config.
 
 What this does not do: it does not resolve DNS (a name that happens to resolve to 127.0.0.1 is still refused;
-only `localhost` and literal loopback addresses pass), and it is not a firewall: code that opens sockets without
+only the names in `LOOPBACK_NAMES` and literal loopback addresses pass), and it is not a firewall: code that opens sockets without
 calling `check_host` is not covered.
 """
 from __future__ import annotations

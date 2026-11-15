@@ -504,6 +504,10 @@ def test_as_trained_view_changes_only_rollout_switch_gate_and_switched_off_heads
         assert view.gate_table(V1, "color", None) is None
         # switching a head off is not a retrain: cases still see the trained head
         assert svc.switched_off(V1) == {"color"} and view.switched_off(V1) == set()
+        # whose contracts are checked as the deployment checks them: the view asks the service. The toy
+        # pack's heads() ignores `enabled`, so the service still serves color as the pack defines it
+        assert view.contracts_unchecked.__self__ is svc and "color" in svc.specs(V1)
+        assert view.contracts_unchecked(V1) == svc.contracts_unchecked(V1) == set()
         assert view.registry is svc.registry and view.logs is svc.logs
         with view.dry_run():
             assert svc.is_dry                                              # one dry-run flag for both
@@ -601,3 +605,24 @@ def test_documents_decisions_replay_exactly_and_become_cases(documents):
     res = RG.run_cases(svc, cases)
     assert (res["passed"], res["failed"], res["errors"]) == (5, 0, 0), res["results"]
     assert _lines(svc.home / "decisions.jsonl") == n
+
+
+@pytest.mark.slow
+def test_documents_cases_ignore_contracts_for_options_a_switched_off_head_lacks(documents):
+    """The documents decide applies route contracts to response_type and route. A case still decides a route head
+    rlcd.yaml switches off with the trained head, and applies its contracts without the check that they name only
+    its options: a contract for an option the head lacks (kept and not compared with it) does not refuse the case
+    with 500 bad_config."""
+    svc, v = documents.svc, documents.version
+    data = svc.project.data
+    data["heads"] = {"route": {"enabled": False}}
+    data["routes"] = {"route": {"no_such_route": {"requires": ["x"]}}}
+    try:
+        assert "route" not in svc.specs(v) and svc.contracts_unchecked(v) == {"route"}
+        query = f"What is the price of the {documents.world.products[0].subject}?"
+        case = {"kind": "decide", "request": {"state": {"query": query}}, "expect": {"action_at_most": "act"}}
+        [r] = RG.run_cases(svc, [case])["results"]
+        assert r["status"] == "passed", r["why"]
+    finally:
+        data.pop("heads")
+        data.pop("routes")

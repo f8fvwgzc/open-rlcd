@@ -635,6 +635,37 @@ def test_config_show_redacts_the_login_of_each_labeling_url(tmp_path, capsys, us
     assert labeling == {**CC._with_defaults(CC.schema()["labeling"], {}), **plain}, labeling   # as written
 
 
+@pytest.mark.parametrize("userinfo", ["S3cretToken", "ann:S3cretPassw0rd", "ann:S3cret Passw0rd"],
+                         ids=["token", "login", "space"])
+@pytest.mark.parametrize("judge", ["openai", " OpenAI: "])
+def test_config_show_redacts_the_login_of_an_openai_url_in_labeling_model(tmp_path, capsys, judge, userinfo):
+    """An `openai` judge with nothing after the kind takes its `<base_url>|<model>` from `labeling.model`, as
+    make_judge does. `rlcd config show` prints the base URL there (up to the last `|`) with its whole user info
+    redacted, as it prints the one in `openai:<base_url>|<model>`. Without user info the value is printed as written.
+    The `labeling.model` of any other judge, or of an openai judge that names its own URL, is scanned as free text."""
+    data = {"labeling": {"judge": judge, "model": f"https://{userinfo}@llm.internal/v1|org/qwen@q4"}}
+    root = write(tmp_path, data)
+    for argv in (["--json"], []):
+        assert main(["--project", str(root), "config", "show", *argv]) == 0
+        out = capsys.readouterr().out
+        assert "s3cret" not in out.lower() and "passw0rd" not in out.lower(), out
+    assert main(["--project", str(root), "config", "show", "--json"]) == 0
+    view = json.loads(capsys.readouterr().out)
+    assert view["labeling"]["model"] == "https://[REDACTED:url_password]@llm.internal/v1|org/qwen@q4", view
+    assert view["labeling"]["judge"] == judge
+    for plain in ({"judge": judge, "model": "http://127.0.0.1:8080/v1|org/qwen@q4"},
+                  {"judge": "ollama", "model": "qwen"},
+                  {"judge": "openai:http://127.0.0.1:8080/v1|org/qwen@q4", "model": "qwen"}):
+        assert main(["--project", str(write(tmp_path, {"labeling": plain})), "config", "show", "--json"]) == 0
+        labeling = json.loads(capsys.readouterr().out)["labeling"]
+        assert {k: labeling[k] for k in plain} == plain, labeling                                  # as written
+    split = "https://ann:S3cr|etPw@llm.internal/v1"   # a `|` in the password, and no model part
+    for lab in ({"judge": judge, "model": split}, {"judge": f"openai:{split}", "model": "qwen"}):
+        assert main(["--project", str(write(tmp_path, {"labeling": lab})), "config", "show", "--json"]) == 0
+        out = capsys.readouterr().out
+        assert "S3cr" not in out and "etPw" not in out, out
+
+
 def test_a_url_with_an_at_after_its_host_is_no_secret_in_another_key(tmp_path, capsys):
     """An `@` after `host:port/` in the value of a key not declared one URL is no user info: no url_password warning,
     and `rlcd config show` prints the value as written."""
