@@ -10,9 +10,11 @@ import numpy as np
 import pytest
 
 from open_rlcd.core import checklist as CL
+from open_rlcd.core import regress as RG
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError, DecideRequest, FeedbackRequest, SystemOneRequest, TrainRequest
 from open_rlcd.core.head import lightgbm_available
+from open_rlcd.core.replay import replay
 from open_rlcd.core.service import Service
 from open_rlcd.packs.tabular import generate, synthetic_pack_config, true_probabilities, write_synthetic_csv
 
@@ -372,3 +374,231 @@ def test_a_target_removed_from_pack_config_is_not_served_either(tmp_path, keep_o
         assert gone.bundle(v2).names() == ["churned"] and gone.switched_off(v2) == set()
         c = checked(gone)["routes.contracts"]
         assert c["status"] == "fail" and f"{v2} has no head 'next_plan'" in c["detail"]
+
+
+# ----------------------------------------------------------------------------- labels for a head no longer served
+
+ASSIST = {"rollout": {"mode": "assist"}}    # every decision is `confirm`, so it waits in the review queue
+
+
+def queued(svc: Service, **kw) -> set[str]:
+    """The decision ids GET /v1/review lists."""
+    return {i["decision_id"] for i in svc.review_view(limit=1000, **kw)["items"]}
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_a_switched_off_head_still_takes_the_labels_of_its_decisions(tmp_path, how):
+    """Switching a head off (in pack_config, under `heads:`, or by removing the target) stops serving it, not
+    learning from it. A late label for a decision it made is checked against the trained head the served model still
+    has, kept as a training row, scored in the head's Bernoulli ledger, and takes the decision out of the review queue
+    and the pending review load (they would keep it for as long as the head is off). So does a label for a two-head
+    decision, and one naming no decision. The rows join the first train after the head is switched on again. A label
+    tagged `regression` makes a case, which `rlcd check` judges with the trained head while the head is off."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {}, **ASSIST)
+    v1 = train(on)["model"]
+    one = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    both = on.generic_decide(DecideRequest(state=ROW))
+    assert one["action"] == both["action"] == "confirm"
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, **ASSIST),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, **ASSIST),
+           "removed": lambda: small(tmp_path, None, **ASSIST)}[how]()
+    assert set(off.specs(v1)) == {"churned"} and off.switched_off(v1) == {"next_plan"}
+    assert {one["decision_id"], both["decision_id"]} <= queued(off)
+    assert off.metrics_view()["review_load"]["pending"]["confirm"] == 2
+
+    with pytest.raises(ContractError) as e:         # checked against the trained head's classes
+        off.feedback(FeedbackRequest(decision_id=one["decision_id"], label="sideways", source="crm"))
+    assert e.value.kind == "validation" and sorted(e.value.details["classes"]) == ["down", "same", "up"]
+    fb = off.feedback(FeedbackRequest(decision_id=one["decision_id"], label="same", source="crm",
+                                      tags=["regression"]))
+    assert fb["stored"] and (fb["head"], fb["label"], fb["feedback_rows"]) == ("next_plan", "same", 1)
+    assert fb["note"] == ("head 'next_plan' is switched off in rlcd.yaml: kept as an up-weighted training row for "
+                          "the first train after it is switched on again")
+    assert fb["bernoulli"]["updated"] is True and fb["bernoulli"]["correct"] is (
+        one["heads"]["next_plan"]["decision"]["class"] == "same")
+    assert fb["regression_case"]["stored"] is True
+    assert len(RG.load_cases(RG.cases_path(off.project))) == 1
+    assert checked(off)["regressions.cases"]["status"] == "pass"
+    assert one["decision_id"] not in queued(off) and both["decision_id"] in queued(off, head="next_plan")
+    off.feedback(FeedbackRequest(decision_id=both["decision_id"], head="next_plan", label="up", source="crm"))
+    off.feedback(FeedbackRequest(head="next_plan", state=ROW, label="down", source="crm"))
+    assert queued(off) == set() and queued(off, head="next_plan") == set()
+    assert off.metrics_view()["review_load"]["pending"] == {"confirm": 0, "abstain": 0}
+
+    h = train(small(tmp_path, {}, **ASSIST))["heads"]["next_plan"]   # switched on again
+    assert h["data"]["by_source"]["feedback"] == 3
+
+
+def test_a_label_for_a_decision_of_a_head_the_served_model_dropped(tmp_path):
+    """A target removed under `features: auto` is dropped by the next train (its label column becomes a feature),
+    so rlcd-latest has no head to check a late label with: the label of a decision the head made is checked against
+    the version that made the decision, kept, and clears the review queue. It makes no regression case: rlcd-latest
+    has no head to judge one with. A label naming no decision has no trained head to check with and is refused, saying
+    so when rlcd.yaml switches the head off."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {}, **ASSIST)
+    v1 = train(on)["model"]
+    d = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    gone = small(tmp_path, None, **ASSIST)
+    v2 = train(gone)["model"]
+    assert gone.bundle(v2).names() == ["churned"] and d["decision_id"] in queued(gone)
+    fb = gone.feedback(FeedbackRequest(decision_id=d["decision_id"], label="up", source="crm", tags=["regression"]))
+    assert fb["stored"] and fb["label"] == "up" and fb["bernoulli"]["updated"] is True
+    assert fb["regression_case"] == {"stored": False, "reason": f"{v2} has no trained head 'next_plan', so "
+                                                                f"`rlcd regress` could not judge a case for it"}
+    assert not RG.cases_path(gone.project).exists()
+    assert fb["note"] == (f"{v2} has no head 'next_plan': checked against {v1}, the version that made the decision, "
+                          f"and kept as an up-weighted training row for a later train of 'next_plan'")
+    assert queued(gone) == set()
+    with pytest.raises(ContractError) as e:
+        gone.feedback(FeedbackRequest(head="next_plan", state=ROW, label="up", source="crm"))
+    assert e.value.kind == "unknown_head" and e.value.message.startswith("no head named 'next_plan'")
+    off = small(tmp_path, {"enabled": False}, **ASSIST)
+    with pytest.raises(ContractError) as e:
+        off.feedback(FeedbackRequest(head="next_plan", state=ROW, label="up", source="crm"))
+    assert e.value.kind == "unknown_head" and e.value.message == (
+        f"head 'next_plan' is switched off in rlcd.yaml and not trained in {v2}: there is no trained head to check "
+        f"a label against")
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_regression_cases_of_a_switched_off_head_still_judge_the_trained_head(tmp_path, how):
+    """Cases judge the model as trained, not the deployment, and switching a head off is not a retrain: it changes
+    no case's result. A head-level case for the head, a decide that names it or names no head, and a systemone
+    question bound to it are answered by the trained head the version still has, as before, so `rlcd check` keeps
+    passing `regressions.cases` (it failed them as cases it could not judge). A case made while the head is off checks
+    its class names against that trained head too."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {})
+    v1 = train(on)["model"]
+    d = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    path = RG.cases_path(on.project)
+    RG.add_case(path, RG.case_from_decision(on, d["decision_id"], head="next_plan", expect={"class": "same"}))
+    for request in ({"state": ROW, "heads": ["next_plan"]}, {"state": ROW}):
+        RG.add_case(path, {"kind": "decide", "request": request, "expect": {"action_at_most": "act"}})
+    RG.add_case(path, {"kind": "systemone", "expect": {"answers": {"np": {"choice": "same"}}},
+                       "request": {"state": ROW, "questions": {"np": {"type": "choice", "head": "next_plan"}}}})
+    cases = RG.load_cases(path)
+    before = RG.run_cases(on, cases)["results"]
+    assert [r["status"] for r in before] == ["passed"] * 4
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}),
+           "removed": lambda: small(tmp_path, None)}[how]()
+    assert set(off.specs(v1)) == {"churned"} and off.switched_off(v1) == {"next_plan"}
+    after = RG.run_cases(off, cases)["results"]
+    assert [(r["status"], r["got"]) for r in after] == [(r["status"], r["got"]) for r in before]
+    c = checked(off)["regressions.cases"]
+    assert c["status"] == "pass" and "heads rlcd.yaml switches off included" in c["detail"]
+    assert RG.case_from_decision(off, d["decision_id"], head="next_plan", expect={"class": "same"})["expect"] == {
+        "class": "same"}
+    with pytest.raises(ContractError) as e:
+        RG.case_from_decision(off, d["decision_id"], head="next_plan", expect={"class": "sideways"})
+    assert e.value.kind == "bad_case" and "not a class of head 'next_plan'" in e.value.message
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_regression_cases_ignore_contracts_for_options_a_switched_off_head_lacks(tmp_path, how):
+    """The route contracts of a switched-off head are kept and not checked, so they may name an option the trained
+    head lacks: config check and `rlcd check` routes.contracts pass them. Regression cases still decide the trained
+    head and apply its contracts without that check, ignoring the missing option: a decide case that names no head
+    is answered (not refused with 500 bad_config) and `rlcd check` passes `regressions.cases`. Switched on again,
+    the contracts are checked and refused, as before."""
+    small_table(tmp_path / "small.csv")
+    v1 = train(small(tmp_path, {}))["model"]
+    routes = {"next_plan": {"up": {"requires": ["crm"]}, "sideways": {"requires": ["crm"]}}}
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, routes=routes),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, routes=routes),
+           "removed": lambda: small(tmp_path, None, routes=routes)}[how]()
+    assert off.switched_off(v1) == off.contracts_unchecked(v1) == {"next_plan"}
+    assert [f for f in off.project.check(off.pack) if f["level"] == "error"] == []
+    path = RG.cases_path(off.project)
+    RG.add_case(path, {"kind": "decide", "request": {"state": ROW}, "expect": {"action_at_most": "act"}})
+    [r] = RG.run_cases(off, RG.load_cases(path))["results"]
+    assert r["status"] == "passed", r["why"]
+    with off.dry_run():
+        heads = RG.as_trained(off).generic_decide(DecideRequest(state=ROW, model=v1))["heads"]
+    assert set(heads) == {"churned", "next_plan"}
+    assert [c["option"] for c in heads["next_plan"]["considered"]] == ["down", "same", "up"]   # `sideways` ignored
+    c = checked(off)
+    assert c["routes.contracts"]["status"] == c["regressions.cases"]["status"] == "pass"
+    on = small(tmp_path, {}, routes=routes)
+    assert on.contracts_unchecked(v1) == set()
+    with pytest.raises(ContractError) as e:
+        on.generic_decide(DecideRequest(state=ROW))
+    assert e.value.kind == "bad_config" and "routes.next_plan has contracts for options ['sideways']" in e.value.message
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads"])
+def test_switching_a_head_off_does_not_change_how_its_contracts_route_a_case(tmp_path, how):
+    """A contract that fits the trained head still routes its regression cases while the head is switched off:
+    switching a head off is not a retrain, and a case judges the model as trained. Only the check that every
+    contract names one of its options is skipped."""
+    small_table(tmp_path / "small.csv")
+    routes = {"next_plan": {"up": {"enabled": False}}}
+    on = small(tmp_path, {}, routes=routes)
+    v1 = train(on)["model"]
+    path = RG.cases_path(on.project)
+    RG.add_case(path, {"kind": "decide", "request": {"state": ROW, "heads": ["next_plan"]},
+                       "expect": {"action_at_most": "act"}})
+    cases = RG.load_cases(path)
+
+    def got(s):
+        return [(r["status"], r["got"]) for r in RG.run_cases(s, cases)["results"]]
+
+    when_on = got(on)
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}, routes=routes),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}, routes=routes)}[how]()
+    assert off.contracts_unchecked(v1) == {"next_plan"}
+    assert got(off) == when_on
+    with off.dry_run():
+        d = RG.as_trained(off).generic_decide(DecideRequest(state=ROW, model=v1, heads=["next_plan"]))
+    assert [c["option"] for c in d["heads"]["next_plan"]["considered"] if not c["kept"]] == ["up"]
+
+
+def test_a_label_tagged_regression_makes_no_case_for_a_head_rlcd_latest_has_not_trained(tmp_path):
+    """A partial train whose features differ leaves next_plan out of rlcd-latest, while the pack still defines and
+    serves it (with the uninformed prior). A late label for one of its decisions is checked against the pack's
+    current definition and kept, but makes no regression case: `rlcd regress` could not judge one (the uninformed
+    prior can neither pass nor fail a case), and `rlcd check` would fail regressions.cases on it."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {})
+    v1 = train(on)["model"]
+    d = on.generic_decide(DecideRequest(state=ROW, heads=["next_plan"]))
+    moved =small(tmp_path, {}, {"exclude": ["plan"]})       # another feature version
+    job = train(moved, heads=["churned"])
+    v2 = job["model"]
+    assert job["not_carried_over"] == ["next_plan"] and moved.bundle(v2).names() == ["churned"]
+    assert set(moved.specs(v2)) == {"churned", "next_plan"} and moved.switched_off(v2) == set()
+    with pytest.raises(ContractError) as e:         # checked against the pack's current definition
+        moved.feedback(FeedbackRequest(decision_id=d["decision_id"], label="sideways", source="crm"))
+    assert e.value.kind == "validation" and sorted(e.value.details["classes"]) == ["down", "same", "up"]
+    fb = moved.feedback(FeedbackRequest(decision_id=d["decision_id"], label="same", source="crm",
+                                        tags=["regression"]))
+    assert fb["stored"] and (fb["head"], fb["label"]) == ("next_plan", "same") and v1 != v2
+    assert fb["note"] == "used as an up-weighted training row at the next train"
+    assert fb["regression_case"] == {"stored": False, "reason": f"{v2} has no trained head 'next_plan', so "
+                                                                f"`rlcd regress` could not judge a case for it"}
+    assert not RG.cases_path(moved.project).exists()
+    assert checked(moved)["regressions.cases"]["status"] == "info"
+
+
+@pytest.mark.parametrize("how", ["pack_config", "heads", "removed"])
+def test_replay_compares_the_logged_decisions_of_a_switched_off_head(tmp_path, how):
+    """`rlcd replay` judges versions as trained, as regression cases do: the logged decisions of a head rlcd.yaml
+    switches off since are replayed with the trained head the version still has, giving the report they gave while
+    the head was on, not skipped as decisions of a head the version lacks."""
+    small_table(tmp_path / "small.csv")
+    on = small(tmp_path, {})
+    v1 = train(on)["model"]
+    for y in (0.1, 0.5, 0.9):
+        on.generic_decide(DecideRequest(state={**ROW, "y": y}))
+    rows = list(on.logs.decisions())
+    before = replay(on, v1, v1, rows)
+    assert set(before["heads"]) == {"churned", "next_plan"} and before["skipped"] == {}
+    off = {"pack_config": lambda: small(tmp_path, {"enabled": False}),
+           "heads": lambda: small(tmp_path, {}, heads={"next_plan": {"enabled": False}}),
+           "removed": lambda: small(tmp_path, None)}[how]()
+    assert off.switched_off(v1) == {"next_plan"}
+    after = replay(off, v1, v1, rows)
+    assert after["skipped"] == {} and after["heads"] == before["heads"]

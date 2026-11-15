@@ -790,6 +790,37 @@ def test_a_small_tabular_table_fails_with_one_clear_line_per_head(tmp_path, caps
     assert "rlcd: no head could be trained (outcome): nothing was saved." in io.err
 
 
+@pytest.mark.parametrize("step", ["commit", "bundle"])
+def test_a_job_that_fails_after_its_heads_trained_exits_1_and_says_why(tmp_path, capsys, monkeypatch, step):
+    """A job whose heads all trained but that failed in a later step is `failed`: in saving the new version
+    (`Registry.commit`: no model), or in reading it back once it was saved (`Registry.bundle`: `model` is set).
+    `rlcd train` prints the table, then the job's error and whether a version was saved, and exits 1 without the
+    "Next:" line. (It exited 0 without the error: it exited 1 only when a head failed and no model was saved.)"""
+    from open_rlcd.core.registry import Registry
+
+    root, home = tabular_project(tmp_path / "p"), tmp_path / "home"
+    real = getattr(Registry, step)
+    calls: list[str] = []
+
+    def broken(self, *args, **kwargs):
+        if not calls:
+            calls.append(step)
+            raise OSError("[Errno 28] No space left on device")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Registry, step, broken)
+    capsys.readouterr()
+    assert run(root, home, "train") == 1 and calls == [step]
+    io = capsys.readouterr()
+    saved = "nothing was saved" if step == "commit" else "rlcd-0.1.1 was saved"
+    assert io.out.startswith(f"model {'(none saved)' if step == 'commit' else 'rlcd-0.1.1'} — job failed\n"), io.out
+    row = next(line for line in io.out.splitlines() if line.startswith("outcome"))
+    assert row.split()[1] == "trained", row
+    assert io.err.strip().splitlines()[-1] == (f"rlcd: the job failed after its heads trained ({saved}): "
+                                               f"OSError: [Errno 28] No space left on device"), io.err
+    assert "Next:" not in io.out
+
+
 def test_a_missing_data_file_prints_its_error_and_no_empty_table(tmp_path, capsys):
     root = tabular_project(tmp_path / "nodata", n=None)
     capsys.readouterr()

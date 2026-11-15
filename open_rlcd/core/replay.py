@@ -26,6 +26,8 @@ Each version is judged as trained, so neither is favoured:
     helped by whose turn it is to serve;
   * the operator's rollout mode and kill switch are not applied (they cap both versions alike), and exploration
     (Thompson sampling) is off;
+  * every head a version has trained is replayed, also one rlcd.yaml switches off (switching a head off is not a
+    retrain), as regression cases judge it (core/regress.py `as_trained`);
   * the input guard applies as when serving: a state missing inputs almost every training row had is capped at
     confirm; the stakes are the logged ones (else the head's default in that version).
 
@@ -77,7 +79,8 @@ SKIPS = {
 }
 NOTES = [
     "both versions are judged as trained: each version's own holdout Bernoulli table gates act (not the live "
-    "ledger), no rollout cap or kill switch, no exploration; the input guard applies as when serving",
+    "ledger), no rollout cap or kill switch, no exploration, heads rlcd.yaml switches off included; the input guard "
+    "applies as when serving",
     "heads only: pack logic above the heads (plans, evidence caps), `allowed` options and route contracts are not "
     "re-run (use request-level regression cases for those)",
     "class = the most probable class (also for gate heads, whose decision always commits to `true`); p and bands = "
@@ -213,12 +216,14 @@ class _Out:
 def _context(service: Any, version: str, head: str) -> _Ctx:
     c = _Ctx(version)
     try:
-        specs = service.specs(version)
-        if head not in specs:
+        spec = service.specs(version).get(head)
+        loaded = service.loaded(version, head)
+        if spec is None and loaded is not None:
+            spec = loaded.spec      # trained, and switched off in rlcd.yaml: not a retrain, so judged as trained
+        if spec is None:
             c.problem = _Skip("head_missing", f"{version} has no head {head!r}")
             return c
-        c.spec = specs[head]
-        loaded = service.loaded(version, head)
+        c.spec = spec
         if loaded is None:
             c.problem = _Skip("untrained", f"head {head!r} is not trained in {version}")
             return c

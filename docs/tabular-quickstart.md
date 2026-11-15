@@ -143,6 +143,13 @@ Data notes:
   alone is not there (`payout_delay`: too few confident holdout rows).
 * **Data notes**: read them all once. They say what was left out, skipped, guessed or stored.
 
+`rlcd train` exits 1 when the job failed (and 2 on a configuration error): when training did not start, when no
+head could be trained, and when the heads trained but a later step failed, such as saving the new version.
+Its last line on stderr says what failed and whether a version was saved (when no head could be trained, the
+table gives each head's reason). A job where some heads
+failed and the others were saved (`partial`) exits 0 and names the failed heads on stderr, so
+`rlcd train && rlcd report` goes on to the report of the heads that trained.
+
 ```bash
 rlcd report          # MODEL_CARD.md + report.html (reliability diagrams) under var/reports/<version>/
 rlcd check           # the pre-launch checklist

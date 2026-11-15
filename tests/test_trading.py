@@ -10,9 +10,11 @@ import io
 import itertools
 import json
 import logging
+import re
 import traceback
 import zlib
 from datetime import UTC, datetime
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
@@ -380,6 +382,35 @@ def test_a_4xx_error_object_that_echoes_the_credentials_is_quoted_without_them(t
     assert e.value.status == 422 and e.value.kind == "quant_rejected", e.value.body()
     said = """quant sidecar /features: {'detail': 'bad credentials ***:*** for "basic"'}"""
     assert e.value.message == said, e.value.message
+
+
+def contract_errors() -> list[tuple[list[str], list[str], str]]:
+    """The rows of the error table of docs/contract.md: (statuses, kinds, when)."""
+    text = (Path(__file__).resolve().parent.parent / "docs" / "contract.md").read_text(encoding="utf-8")
+    table = text.split("| status | kind | when |\n|---|---|---|\n", 1)[1].split("\n\n", 1)[0]
+    rows = [line.strip("|").split(" | ", 2) for line in table.splitlines()]
+    return [(re.findall(r"\d{3}", status), re.findall(r"`([a-z_]+)`", kinds), when) for status, kinds, when in rows]
+
+
+@pytest.mark.parametrize("fail", [400, 403, 404, 500, 502])
+def test_contract_md_has_a_row_for_the_error_a_sidecar_answer_gives(tmp_path, fail):
+    """A 4xx from the sidecar is the 422 `quant_rejected` and a 5xx the 503 `connector_unavailable`: docs/contract.md
+    has a row with that status and kind that says it is the sidecar's answer and names each detail the body carries
+    (`quant_status`). (It had no row for `quant_rejected`.)"""
+    sidecar = FakeSidecar(rows=600)
+    svc = make(tmp_path, sidecar)
+    assert svc.trainer.start(TrainRequest(), wait=True)["status"] == "succeeded"
+    sidecar.fail = fail
+    r = TestClient(create_app(svc)).post("/v1/decide", json={"state": {"symbol": "XAUUSD"}, "heads": ["setup:15m"]})
+    answer = r.json()
+    assert (r.status_code, answer["kind"]) == ((422, "quant_rejected") if fail < 500 else
+                                               (503, "connector_unavailable")), answer
+    rows = [when for statuses, kinds, when in contract_errors()
+            if str(r.status_code) in statuses and answer["kind"] in kinds]
+    assert len(rows) == 1, rows
+    assert f"with a {fail // 100}xx" in rows[0], rows[0]
+    details = sorted(set(answer) - {"error", "kind", "retryable"})
+    assert all(f"`{d}`" in rows[0] for d in details), (details, rows[0])
 
 
 # ----------------------------------------------------------------------------- rlcd.yaml (config check, heads)

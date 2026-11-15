@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
+import httpx
 import numpy as np
 import pytest
 
@@ -12,7 +13,7 @@ from open_rlcd.connectors import local_vector
 from open_rlcd.connectors.base import ConnectorError, GraphStore, Hit, VectorStore, unavailable
 from open_rlcd.connectors.local_graph import LocalGraphStore, entities, normalize_entity
 from open_rlcd.connectors.local_vector import LocalVectorStore
-from open_rlcd.connectors.security import check_host, remote_allowed
+from open_rlcd.connectors.security import _host_of, check_host, is_loopback, remote_allowed
 from open_rlcd.core.config import Project
 from open_rlcd.core.contract import ContractError
 
@@ -50,6 +51,33 @@ def test_check_host_refuses_remote_hosts_by_default(target, monkeypatch):
 def test_check_host_rejects_empty(bad):
     with pytest.raises(ValueError):
         check_host(bad)
+
+
+# hosts with a `%`, as httpx reads them from a URL (as written: it decodes no percent-encoding in a host): an IPv6
+# address with a zone id (written `%25<zone>` in a URL, RFC 6874) is that address to the socket layer, whatever the
+# zone; anything else with a `%` is no address (IPv4 has no zone ids) but a name the socket layer looks up
+PERCENT_HOSTS = [("http://[::1%25lo0]:8080/v1", True), ("http://[::1%251]/", True), ("http://[::1%lo0]/", True),
+                 ("http://[::ffff:127.0.0.1%25eth0]/", True), ("http://[fe80::1%25eth0]/", False),
+                 ("http://127.0.0.1%25lo0:8080/", False), ("http://127.0.0.1%2e.evil.example/", False),
+                 ("http://127.0.0.1%2eevil.example:6333/", False), ("http://127.0.0.1%00.evil/", False),
+                 ("bolt://127.0.0.1%41:7687", False), ("http://%31%32%37.0.0.1/", False),
+                 ("http://local%68ost/", False)]
+
+
+@pytest.mark.parametrize(("url", "loopback"), PERCENT_HOSTS, ids=[u for u, _ in PERCENT_HOSTS])
+def test_a_host_with_a_percent_is_loopback_only_as_the_address_the_socket_layer_reads(url, loopback, monkeypatch):
+    """`is_loopback` reads a host with a `%` as the host httpx connects to: an IPv6 address with a zone id as that
+    address, and anything else as a name (refused unless remote hosts are allowed). (It cut the host at its first `%`,
+    so `127.0.0.1%2e.evil.example`, a name, passed as 127.0.0.1, and so did an IPv4 address with a `%25<zone>`.)"""
+    monkeypatch.delenv("RLCD_ALLOW_REMOTE", raising=False)
+    host = httpx.URL(url).host
+    assert _host_of(url) == host and is_loopback(host) is loopback, (url, host)
+    if loopback:
+        assert check_host(url) == host
+    else:
+        with pytest.raises(ValueError, match="RLCD_ALLOW_REMOTE=1"):
+            check_host(url)
+        assert check_host(url, allow_remote=True) == host
 
 
 def test_remote_allowed_sources(monkeypatch, tmp_path):

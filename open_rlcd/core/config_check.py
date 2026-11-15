@@ -959,6 +959,40 @@ def _with_defaults(key: Key, value: Any) -> Any:
     return out
 
 
+def _openai_shown(target: str) -> str:
+    """The `<base_url>|<model>` of an openai judge as `rlcd config show` prints it. The base URL (up to the last `|`,
+    as labeling/judges.py `make_judge` splits it) is one URL whose user info httpx sends as basic auth, so its whole
+    user info is redacted (core/redact.py `url`), and the model is scanned as free text. When the base URL has no
+    user info, the whole value is scanned as free text instead: a `|` in a password splits the login across the two
+    parts."""
+    base, bar, model = target.rpartition("|")
+    if not bar:                              # no model: make_judge refuses it, and all of it is the URL
+        base, model = target, ""
+    shown, found = redact_text(base, url=True)
+    if not found:
+        return redact_text(target)[0]
+    return f"{shown}{bar}{redact_text(model)[0]}"
+
+
+def _judge_shown(judge: str) -> str:
+    """`labeling.judge` as `rlcd config show` prints it: scanned as free text, except the `<base_url>|<model>` of an
+    `openai:` judge, shown by `_openai_shown`."""
+    kind, colon, arg = judge.partition(":")
+    if not colon or kind.strip().lower() != "openai":
+        return redact_text(judge)[0]
+    return f"{kind}:{_openai_shown(arg)}"
+
+
+def _model_is_openai_target(labeling: dict) -> bool:
+    """`labeling.model` holds the `<base_url>|<model>` of the judge: `labeling.judge` is `openai` with nothing after
+    the kind, so make_judge takes its argument from `labeling.model`."""
+    judge = labeling.get("judge")
+    if not isinstance(judge, str) or not isinstance(labeling.get("model"), str):
+        return False
+    kind, _, arg = judge.strip().partition(":")
+    return kind.strip().lower() == "openai" and not arg.strip()
+
+
 def environment() -> dict:
     """The environment variables open-rlcd reads: the value of a setting, `set` / `not set` for a secret."""
     out: dict[str, Any] = {}
@@ -971,8 +1005,10 @@ def environment() -> dict:
 def effective(project: Project, pack: Any = None) -> dict:
     """What the project resolves to: the file, the pack's defaults and the code's defaults merged, as
     `rlcd config show` prints it. A part that cannot be resolved carries {"error": ...} instead of raising.
-    `pack_config`, `routes` and `owners` are echoed as written, with anything that looks like a secret redacted (the
-    whole user info of a `pack_config` key the pack declares as one URL, `Key.url`)."""
+    `pack_config`, `routes`, `owners` and the sections shown with their defaults (`train`, `labeling`, `serve`,
+    `security`, `evaluate`) are echoed as written, with anything that looks like a secret redacted (the whole user info
+    of a `pack_config` key the pack declares as one URL, `Key.url`, of `labeling.base_url`, and of the base URL of an
+    `openai` judge, in `labeling.judge` or, for a bare `openai` judge, in `labeling.model`: `_openai_shown`)."""
     data = project.data if isinstance(project.data, dict) else {}
     s = schema()
     notes: list[dict] = []
@@ -1028,7 +1064,14 @@ def effective(project: Project, pack: Any = None) -> dict:
     out["policy"] = attempt(policy)
     out["rollout"] = attempt(lambda: Rollout.from_config(data.get("rollout")).to_dict())
     for name in ("train", "labeling", "serve", "security", "evaluate"):
-        out[name] = _with_defaults(s[name], data.get(name))
+        out[name] = redact(_with_defaults(s[name], data.get(name)))[0]
+    labeling = data.get("labeling") if isinstance(data.get("labeling"), dict) else {}
+    if isinstance(labeling.get("base_url"), str):
+        out["labeling"]["base_url"] = redact_text(labeling["base_url"], url=True)[0]
+    if isinstance(labeling.get("judge"), str):
+        out["labeling"]["judge"] = _judge_shown(labeling["judge"])
+    if _model_is_openai_target(labeling):
+        out["labeling"]["model"] = _openai_shown(labeling["model"])
 
     def batteries() -> dict:
         defaults = (pack.defaults() or {}).get("batteries") if pack is not None else None

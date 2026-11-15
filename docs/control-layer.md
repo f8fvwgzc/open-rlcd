@@ -217,7 +217,7 @@ them yourself.
 
 | stage | open-rlcd |
 |---|---|
-| offline | `rlcd replay --base A --candidate B`: logged decisions re-run under both versions (as trained: rollout full, kill switch on, each version's own holdout gate), with class and tier transitions, probability-band shifts and accuracy on rows with outcomes; `rlcd regress`: regression cases every version must pass (`rlcd case add --from-decision ID --head H --expect class=X`, or feedback tagged `regression`; kept in `regressions.jsonl` in the project, meant to be committed after review) |
+| offline | `rlcd replay --base A --candidate B`: logged decisions re-run under both versions (as trained: rollout full, kill switch on, each version's own holdout gate, heads rlcd.yaml switches off included), with class and tier transitions, probability-band shifts and accuracy on rows with outcomes; `rlcd regress`: regression cases every version must pass (`rlcd case add --from-decision ID --head H --expect class=X`, or feedback tagged `regression`; kept in `regressions.jsonl` in the project, meant to be committed after review), judged as trained as well: a head rlcd.yaml switches off still answers its cases |
 | shadow | `rollout.mode: shadow`: decisions are made, logged and returned, nothing is automated (capped at confirm, marked) — compare with your `baseline` |
 | assist | `rollout.mode: assist`: every decision is a recommendation a person confirms |
 | limited | `rollout.mode: limited` + `limited: {stakes: [low], heads: [...]}`: act only inside the slice |
@@ -252,8 +252,13 @@ abstention keeps meaning "the model cannot vouch for this".
   random sample; the report says so.
 * **Review queue**: `GET /v1/review` / `rlcd review` lists confirm and abstain decisions without feedback
   (`POST /v1/feedback`; an outcome or a confirmation does not remove an item), with the state, uncertainty and
-  reasons a reviewer needs. Feedback with `tags: ["regression"]` turns the corrected
-  case into a regression fixture; `missing_evidence` and `note` record what the reviewer found.
+  reasons a reviewer needs. A decision of a head switched off since, or left out by a later train, leaves it the
+  same way, and its label is kept for the head's next train. The label is checked against the trained head while
+  rlcd-latest has it, switched off or not; else against the pack's current definition while rlcd-latest serves the
+  head (with the uninformed prior); else against the version that made the decision (`heads.<head>.enabled` in
+  [configuration.md](configuration.md)). Feedback with `tags: ["regression"]` turns the corrected case into a
+  regression fixture (only for a head rlcd-latest has trained, a switched-off head included); `missing_evidence`
+  and `note` record what the reviewer found.
 * **Before launch**: `rlcd check` (or `GET /v1/check`; `--json` for CI, exit code 1 when an item fails) runs the
   guide's pre-launch checklist mechanically: an `rlcd.yaml` without errors (item `config.valid`, the findings of
   `rlcd config check`; every key is in [configuration.md](configuration.md)), heads trained with skill and

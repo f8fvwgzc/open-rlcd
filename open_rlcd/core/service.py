@@ -285,6 +285,15 @@ class Service:
         b = self.bundle(version)
         return switched_off(self.pack_for(version), self.project, b.names() if b is not None else ())
 
+    def contracts_unchecked(self, version: str) -> set[str]:
+        """The heads whose route contracts are not checked against the head: the heads the project switches off
+        (`switched_off`) that `version` does not serve. `rlcd check` (routes.contracts) and config check keep their
+        contracts unchecked, so they may name options the trained head lacks. A served decision never decides such a
+        head. The as-trained view of regression cases does (`regress.as_trained`): it asks this of the service it was
+        made from, and applies the contracts to the trained head without the check, ignoring an option it lacks."""
+        specs = self.specs(version)
+        return {name for name in self.switched_off(version) if name not in specs}
+
     def untrained_hint(self, version: str) -> str:
         """What to add to an error when `version` is the untrained service ('' for a trained version)."""
         if self.bundle(version) is not None:
@@ -295,12 +304,47 @@ class Service:
     def spec(self, head: str, version: str, question: str | None = None) -> HeadSpec:
         specs = self.specs(version)
         if head not in specs:
-            raise ContractError(
-                f"no head named {head!r}. RLCD only answers questions bound to a trained head: set the "
-                f"question's `head` field (or use a head name as the question id)."
-                + (self.untrained_hint(version) if not specs else ""), kind="unknown_head",
-                question=question, available_heads=list(specs))
+            raise self._no_head(head, version, specs, question)
         return specs[head]
+
+    def _no_head(self, head: str, version: str, specs: dict, question: str | None = None) -> ContractError:
+        return ContractError(
+            f"no head named {head!r}. RLCD only answers questions bound to a trained head: set the "
+            f"question's `head` field (or use a head name as the question id)."
+            + (self.untrained_hint(version) if not specs else ""), kind="unknown_head",
+            question=question, available_heads=list(specs))
+
+    def label_spec(self, head: str, version: str, decision: dict | None = None) -> tuple[HeadSpec, str | None]:
+        """The head a label for `head` is checked against (POST /v1/feedback), and, when `version` does not serve
+        that head, the version whose trained head it is (None when served). A served head is checked as served: its
+        trained head, or the pack's current definition for a head the pack defines that `version` has not trained
+        (one a partial train left out), the classes its next train uses. A head the project switches off
+        (`switched_off`) still takes labels while `version` has it trained. The label of a decision is checked
+        against the version that made the decision only when `version` neither serves nor has trained the head (a
+        removed tabular target under `features: auto` is dropped by the next train). So every decision of a trained
+        head can be labelled, and leave the review queue. Without a trained head to check with, the label is refused
+        with 422 `unknown_head`, as `spec` refuses the head."""
+        specs = self.specs(version)
+        if head in specs:
+            return specs[head], None
+        b = self.bundle(version)
+        if b is not None and head in b.names():      # trained, and switched off in rlcd.yaml
+            return b.head(head).spec, version
+        made_by = (decision or {}).get("model")
+        checked = [version]
+        if isinstance(made_by, str) and made_by and made_by != version:
+            checked.append(made_by)
+            try:
+                mb = self.bundle(made_by)
+                if mb is not None and head in mb.names():
+                    return mb.head(head).spec, made_by
+            except Exception:  # a version no longer registered, or a bundle that does not load: nothing to check with
+                pass
+        if head in self.switched_off(version):
+            raise ContractError(f"head {head!r} is switched off in rlcd.yaml and not trained in "
+                                f"{' or '.join(checked)}: there is no trained head to check a label against",
+                                kind="unknown_head", available_heads=list(specs))
+        raise self._no_head(head, version, specs)
 
     def loaded(self, version: str, head: str) -> LoadedHead | None:
         b = self.bundle(version)
@@ -368,17 +412,27 @@ class Service:
             raise ContractError(f"rlcd.yaml {e}", kind="bad_config", status=500) from None
 
     def filter_options(self, specs: dict[str, HeadSpec], request: dict | None,
-                       heads: Sequence[str] | None = None) -> tuple[dict[str, tuple[str, ...]], dict[str, list]]:
+                       heads: Sequence[str] | None = None, *,
+                       version: str | None = None) -> tuple[dict[str, tuple[str, ...]], dict[str, list]]:
         """Deterministic filters before the semantic choices: the request's `allowed` options intersected with the
         route contracts that survive its `capabilities` / `sensitivity` / `latency_budget_ms`.
         Returns ({head: options kept}, {head: [{option, kept, reason}]}); a head absent from the first map is
-        unrestricted. An empty tuple means every option was removed."""
+        unrestricted. An empty tuple means every option was removed.
+        A head in `contracts_unchecked` (asked of `version`, else of the request's `model`) has its contracts
+        applied without the check that they name only its options, since rlcd check keeps them unchecked while it is
+        off; a contract for an option it lacks is ignored. Only the as-trained view of regression cases decides such
+        a head, and it then routes as it did while switched on."""
         request = request or {}
         names = list(heads) if heads is not None else list(specs)
         names = [n for n in names if n in specs]
         raw = request_allowed(request.get("allowed"), names)
         book = self.routes()
         cons = Constraints.from_request(request)
+        routed = [n for n in names if book.has(n)]
+        unchecked: set[str] = set()
+        if routed:
+            unchecked = self.contracts_unchecked(version if version is not None else self.resolve(request.get("model")))
+            routed = [n for n in routed if n not in unchecked or specs[n].type == "choice"]
         allowed: dict[str, tuple[str, ...]] = {}
         considered: dict[str, list] = {}
         for name in names:
@@ -386,8 +440,9 @@ class Service:
             keep: list[str] | None = None
             if name in raw:
                 keep = list(self.check_allowed(spec, raw[name]))
-            if book.has(name):
-                book.check_head(name, spec)
+            if name in routed:
+                if name not in unchecked:
+                    book.check_head(name, spec)
                 kept, cons_list = book.filter(name, spec.classes, cons)
                 if keep is not None:   # options the request removed itself are reported as such
                     cons_list = [c if c["option"] in keep or not c["kept"]
@@ -980,7 +1035,7 @@ class Service:
         extra = req.model_extra or {}
         strict = bool(extra.get("strict"))
         hspecs = {name: self.spec(name, version) for name in names}
-        allowed, considered = self.filter_options(hspecs, extra, names)
+        allowed, considered = self.filter_options(hspecs, extra, names, version=version)
         warnings: list[str] = []
         results, logged = {}, {}
         for name in names:
@@ -1047,7 +1102,9 @@ class Service:
                     question = key   # a /v1/systemone receipt: one head may be asked in several questions
         if not head:
             raise ContractError("head is required (or a decision_id of a single-head decision, which implies it)")
-        spec = self.spec(head, version)
+        # a head rlcd.yaml switched off, or one the served model no longer has, still takes the labels of the
+        # decisions it made: checked against its trained head, kept for the next train that trains it
+        spec, unserved = self.label_spec(head, version, decision)
         try:
             yi = spec.label_index(req.label)
         except ValueError as e:
@@ -1104,10 +1161,25 @@ class Service:
                 update = {"updated": False, "reason": "the decision was made by a model version other than the one "
                                                       "the posterior table belongs to"}
         saved = self.logs.add_feedback(row)
+        if unserved is None:
+            note = "used as an up-weighted training row at the next train"
+        elif unserved == version:
+            note = (f"head '{head}' is switched off in rlcd.yaml: kept as an up-weighted training row for the first "
+                    f"train after it is switched on again")
+        else:
+            note = (f"{version} has no head '{head}': checked against {unserved}, the version that made the "
+                    f"decision, and kept as an up-weighted training row for a later train of '{head}'")
         out = {"id": saved["id"], "stored": True, "head": head, "label": label,
-               "feedback_rows": self.logs.feedback_counts().get(head, 0), "bernoulli": update,
-               "note": "used as an up-weighted training row at the next train"}
-        if "regression" in (req.tags or []):
+               "feedback_rows": self.logs.feedback_counts().get(head, 0), "bernoulli": update, "note": note}
+        tagged = "regression" in (req.tags or [])
+        latest = self.bundle(version) if tagged else None
+        if tagged and (latest is None or head not in latest.names()):
+            # `rlcd regress` judges a case with the head the version has trained (a switched-off head included).
+            # rlcd-latest has none to judge this one with: it dropped the head, or the pack defines a head that no
+            # train has trained yet or that a partial train left out (its answer is the uninformed prior)
+            out["regression_case"] = {"stored": False, "reason": f"{version} has no trained head '{head}', so "
+                                                                 f"`rlcd regress` could not judge a case for it"}
+        elif tagged:
             from . import regress as RG  # a reviewer's correction becomes a case every later version must pass
 
             try:
